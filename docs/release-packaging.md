@@ -102,3 +102,8 @@ No analytics, scripts, external fonts or cookies are added to the policy site.
 `release/` is gitignored. Version `0.1.0` is kept consistent across
 `package.json`, `package-lock.json`, and `public/manifest.json`; the owner
 chooses the final release version before publication.
+
+The deployed policy for this project is
+[Privacy Policy](https://github.tsahaoyu.com/usvisa-ca-extension/privacy-policy.html).
+GitHub Pages uses the account’s existing custom domain; HTTPS is enforced for
+this project site.

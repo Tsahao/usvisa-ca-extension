@@ -41,7 +41,7 @@ your configuration before starting Book or Alerts.
 
 ## Privacy
 
-Read the [published privacy policy](https://tsahao.github.io/usvisa-ca-extension/privacy-policy.html)
+Read the [published privacy policy](https://github.tsahaoyu.com/usvisa-ca-extension/privacy-policy.html)
 ([source](docs/privacy-policy.md)). Credentials and settings
 persist in `chrome.storage.local`, restricted to trusted extension contexts;
 Chrome Sync is not used. Local storage is **not an encrypted password vault**.
