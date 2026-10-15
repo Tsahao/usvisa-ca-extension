@@ -1,0 +1,9 @@
+:root { font-family: system-ui, sans-serif; color: #17212b; background: #f5f6f8; }
+body { margin: 0; padding: 32px; }
+main { max-width: 680px; margin: 40px auto; background: white; border: 1px solid #dce0e4; border-radius: 16px; padding: 32px; }
+h1 { font-size: 26px; }
+p { font-size: 15px; line-height: 1.6; }
+dl { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 20px 0; }
+dt { font-weight: 600; } dd { margin: 0; overflow-wrap: anywhere; }
+button { font: inherit; border: 0; border-radius: 8px; padding: 12px 16px; background: #185c3d; color: white; cursor: pointer; }
+button:focus-visible { outline: 3px solid #3769ef; outline-offset: 3px; }

@@ -1,0 +1,18 @@
+import { SESSION_AGE_MINUTES } from '../domain/timing';
+import { parkForReview, type EngineState } from './workflow';
+
+export function policyKey(preferences: Record<string, unknown> | undefined): string {
+  const keys = ['consulate', 'earliest', 'latest', 'onlyEarlier', 'testMode', 'interval', 'paidIvr', 'unpaidIvr'];
+  return JSON.stringify(keys.map(key => preferences?.[key] ?? null));
+}
+
+export function reviewLifecycle(state: EngineState, preferences: Record<string, unknown> | undefined, now: string): EngineState {
+  if (state.status !== 'running') return state;
+  const elapsed = state.startedAt === null ? Infinity : Date.parse(now) - Date.parse(state.startedAt);
+  const key = policyKey(preferences);
+  const interval = preferences?.interval ?? 60;
+  if (!Number.isInteger(interval) || (interval as number) < 60 || (interval as number) > 86400) return parkForReview(state, now);
+  if (elapsed < 0 || elapsed >= SESSION_AGE_MINUTES * 60_000 || (state.policyKey !== null && state.policyKey !== key))
+    return parkForReview(state, now);
+  return state.policyKey === null ? { ...state, policyKey: key, pollIntervalS: interval as number, updatedAt: now } : state;
+}

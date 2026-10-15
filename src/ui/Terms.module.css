@@ -1,0 +1,13 @@
+/* Terms-local inset. Base scroll/typography comes from Panel.module.css (.terms).
+   Figma 55:60689 uses the outer 20px inset plus Terms-Chrome px40 pt24; the doubled selector keeps this
+   padding override ahead of the shared single-class rule. Analytics section
+   omitted per first-release scope. */
+.terms.terms {
+  padding: 44px 40px 28px;
+}
+
+/* Figma bottom reading space. */
+.spacer {
+  height: 8px;
+  flex-shrink: 0;
+}

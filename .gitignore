@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-test/
+dist-analytics-test/
+release/
+coverage/
+test-results/
+playwright-report/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+*.tsbuildinfo
+.artifacts/
+.local/

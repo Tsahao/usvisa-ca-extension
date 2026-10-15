@@ -1,0 +1,21 @@
+.coffee { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; padding-bottom: 138px; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 46px 24px 0; scrollbar-width: thin; }
+.coffee h2 { font-family: 'Arial Narrow', 'Helvetica Neue', sans-serif; font-stretch: condensed; font-size: 30px; font-weight: 400; line-height: 36px; letter-spacing: -1.2px; text-align: center; margin: 0; }
+.currencies { display: flex; justify-content: center; margin: 52px auto 32px; height: 38px; }
+.currencies button { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 1px 20px; border: 0; border-radius: 9px; background: transparent; color: black; font-size: 17px; font-stretch: condensed; }
+.currencies button[aria-pressed=true] { background: linear-gradient(#ededed, #fff); box-shadow: 1.25px 0 0 -.75px #d0d0d0, -1.25px 0 0 -.75px #d0d0d0, 0 0 0 .5px #e8e8e8, 0 8px 15px #00000005; }
+.currencies button:disabled { opacity: .4; }
+.flag { position: relative; width: 20px; height: 20px; flex-shrink: 0; border-radius: 50%; overflow: hidden; outline: .5px solid #0000001f; mask: url('/assets/coffee/flag-mask.svg') center / 20px 20px no-repeat; }
+.us img { position: absolute; width: 38.824px; height: 20.471px; left: -5.06px; top: 0; object-fit: cover; }
+.caBackground { position: absolute; left: 0; top: 0; }
+.caLeaf { position: absolute; width: 24.031px; height: 12px; left: -2px; top: 3.647px; object-fit: cover; }
+.caLeft, .caRight { position: absolute; width: 4.118px; height: 16.353px; background: #d62b1e; top: 1.882px; }
+.caLeft { left: 0; }
+.caRight { left: 15.882px; }
+.amount { width: var(--content-card-width); max-width: 100%; height: 135px; margin: 0 auto; padding: 0 17px; display: flex; align-items: center; justify-content: space-between; background: #fff; border: 1px solid #d9d9d9; border-radius: 12px; }
+.amount button { width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0; border: 0; background: none; }
+.amount button:disabled { opacity: .35; }
+.amount input { width: 100%; min-width: 0; padding: 0; border: 0; background: none; text-align: center; color: #000; font-family: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 74px; font-weight: 500; line-height: normal; }
+.checkout { color: #0091ff; }
+.checkout:disabled { opacity: .4; }
+.footer { color: #0003; }

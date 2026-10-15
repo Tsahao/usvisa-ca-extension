@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="icon" type="image/png" href="./icons/icon32.png"><title>US Visa Scheduler for Canada — Development Probe</title></head>
+  <body>
+    <main>
+      <h1>US Visa Scheduler for Canada</h1>
+      <p>Development inspection and worker controls. This technical screen is separate from the product panel.</p>
+      <p>The Read buttons inspect only. Binding and Poll now can arm the worker, advance paid Test Mode gateways, fill fields, or create unpaid notifications. For the initial read-only validation, do not use binding, polling, or baseline reset. No automatic login, payment, appointment submit, or final confirmation is implemented.</p>
+      <dl id="status"></dl>
+      <button id="wake" type="button">Test background wake-up in one minute</button>
+      <p id="result" role="status"></p>
+      <p>Read-only live adapter checks. Click the extension toolbar icon on the matching official page first, then run the matching read here. Identifiers stay in the worker; only counts come back.</p>
+      <button id="read-dashboard" type="button">Read dashboard links on the active tab</button>
+      <button id="read-summary" type="button">Read availability summary on the active tab</button>
+      <button id="read-form" type="button">Read appointment form on the active tab</button>
+      <p id="read-result" role="status"></p>
+      <p>Live group binding for a separately agreed worker test. Save your paid/unpaid IVRs in configuration first; use synthetic email/password for manual-login testing. Select the dashboard with the toolbar icon, then resolve. Binding persists a probe-owned run and can arm later worker execution; it is not an inspection-only test.</p>
+      <button id="resolve-paid" type="button">Resolve and bind paid group</button>
+      <button id="resolve-unpaid" type="button">Resolve and bind unpaid group</button>
+      <button id="stop-run" type="button">Stop probe run</button>
+      <p id="bind-result" role="status"></p>
+      <p>Poll control. Binds a deadline of now on the running bound run; the alarm loop still plans, budgets, and executes.</p>
+      <button id="poll-now" type="button">Poll now</button>
+      <button id="reset-baseline" type="button">Reset monitor baseline</button>
+      <button id="engine-status" type="button">Engine status</button>
+      <p>To check page access, open the official visa website yourself and click the extension toolbar icon there.</p>
+    </main>
+    <script type="module" src="/src/probe.ts"></script>
+  </body>
+</html>

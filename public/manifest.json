@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "US Visa Scheduler for Canada",
+  "version": "0.1.0",
+  "description": "Monitor available US visa appointments at consulates in Canada and automatically book one that fits user’s preferred date range.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "activeTab", "scripting", "notifications"],
+  "host_permissions": ["https://ais.usvisa-info.com/*"],
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Open US Visa Scheduler for Canada" },
+  "web_accessible_resources": [{ "resources": ["panel.html", "assets/*"], "matches": ["https://ais.usvisa-info.com/*"] }]
+}

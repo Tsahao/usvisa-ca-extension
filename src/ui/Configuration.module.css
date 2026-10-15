@@ -1,0 +1,58 @@
+/* Configuration-local layout. Shared rows/groups/footer come from Panel.module.css.
+   Figma 66:28710 (collapsed) snaps Terms to the bottom of the scroll area
+   above the 84px Save/Cancel footer; advanced.txt (expanded) snaps it to the
+   bottom of the list after Reset Advanced, reached by scrolling. */
+.scroll {
+  display: block;
+  padding-bottom: 0;
+}
+
+/* Fills the scroll viewport so margin-top:auto snaps the link to the bottom
+   when collapsed, and sits in normal flow after Reset Advanced when expanded. */
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* Hyperlink (never a form submit); lives outside the disabled fieldsets so it
+   stays available while settings are locked. */
+.termsLink {
+  margin-top: auto;
+  align-self: center;
+  padding: 20px 10px 12px;
+  color: #0088ff;
+  font-size: 12px;
+  line-height: 22px;
+  text-transform: uppercase;
+  font-stretch: condensed;
+  text-decoration: none;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* Figma 67:29728 locked Settings: fixed notice above the scroll area, with the
+   form content and Save/Cancel footer dimmed while any worker workflow runs.
+   Cancel and Terms stay enabled so users can leave or read terms; fieldsets
+   and Save remain disabled. */
+.lockedNotice {
+  margin: 0;
+  padding: 16px 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #1a1f26;
+  font-size: 13px;
+  line-height: 19px;
+  font-weight: 500;
+  text-align: center;
+}
+
+.lockedNotice svg {
+  flex-shrink: 0;
+}
+
+.locked {
+  opacity: 0.3;
+}
