@@ -14,7 +14,7 @@ export function HomeScreen({ choose, openTerms, testMode }: { choose: (mode: Mod
         <img className={styles.reflectionBottom} src="assets/reflection-bottom.svg" alt="" />
         <img className={styles.maple} src="assets/maple.svg" alt="" />
       </div>
-      <h2 className={styles.title}>US Visa Scheduler for Canada</h2>
+      <h2 className={styles.title}>US Visa Scheduler</h2>
       <p className={styles.subtitle}>For Consulates In Canada</p>
       <div className={styles.cards}>
         <button

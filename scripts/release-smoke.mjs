@@ -39,7 +39,7 @@ for (const runtime of ['background.js', 'panel.html', 'panel.js']) {
   check(existsSync(join(distDir, runtime)), `dist contains ${runtime}`);
 }
 const panelHtml = existsSync(join(distDir, 'panel.html')) ? readFileSync(join(distDir, 'panel.html'), 'utf8') : '';
-check(panelHtml.includes(`<title>${PRODUCT_NAME}</title>`), 'panel.html title uses the product name');
+check(panelHtml.includes('<title>US Visa Scheduler</title>'), 'panel.html title uses the approved short display name');
 // Production must not ship the developer probe page or its mutation tools.
 for (const dev of ['probe.html', 'probe.js']) {
   check(!existsSync(join(distDir, dev)), `dist omits developer surface ${dev}`);
