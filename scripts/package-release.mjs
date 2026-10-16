@@ -14,7 +14,7 @@ mkdirSync(release, { recursive: true });
 const generated = {
   LICENSE: readFileSync(join(root, 'LICENSE')),
   'THIRD_PARTY_LICENSES.txt': thirdPartyLicenses(root),
-  'SOURCE.txt': `US Visa Scheduler for Canada ${pkg.version}\nLicense: GPL-3.0-only; see LICENSE.\nCorresponding Source snapshot: ${slug}-source.zip.\nPublisher action required: host that exact source archive publicly and provide\nclear download directions alongside every binary distribution. The Web Store\ndoes not automatically serve the source archive. A dirty working-tree snapshot\ncannot be reproduced from HEAD alone. Source build instructions are inside\nSOURCE_VERSION.txt in the source archive.\n`,
+  'SOURCE.txt': `US Visa Scheduler for Canada ${pkg.version}\nLicense: GPL-3.0-only; see LICENSE.\nCorresponding Source: https://github.com/Tsahao/usvisa-ca-extension/tree/v${pkg.version}\nSource ZIP: https://github.com/Tsahao/usvisa-ca-extension/archive/refs/tags/v${pkg.version}.zip\nBuild instructions: README.md in the source archive.\nRequires Node.js 22.12+ on a supported Node release: npm ci && npm run check.\nOptional production analytics configuration is documented in .env.example;\nprivate build configuration is never included in the source archive.\nRelease publishers must verify that the published tag matches all runtime\nsource files before distributing this ZIP.\n`,
 };
 const output = join(release, `${slug}.zip`);
 const digest = deterministicArchive(dist, filesUnder(dist), generated, output);

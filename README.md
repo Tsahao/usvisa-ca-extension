@@ -87,12 +87,18 @@ OFF; this is user-reported evidence, not an independent live retest.
 ```sh
 npm run check
 npm run package:release
-npm run package:source
 ```
 
-Packages and SHA-256 sidecars are written to ignored `release/`. The runtime
-ZIP is the Chrome Web Store upload; publish its matching source ZIP alongside
-the distribution. See [release packaging](docs/release-packaging.md).
+The built extension ZIP and SHA-256 sidecar are written to ignored `release/`.
+Attach them to the matching GitHub Release; GitHub's automatic **Source code
+(zip)** download provides the tagged source. Keep each version tag matched to
+its extension build. A separate custom source ZIP is optional, rather than a
+normal release attachment. See [release packaging](docs/release-packaging.md).
+
+For manual installation, extract the built ZIP, open `chrome://extensions`,
+enable **Developer mode**, choose **Load unpacked**, and select the extracted
+folder containing `manifest.json`. Updates to an unpacked installation are
+manual. Chrome Web Store installation is a separate distribution channel.
 
 `npm run prepare:public` creates a separate, allowlisted public source folder
 under `release/github-public/`. It includes source, tests, build scripts,

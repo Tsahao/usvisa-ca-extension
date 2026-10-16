@@ -1,7 +1,7 @@
 # Release packaging
 
 How the production `dist/` build differs from development/test builds, and how
-to produce the clean Web Store ZIP and its corresponding source package for
+to produce the built extension ZIP and publish its corresponding source for
 **US Visa Scheduler for Canada**.
 
 ## Build flavors
@@ -45,7 +45,6 @@ iframe fixture's scoped resources.
 ```sh
 npm run check            # unit tests + tsc + production build + release smoke checks
 npm run package:release  # release/…zip + .sha256 (smoke checks run first)
-npm run package:source   # release/…-source.zip + .sha256 + version record
 ```
 
 - `scripts/release-smoke.mjs` asserts the exact product name/version, the
@@ -81,13 +80,36 @@ npm run package:source   # release/…-source.zip + .sha256 + version record
   synthetic private-file/symlink exclusions. This does not promise byte-identical
   builds across different Node/platform/ZIP versions or analytics configurations.
 
-Host the matching source ZIP publicly and provide download directions alongside
-the binary distribution; Web Store submission does not host it automatically.
-The source snapshot—not a dirty checkout's HEAD—is the corresponding source.
+Attach the built extension ZIP and its SHA-256 sidecar to the GitHub Release for
+the matching version tag. Use GitHub's automatic **Source code (zip)** and
+**Source code (tar.gz)** downloads for the tagged source; a duplicate custom
+source archive is not a normal release attachment. `npm run package:source`
+remains available for optional standalone/offline source snapshots.
+
+The built ZIP's `SOURCE.txt` points to the matching public tag and GitHub's
+automatic source ZIP, with build instructions. Confirm that the tag contains
+all runtime build inputs before publishing. When updating historical releases,
+build from their original tags rather than today's development checkout; keep
+the tags unchanged and disclose any packaging-only changes in the release notes.
+Older downloads may name a custom source archive; their matching tagged source
+is still available through the release's automatic source downloads.
+
+Keep source download directions alongside the binary distribution; Web Store
+submission does not host source automatically. The matching tagged source—not
+a different development HEAD—is the corresponding source.
 Use `.env.example` for optional analytics build configuration; actual
 `.env.local` is never included. Publisher identity, public source/policy URLs,
 analytics retention/consent decisions and asset rights remain publisher
 responsibilities. Packaging checks do not establish privacy/legal compliance.
+
+## Install a GitHub release
+
+Download `us-visa-scheduler-for-canada-VERSION.zip`, rather than a source ZIP.
+Extract it, open `chrome://extensions`, enable **Developer mode**, click
+**Load unpacked**, and choose the extracted folder containing `manifest.json`.
+Keep that folder in place while using the extension. To update, replace it with
+the newer extracted version and reload the extension; there are no automatic
+GitHub updates. A ZIP is not installed by double-clicking it.
 
 ## Clean public repository and privacy site
 
