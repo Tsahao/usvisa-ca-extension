@@ -57,13 +57,24 @@ npm run package:source   # release/…-source.zip + .sha256 + version record
   `icons/`, `LICENSE`, generated `SOURCE.txt` and complete
   `THIRD_PARTY_LICENSES.txt`) at the ZIP root. Staging is isolated in a temporary
   directory; no files in `dist/` are overwritten or removed.
-- `scripts/package-source.mjs` snapshots only explicit project root files and
-  the `src/`, `public/`, `tests/`, `scripts/`, `docs/` trees. Required untracked
+- `scripts/package-source.mjs` uses the same public-file allowlist as
+  `prepare:public`: explicit project root files, the `src/`, `public/`, `tests/`
+  and `scripts/` trees, and only the finished privacy/site and packaging docs.
+  Agent instructions (`AGENTS.md` at any depth), internal planning, incident
+  notes and owner checklists are excluded. Required untracked
   source assets are included; arbitrary root files, build outputs, dependencies,
   private directories, environment files other than `.env.example`, key files
   and symlinks are not accepted. Review the allowlisted source/docs for private
   content before publication; filename filtering is not content-level auditing.
+  Both export paths refuse unfinished public documentation.
   `SOURCE_VERSION.txt` and complete third-party licenses are inside the archive.
+- To repair a historical source asset, start from that version's existing public
+  tag, not today's development tree. Preserve all tagged build inputs and
+  licenses, verify the extracted archive with `npm ci && npm run check`, and
+  publish a matching SHA-256 sidecar. Document the source-asset correction in the
+  release notes; do not move the tag or rebuild/replace the Chrome upload ZIP.
+  Older tags predate the shared public-file safeguard, so do not run their
+  packaging scripts against a development checkout containing internal notes.
 - Both ZIPs sort file entries, fix timestamps and permissions, strip extra ZIP
   metadata, and use UTC. Repeated packaging of unchanged inputs yields identical
   hashes on the same ZIP toolchain. `npm run test:packaging` verifies this and
@@ -99,7 +110,7 @@ is `https://OWNER.github.io/REPOSITORY/privacy-policy.html`. Verify that this UR
 loads publicly before entering it in the Chrome Web Store privacy-policy field.
 No analytics, scripts, external fonts or cookies are added to the policy site.
 
-`release/` is gitignored. Version `0.1.0` is kept consistent across
+`release/` is gitignored. Keep the release version consistent across
 `package.json`, `package-lock.json`, and `public/manifest.json`; the owner
 chooses the final release version before publication.
 

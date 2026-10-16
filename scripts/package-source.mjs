@@ -5,9 +5,16 @@ import { fileURLToPath } from 'node:url';
 import { deterministicArchive, filesUnder, thirdPartyLicenses } from './archive-utils.mjs';
 
 export const sourceRoots = ['src', 'public', 'tests', 'scripts', 'docs'];
-export const sourceFiles = ['.env.example', '.gitignore', 'AGENTS.md', 'LICENSE', 'README.md',
+export const sourceFiles = ['.env.example', '.gitignore', 'LICENSE', 'README.md',
   'package.json', 'package-lock.json', 'index.html', 'panel.html', 'probe.html',
   'tsconfig.json', 'vite.config.ts', 'vitest.config.ts', 'playwright.config.ts'];
+
+// Shared by source ZIPs and the clean public checkout. New internal docs must
+// never become public merely because they were added under docs/.
+const publicDocs = new Set([
+  'docs/privacy-policy.md', 'docs/release-packaging.md',
+  'docs/index.html', 'docs/privacy-policy.html', 'docs/site.css', 'docs/.nojekyll',
+]);
 
 export function sourceInventory(root) {
   const files = [...sourceFiles.filter(file => existsSync(join(root, file))),
@@ -19,7 +26,14 @@ export function sourceInventory(root) {
         /\.(?:pem|key|p12|pfx|crt|cer|har|log|sqlite|db|zip|tsbuildinfo)$/i.test(file) ||
         parts.some(part => /[\r\n]/.test(part))) throw new Error(`Source archive refuses sensitive/output file: ${file}`);
   }
-  return files.sort();
+  const publicFiles = files.filter(file => !file.split('/').includes('AGENTS.md') &&
+    (!file.startsWith('docs/') || publicDocs.has(file)));
+  for (const file of publicFiles.filter(file => file === 'README.md' || file.startsWith('docs/'))) {
+    if (/OWNER INPUT|\/Users\/|\(draft\)/i.test(readFileSync(join(root, file), 'utf8'))) {
+      throw new Error(`Finish public documentation before exporting: ${file}`);
+    }
+  }
+  return publicFiles.sort();
 }
 
 export function packageSource(root) {
