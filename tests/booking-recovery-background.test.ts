@@ -3,6 +3,9 @@
 // mocked chrome APIs. No real accounts, tabs, or notifications.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ENGINE_KEY } from '../src/engine/workflow';
+import { webcrypto } from 'node:crypto';
+import { createDateHistory } from '../src/engine/history';
+import type { EngineState } from '../src/engine/workflow';
 
 type Listener = (message: unknown, sender: unknown, respond: (value: unknown) => void) => unknown;
 
@@ -63,7 +66,7 @@ describe('background verification success discrimination', () => {
       },
     };
     vi.stubGlobal('chrome', chromeMock);
-    vi.stubGlobal('crypto', { randomUUID: () => 'fresh-run-uuid-0001' });
+    vi.stubGlobal('crypto', { randomUUID: () => 'fresh-run-uuid-0001', subtle: webcrypto.subtle });
     await import('../src/background');
   });
 
@@ -118,6 +121,18 @@ describe('background verification success discrimination', () => {
   const bookedTargetRosterChanged = { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'November 19, 2026', applicantIds: ['77777777'] };
   const unbookedOk = { scheduleId: '11111111', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: ['77777777', '88888888'] };
   const unbookedRosterChanged = { scheduleId: '11111111', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: ['77777777'] };
+
+  it.each(['success', 'failed', 'uncertain'] as const)('promotes history to Yes only after a verified successful outcome (%s)', async outcome => {
+    await seedVerifying({ reads: outcome === 'success' ? ['2026-11-19', '2026-11-19'] : ['2027-06-21', '2027-06-21'] });
+    const state = stored.engineStateV1 as EngineState;
+    const history = createDateHistory({ area: chromeMock.storage.local, now: () => new Date().toISOString(), schedule: async () => {} });
+    await history.observe({ ...state, status: 'running' }, 'Vancouver', '2026-11-19', new Date(Date.parse(state.intent!.createdAt) - 1000).toISOString());
+    await history.attempted(state);
+    mockReads(outcome === 'success' ? [bookedTarget] : outcome === 'failed' ? [bookedPrevRosterChanged] : [new Error('Synthetic unreadable result')]);
+    await send({ type: 'ENGINE_VERIFY', owner: 'owner-token-01', runId: 'run-id-0001' });
+    const response = await send({ type: 'PANEL_HISTORY' });
+    expect(response).toMatchObject({ ok: true, rows: [{ earliestDate: '2026-11-19', booked: outcome === 'success' ? 'Yes' : 'Attempted' }] });
+  });
 
   it('does not record success for a failed old-date outcome blocked by roster', async () => {
     await seedVerifying({ reads: ['2027-06-21', '2027-06-21'] });

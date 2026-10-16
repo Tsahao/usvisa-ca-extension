@@ -243,7 +243,7 @@ export function readAppointmentForm(): AppointmentFormRaw {  const path = locati
 // Missing prose is uncertain; only an explicit unbooked marker yields null.
 export type CurrentAppointmentRaw =
   | { scheduleId: string; ivr: string; kind: 'booked' | 'unbooked'; text: string | null; applicantIds?: string[] }
-  | { scheduleId: string; ivr: string; kind: 'read-failure'; text: null; status: number; applicantIds?: never };
+  | { scheduleId: string; ivr: string; kind: 'read-failure'; text: null; status: number; redirected?: boolean; applicantIds?: never };
 
 export async function readCurrentAppointment(scheduleId: string, ivr: string, fresh = false, includeApplicants = false, dashboardPath?: string, reportReadFailure = false): Promise<CurrentAppointmentRaw> {
   if (!/^[0-9]{1,32}$/.test(scheduleId) || !/^[0-9]{1,32}$/.test(ivr)) throw new Error('Invalid appointment identity.');
@@ -265,14 +265,25 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string, fr
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), 15_000);
     let status = 0;
+    let redirected = false;
     try {
       // Without a validated account path, start at the site root: it
       // redirects to the account dashboard when signed in, while the bare
       // dashboard route 403s. Only a same-origin dashboard landing is read.
       const entryRoot = dashboardPath === undefined && !onDashboard;
       const response = await fetch(`https://ais.usvisa-info.com${dashboardPath ?? (onDashboard ? currentPath : '/en-ca/niv/')}`, {
-        credentials: 'same-origin', cache: 'no-store', redirect: entryRoot ? 'follow' : 'error', signal: controller.signal,
+        credentials: 'same-origin', cache: 'no-store', redirect: entryRoot ? 'follow' : 'manual', signal: controller.signal,
       });
+      // An expired session redirects the dashboard GET toward sign-in. With
+      // redirect:manual the browser exposes that only as an opaqueredirect
+      // (status 0, no Location, no target inference). Never follow it here;
+      // the worker decides a fixed sign-in recovery from the typed flag.
+      const responseType = (response as unknown as { type?: unknown }).type;
+      if (!entryRoot && responseType === 'opaqueredirect') {
+        status = 0;
+        redirected = true;
+        throw new Error('Dashboard read failed.');
+      }
       status = response.status;
       if (response.status !== 200) throw new Error('Dashboard read failed.');
       if (entryRoot) {
@@ -292,8 +303,10 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string, fr
       // page function throws. Polling opts into a plain transport result so
       // failed GETs stay distinguishable from invalid returned roster data.
       // Context changes and all later group/roster parse failures still refuse.
+      // An expired-session redirect is typed with redirected:true (status 0);
+      // ordinary transport failures omit the flag and stay generic.
       if (!trusted(location.href) || location.href !== currentHref) throw new Error('Appointment context changed.');
-      if (reportReadFailure === true) return { scheduleId, ivr, kind: 'read-failure', text: null, status: status === 200 ? 0 : status };
+      if (reportReadFailure === true) return { scheduleId, ivr, kind: 'read-failure', text: null, status: status === 200 ? 0 : status, ...(redirected ? { redirected: true as const } : {}) };
       throw new Error('Dashboard read failed.');
     } finally { clearTimeout(deadline); }
   }

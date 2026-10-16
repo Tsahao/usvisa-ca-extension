@@ -1,5 +1,40 @@
 import { test, expect } from '@playwright/test';
 
+test('Settings waits for field completion instead of warning ahead of the user', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Book or reschedule For Paid Visa Group' }).click();
+  const panel = page.getByRole('region', { name: 'US Visa Scheduler for Canada' });
+  const alert = panel.getByRole('alert');
+  const save = panel.getByRole('button', { name: 'Save', exact: true });
+  await expect(alert).toHaveCount(0);
+  await expect(save).toBeDisabled();
+  await page.getByLabel('Email', { exact: true }).fill('synthetic@example.invalid');
+  await expect(alert).toHaveCount(0);
+  await page.getByLabel('Password', { exact: true }).fill('synthetic-password');
+  await expect(alert).toHaveCount(0);
+  await page.getByLabel('Consulate', { exact: true }).selectOption('Calgary');
+  await expect(alert).toHaveCount(0);
+  await page.getByLabel('Earliest Acceptable').fill('2026-11-01');
+  await page.getByLabel('Latest Acceptable').focus();
+  await expect(alert).toHaveCount(0);
+  await expect(save).toBeDisabled();
+  await page.getByLabel('Latest Acceptable').fill('2027-12-31');
+  await expect(alert).toHaveCount(0);
+  await expect(save).toBeEnabled();
+  await page.getByLabel('Password', { exact: true }).fill('');
+  await expect(alert).toHaveCount(0);
+  await expect(save).toBeDisabled();
+  await page.getByLabel('Email', { exact: true }).focus();
+  await expect(alert).toHaveText('Enter your visa account password.');
+  await page.getByLabel('Password', { exact: true }).focus();
+  await expect(alert).toHaveCount(0);
+  await page.getByLabel('Password', { exact: true }).fill('synthetic-password');
+  await page.getByLabel('Email', { exact: true }).focus();
+  await expect(alert).toHaveCount(0);
+  await save.click();
+  await expect(panel.getByRole('button', { name: 'Start preview' })).toBeVisible();
+});
+
 test('Figma screens, assets and responsive panel', async ({ page }) => {
   const failures: string[] = [];
   page.on('pageerror', error => failures.push(error.message));

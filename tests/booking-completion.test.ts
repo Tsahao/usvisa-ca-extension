@@ -54,6 +54,36 @@ function harness(testMode: boolean, initial = false, gate: true | false | string
 }
 
 describe('complete synthetic submission, confirmation and recovery', () => {
+  it.each([false, true])('records only a dispatched live submission as Attempted, without gating the click (Test Mode=%s)', async testMode => {
+    const h = harness(testMode, true, false);
+    h.deps.onBookingAttempt = vi.fn(() => { throw new Error('Synthetic history failure'); });
+    await runBookingStage(h.deps, h.state);
+    if (testMode) {
+      expect(h.deps.onBookingAttempt).not.toHaveBeenCalled();
+      expect(h.submit).not.toHaveBeenCalled();
+    } else {
+      expect(h.deps.onBookingAttempt).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        intent: expect.objectContaining({ targetDate: '2026-11-19', testMode: false }), executor: expect.objectContaining({ actionPending: true }),
+      }));
+      expect(h.submit).toHaveBeenCalledOnce();
+    }
+  });
+
+  it.each(['refused', 'lost-reply'] as const)('distinguishes an explicit zero-click refusal from an uncertain attempt (%s)', async outcome => {
+    const h = harness(false, true, outcome === 'refused' ? '{malformed' : false);
+    h.deps.onBookingAttempt = vi.fn();
+    const original = h.deps.inject;
+    h.deps.inject = async (...args) => {
+      const response = await original(...args);
+      if (outcome === 'lost-reply' && args[1].name === 'performAppointmentSubmission') throw new Error('Synthetic lost reply');
+      return response;
+    };
+    const next = await runBookingStage(h.deps, h.state);
+    expect(next.status).toBe('verifying');
+    expect(h.deps.onBookingAttempt).toHaveBeenCalledTimes(outcome === 'refused' ? 0 : 1);
+    expect(h.submit).toHaveBeenCalledTimes(outcome === 'refused' ? 0 : 1);
+  });
+
   it.each(['stop', 'stop-missing-dialog', 'settings'])('does not confirm when %s arrives during the read-only dialog wait', async change => {
     const h = harness(false);
     const submitted = await runBookingStage(h.deps, h.state);

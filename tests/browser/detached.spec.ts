@@ -12,6 +12,9 @@ test('detached panel dimensions, workflow tabs, pinpointing and independent moni
   try {
     await context.route('https://ais.usvisa-info.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic Visa fixture</title><h1>Offline fixture</h1>' }));
     await context.route('https://example.invalid/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic browsing fixture</title><h1>Another website</h1>' }));
+    // Guard only: Chrome starts the extension's own checkout tab before Playwright
+    // can attach, so this route cannot intercept that navigation. The checkout
+    // assertion below stubs the tab creation instead and asserts the exact URL.
     await context.route('https://buy.stripe.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic checkout</title><h1>Offline Stripe fixture</h1>' }));
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
@@ -68,11 +71,24 @@ test('detached panel dimensions, workflow tabs, pinpointing and independent moni
     await expect(panel.getByRole('button', { name: 'Coffee', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(panel.getByRole('textbox', { name: 'Amount in USD' })).toHaveValue('5');
     await panel.getByRole('button', { name: 'Increase amount' }).click();
+    // Chrome opens the extension's checkout tab before Playwright can attach, so no
+    // route can intercept that navigation. Record the requested destination and send
+    // the tab to an inert local page instead, keeping the assertion exact and offline.
+    await panel.evaluate(() => {
+      const requested: string[] = [];
+      (window as any).__checkoutRequests = requested;
+      const create = chrome.tabs.create.bind(chrome.tabs);
+      (chrome.tabs as any).create = (options: chrome.tabs.CreateProperties) => {
+        requested.push(String(options.url));
+        return create({ ...options, url: 'about:blank' });
+      };
+    });
+    const checkoutRequests = () => panel.evaluate(() => (window as any).__checkoutRequests as string[]);
     const checkoutPage = context.waitForEvent('page');
     await panel.getByRole('button', { name: 'Continue to Stripe' }).click();
     const checkout = await checkoutPage;
-    await checkout.waitForURL('https://buy.stripe.com/fZu8wIfiZbhs8PU41r8EM00?prefilled_amount=600');
-    await expect(checkout.getByRole('heading', { name: 'Offline Stripe fixture' })).toBeVisible();
+    expect(await checkoutRequests()).toEqual(['https://buy.stripe.com/fZu8wIfiZbhs8PU41r8EM00?prefilled_amount=600']);
+    expect(checkout.url()).toBe('about:blank');
     await expect(panel.getByRole('heading', { name: 'Buy me a coffee?' })).toBeVisible();
     expect(await region.locator('img').evaluateAll(images => images.every(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
     await panel.screenshot({ path: 'test-results/detached-coffee.png' });
@@ -83,8 +99,12 @@ test('detached panel dimensions, workflow tabs, pinpointing and independent moni
     const cadCheckoutPage = context.waitForEvent('page');
     await panel.getByRole('button', { name: 'Continue to Stripe' }).click();
     const cadCheckout = await cadCheckoutPage;
-    await cadCheckout.waitForURL('https://buy.stripe.com/4gM5kw2wdado3vA9lL8EM01?prefilled_amount=600');
-    await expect(cadCheckout.getByRole('heading', { name: 'Offline Stripe fixture' })).toBeVisible();
+    expect(await checkoutRequests()).toEqual([
+      'https://buy.stripe.com/fZu8wIfiZbhs8PU41r8EM00?prefilled_amount=600',
+      'https://buy.stripe.com/4gM5kw2wdado3vA9lL8EM01?prefilled_amount=600',
+    ]);
+    expect(cadCheckout.url()).toBe('about:blank');
+    expect(context.pages().filter(page => page.url().includes('buy.stripe.com'))).toHaveLength(0);
     await expect(panel.getByRole('heading', { name: 'Buy me a coffee?' })).toBeVisible();
     await cadCheckout.close();
     await panel.getByRole('button', { name: 'Booking', exact: true }).click();
@@ -107,7 +127,7 @@ test('detached panel dimensions, workflow tabs, pinpointing and independent moni
     const layout = () => region.evaluate(node => {
       const box = node.getBoundingClientRect();
       const button = node.querySelector('button[aria-label="Start"]')!.getBoundingClientRect();
-      const footer = Array.from(node.querySelectorAll('p')).find(p => p.textContent?.startsWith('Current appointment'))!.getBoundingClientRect();
+      const footer = Array.from(node.querySelectorAll('p')).find(p => /^(Current|No current) appointment/.test(p.textContent ?? ''))!.getBoundingClientRect();
       const stats = node.querySelector('h2')!.getBoundingClientRect();
       return { buttonBottom: box.bottom - button.bottom, footerBottom: box.bottom - footer.bottom, statsTop: stats.top - box.top };
     });

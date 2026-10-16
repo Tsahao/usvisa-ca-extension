@@ -15,6 +15,37 @@ async function preview() {
 }
 
 describe('Figma interface behavior', () => {
+  it('opens View Logs with Back only and retains the unsaved Settings draft/disclosure', async () => {
+    const user = await preview();
+    await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    await user.clear(screen.getByLabelText('Checking interval (s)'));
+    await user.type(screen.getByLabelText('Checking interval (s)'), '120');
+    await user.click(screen.getByRole('button', { name: 'View Logs' }));
+    expect(screen.getByText('No available dates are recorded')).not.toBeNull();
+    const nav = screen.getByRole('navigation');
+    expect(within(nav).getAllByRole('button')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    expect((screen.getByLabelText('Checking interval (s)') as HTMLInputElement).value).toBe('120');
+    expect(screen.getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('lets an active workflow view history while Settings remain locked, without stopping the run', async () => {
+    const user = await preview();
+    await user.selectOptions(screen.getByLabelText('Preview scenario'), 'running');
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    expect(screen.getByLabelText('Email').matches(':disabled')).toBe(true);
+    expect((screen.getByRole('button', { name: 'View Logs' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Reset Advanced' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'View Logs' }));
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('button', { name: 'Stop preview' })).not.toBeNull();
+  });
+
   it('opens Coffee from booking success and returns to the same result', async () => {
     const user = await preview();
     await user.selectOptions(screen.getByLabelText('Preview scenario'), 'success');
@@ -114,6 +145,16 @@ describe('Figma interface behavior', () => {
     expect(screen.getByLabelText('Email').matches(':disabled')).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('button', { name: 'Stop preview' })).not.toBeNull();
+  });
+
+  it('shows two separated dashes, not one em dash, for missing values', async () => {
+    const user = await preview();
+    await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
+    await user.click(screen.getByRole('button', { name: 'Book or reschedule For Paid Visa Group' }));
+    const earliest = screen.getByRole('heading', { name: 'Earliest Available' }).parentElement!;
+    expect(within(earliest).getByText('- -')).toBeDefined();
+    expect(screen.getByText('No current appointment')).toBeDefined();
+    expect(document.body.textContent).not.toContain('—');
   });
 
   it('keeps a run on hide/tab navigation and requires explicit Stop', async () => {

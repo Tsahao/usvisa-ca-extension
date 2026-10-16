@@ -456,6 +456,19 @@ describe('website adapter readers', () => {
     await expect(serialized('11111111', '22222222', true, true, '/en-ca/niv/groups/99999999')).rejects.toThrow();
   });
 
+  it('types an expired-session redirect as a denied flag without following it', async () => {
+    const serialized: typeof readCurrentAppointment = new Function(`return (${readCurrentAppointment.toString()})`)();
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    const fetchMock = vi.fn(async () => ({ status: 0, type: 'opaqueredirect', text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(serialized('11111111', '22222222', true, true, '/en-ca/niv/groups/55555555', true))
+      .resolves.toEqual({ scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', text: null, status: 0, redirected: true });
+    expect(fetchMock).toHaveBeenCalledWith('https://ais.usvisa-info.com/en-ca/niv/groups/55555555',
+      expect.objectContaining({ redirect: 'manual', credentials: 'same-origin', cache: 'no-store' }));
+    // Without the opt-in flag the redirect still refuses rather than binding.
+    await expect(serialized('11111111', '22222222', true, true, '/en-ca/niv/groups/55555555')).rejects.toThrow('Dashboard read failed.');
+  });
+
   it('never converts changed context or malformed successful dashboard markup into transport permission', async () => {
     const serialized: typeof readCurrentAppointment = new Function(`return (${readCurrentAppointment.toString()})`)();
     const location = { href: 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment' };
@@ -497,7 +510,7 @@ describe('website adapter readers', () => {
     const serialized: typeof readCurrentAppointment = new Function(`return (${readCurrentAppointment.toString()})`)();
     const reading = await serialized('11111111', '22222222', true, false, route === 'appointment' ? dashboardPath : undefined);
     expect(reading).toMatchObject({ kind: 'booked', text: '6 November, 2026 Reschedule' });
-    expect(fetchMock).toHaveBeenCalledWith(`https://ais.usvisa-info.com${dashboardPath}`, expect.objectContaining({ redirect: 'error', credentials: 'same-origin', cache: 'no-store' }));
+    expect(fetchMock).toHaveBeenCalledWith(`https://ais.usvisa-info.com${dashboardPath}`, expect.objectContaining({ redirect: 'manual', credentials: 'same-origin', cache: 'no-store' }));
   });
   it.each(['https://example.invalid/en-ca/niv/groups', '//example.invalid/en-ca/niv/groups', '/en-ca/niv/groups/55555555?account=other', '/en-ca/niv/groups/55555555#other', '/en-ca/niv/groups/../users/sign_in', '/en-ca/niv/groups/66666666'])('rejects arbitrary or changed dashboard targets before fetching (%s)', async dashboardPath => {
     vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });

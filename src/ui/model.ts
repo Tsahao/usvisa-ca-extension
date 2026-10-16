@@ -1,4 +1,4 @@
-import { CONSULATES, isIsoDate, validatePreferences, type Consulate } from '../domain/dates';
+import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
 
 export const TERMS_VERSION = 'ui-preview-1';
 export const CITIES = Object.keys(CONSULATES) as Consulate[];
@@ -26,16 +26,34 @@ export const DEMO_AVAILABILITY = ['2026-12-21', '2026-12-22', '2026-12-23', '202
 export const DEMO_APPOINTMENT = '2027-06-21';
 export const EMPTY_RUN: Run = { mode: 'booking', status: 'idle', lastChecked: null };
 
-export function preferencesError(prefs: Preferences): string | null {
+export type PreferenceIssue = { fields: (keyof Preferences)[]; message: string };
+
+export function preferenceIssues(prefs: Preferences): PreferenceIssue[] {
+  const issues: PreferenceIssue[] = [];
   // No email-format gate by user decision: owners enter their own account
   // email, and a wrong address fails at sign-in instead of blocking setup.
-  if (!prefs.password) return 'Enter your visa account password.';
-  if (!CITIES.includes(prefs.consulate as Consulate)) return 'Select a consulate.';
-  try { validatePreferences({ ...prefs, exclusions: [] }); } catch (error) { return (error as Error).message; }
-  if (!Number.isInteger(prefs.interval) || prefs.interval < 60 || prefs.interval > 86400) return 'Checking interval must be a whole number from 60 to 86400 seconds.';
-  if ([prefs.paidIvr, prefs.unpaidIvr].some(value => value !== '' && !/^\d+$/.test(value))) return 'IVR groups must contain digits only.';
-  return null;
+  if (!prefs.password) issues.push({ fields: ['password'], message: 'Enter your visa account password.' });
+  if (!CITIES.includes(prefs.consulate as Consulate)) issues.push({ fields: ['consulate'], message: 'Select a consulate.' });
+  for (const field of ['earliest', 'latest'] as const) {
+    if (!isIsoDate(prefs[field])) issues.push({ fields: [field], message: 'Choose a valid inclusive date window.' });
+  }
+  if (isIsoDate(prefs.earliest) && isIsoDate(prefs.latest) && prefs.earliest > prefs.latest)
+    issues.push({ fields: ['earliest', 'latest'], message: 'Choose a valid inclusive date window.' });
+  if (!Number.isInteger(prefs.interval) || prefs.interval < 60 || prefs.interval > 86400)
+    issues.push({ fields: ['interval'], message: 'Checking interval must be a whole number from 60 to 86400 seconds.' });
+  for (const field of ['paidIvr', 'unpaidIvr'] as const) {
+    if (prefs[field] !== '' && !/^\d+$/.test(prefs[field])) issues.push({ fields: [field], message: 'IVR groups must contain digits only.' });
+  }
+  return issues;
 }
+
+export function preferencesError(prefs: Preferences): string | null {
+  return preferenceIssues(prefs)[0]?.message ?? null;
+}
+
+// Figma renders a missing value as a pair of dashes. A single em dash reads as
+// one continuous line, so keep the two marks visibly apart.
+export const NO_VALUE = '- -';
 
 export function formatDate(value: string | null): string {
   if (!value) return 'Unavailable';

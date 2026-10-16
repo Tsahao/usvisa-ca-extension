@@ -1,6 +1,6 @@
 # Privacy Policy — US Visa Scheduler for Canada
 
-Effective date: October 15, 2026.
+Effective date: October 16, 2026.
 
 Publisher: loose ends studio.
 
@@ -26,6 +26,12 @@ booking-success record are stored locally in your Chrome profile using
 `chrome.storage.local`. Temporary window and tab references use
 `chrome.storage.session`. Chrome Sync is not used. Storage access is restricted
 to trusted extension contexts.
+
+View Logs also stores a local history of selected-consulate earliest-date
+changes, check times and booking outcomes. It retains at most 100 rows from
+the last 24 hours. Internal comparison and attempt references are hashed;
+history records contain no credentials, raw visa/applicant identifiers, portal
+URLs or page content. History is not sent to analytics or the publisher.
 
 **Local storage is not an encrypted password vault.** Someone with access to
 your device or Chrome profile may be able to read it. Protect your device and
@@ -113,6 +119,12 @@ clear-all-data button in the first release. Uninstalling removes this
 extension's local storage from that profile and stops future extension
 activity. It does not delete records already held by the official portal,
 PostHog or Stripe.
+
+View Logs hides rows after 24 hours and prunes expired history on extension
+wake, the scheduled cleanup alarm or a history read. Cleanup can wait while
+Chrome is closed or suspended; reopening the extension prunes expired rows.
+Unchanged availability can remain in the separate current-observation and
+workflow records described above.
 
 The extension panel has no analytics opt-out switch. To stop future analytics,
 uninstall the extension or use a source build compiled with

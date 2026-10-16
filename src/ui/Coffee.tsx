@@ -56,6 +56,6 @@ export function Coffee({ trackScroll, onError }: { trackScroll: (event: UIEvent<
       </div>
     </div>
     <button type="button" className={`${panel.runButton} ${styles.checkout}`} aria-label="Continue to Stripe" disabled={!valid || !PAYMENT_LINKS[currency] || opening} onClick={() => void checkout()}><ArrowRight size={28} /></button>
-    <p className={`${panel.workflowFooter} ${styles.footer}`}>Payment handled by Stripe</p>
+    <p className={panel.workflowFooter}>Payment handled by Stripe</p>
   </section>;
 }

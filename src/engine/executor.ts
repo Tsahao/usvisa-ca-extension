@@ -33,6 +33,8 @@ export type ExecDeps = {
   // prevents injection; an interrupted checkpoint parks on worker wake.
   saveState: (state: EngineState) => Promise<void>;
   isCancelled?: () => boolean;
+  // Best-effort local history only; never awaited or allowed to gate an action.
+  onBookingAttempt?: (state: EngineState) => void;
 };
 
 type Prefs = {
@@ -91,6 +93,18 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     nextPollAt: new Date(Date.parse(deps.nowIso()) + delayMs).toISOString(), updatedAt: deps.nowIso(),
   });
   const retry = () => applyPollResult(state, { outcome: 'retryable', now: deps.nowIso(), random: deps.random });
+  // Both dashboard handoff and sole-applicant re-entry use fresh baseline
+  // GETs. A classified transport failure needs the shared retry/cooldown
+  // budget, not a permanent safety pause. Invalid/changed readings still
+  // reach the strict baseline/roster checks; unresolved intent never retries.
+  const baselineFailure = (raw: unknown): EngineState | null => {
+    const reading = raw as { scheduleId?: unknown; ivr?: unknown; kind?: unknown; status?: unknown } | null;
+    if (state.intent || reading?.kind !== 'read-failure' || reading.scheduleId !== scheduleId || reading.ivr !== state.group!.ivr ||
+        typeof reading.status !== 'number' || !Number.isInteger(reading.status) || reading.status < 0 || reading.status > 599) return null;
+    if (deps.isCancelled?.()) return park();
+    return mapHttpStatus(reading.status) === 'denied'
+      ? applyPollResult(state, { outcome: 'denied', now: deps.nowIso(), random: deps.random }) : retry();
+  };
   const trusted = (tab: ExecTab) => tab.url !== undefined &&
     ((['actions', 'appointment'].includes(classifyRoute(tab.url)) && isSameGroupUrl(tab.url, scheduleId)) ||
       (state.stage === 'actions' && state.group!.dashboardPath !== undefined && classifyRoute(tab.url) === 'dashboard' &&
@@ -137,7 +151,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   if (classifyRoute(owned.url!) === 'dashboard') {
     if (!state.group!.dashboardPath || !state.group!.applicantIds || !await prefsUnchanged()) return park();
     try {
-      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath]);
+      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]);
+      const failure = baselineFailure(baseline);
+      if (failure) return failure;
       if (appointmentDate(baseline, state.group!) !== state.group!.currentDate) return park();
     } catch { return park(); }
     state = { ...state, executor: { ...state.executor!, actionPending: true }, updatedAt: deps.nowIso() };
@@ -161,7 +177,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       // Revalidate the independent complete roster before relying on a form
       // with no applicant IDs. Warning/selection pages keep their own guards.
       if (!state.group!.dashboardPath) return park();
-      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath]);
+      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]);
+      const failure = baselineFailure(baseline);
+      if (failure) return failure;
       if (appointmentDate(baseline, state.group!) !== state.group!.currentDate) return park();
       implicitApplicantId = state.group!.applicantIds[0];
       page = await inject(readPaidPage, [scheduleId, implicitApplicantId]) as PaidPage;
@@ -351,10 +369,14 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       state = { ...state, executor: { ...state.executor!, actionPending: true } };
       try { await deps.saveState(state); } catch { return verify(); }
       if (deps.isCancelled?.() || !await prefsUnchanged()) return verify();
+      const noteAttempt = () => { try { deps.onBookingAttempt?.(state); } catch { /* History is independent of booking. */ } };
       try {
         const result = await inject(performAppointmentSubmission, [submission('submit', date, time)]) as { ok?: boolean };
+        // Explicit refusal proves the guard never clicked. A missing reply
+        // cannot establish that, so it stays an unconfirmed attempt.
+        if (result?.ok !== false) noteAttempt();
         if (result?.ok !== true) return verify();
-      } catch { return verify(); }
+      } catch { noteAttempt(); return verify(); }
       state = { ...state, intent: { ...state.intent!, phase: 'submitted' }, executor: { ...state.executor!, actionPending: false } };
       return pace('confirm');
     }

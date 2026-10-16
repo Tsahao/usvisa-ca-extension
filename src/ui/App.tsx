@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type UIEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { ChevronLeft, Play, Square, RotateCw, CalendarCheck, TriangleAlert } from 'lucide-react';
 import { earliestCandidate } from '../domain/dates';
-import { CITIES, DEMO_APPOINTMENT, DEMO_AVAILABILITY, DEMO_DATES, DEMO_PREFERENCES, EMPTY_PREFERENCES, calendarDays, cityLabel, earliestObserved, formatDate, preferencesError, shiftMonth, type Mode, type Preferences, type Run, type RunStatus } from './model';
+import { CITIES, DEMO_APPOINTMENT, DEMO_AVAILABILITY, DEMO_DATES, DEMO_PREFERENCES, EMPTY_PREFERENCES, NO_VALUE, calendarDays, cityLabel, earliestObserved, formatDate, preferencesError, shiftMonth, type Mode, type Preferences, type Run, type RunStatus } from './model';
 import { isExtension, loadUiState, saveLastMode, savePreferences, saveRun } from './storage';
 import { focusVisaTab, PanelCommandError, panelCommand, retryRestartCommand } from './engine';
 import { fitCurrentPanelWindow } from '../panel-window';
@@ -12,9 +12,11 @@ import { HomeScreen } from './HomeScreen';
 import { Configuration } from './Configuration';
 import { Terms } from './Terms';
 import { Coffee } from './Coffee';
+import { History } from './History';
+import type { HistoryRow } from '../domain/history';
 import styles from './Panel.module.css';
 
-type View = 'home' | 'config' | 'workflow' | 'terms' | 'coffee';
+type View = 'home' | 'config' | 'workflow' | 'terms' | 'coffee' | 'history';
 type TermsOrigin = 'home' | 'config' | null;
 const activeStatuses: RunStatus[] = ['running'];
 const embedded = new URLSearchParams(location.search).has('embedded');
@@ -78,14 +80,14 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
       {title ? <button className={styles.secondary} onClick={configure}>{message.detail}</button> : <p className={styles.bookedDate}>{message.detail}</p>}
       {!title && run.status === 'success' && run.mode === 'booking' && <button className={`${styles.secondary} ${styles.coffeeLink}`} onClick={openCoffee}>Buy me a coffee?</button>}
     </div> : <>
-      <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : cityLabel(preferences.consulate)}</h2><p>{hasData ? formatDate(run.mode === 'booking' ? observed : cityDate(preferences.consulate)) : '—'}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? '—'}</p></div></div>
-      {run.mode === 'booking' ? <Calendar key={simulated ? 'preview' : observed ?? 'empty'} available={hasData ? availability : []} initialMonth={simulated ? '2026-12' : observed?.slice(0, 7) ?? new Date().toISOString().slice(0, 7)} /> : <div className={`${styles.group} ${styles.consulates}`} aria-label="Other consulate dates">{CITIES.filter(city => city !== preferences.consulate).map(city => <div className={styles.row} key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : '—'}</span></div>)}</div>}
+      <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : cityLabel(preferences.consulate)}</h2><p>{hasData ? formatDate(run.mode === 'booking' ? observed : cityDate(preferences.consulate)) : NO_VALUE}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? NO_VALUE}</p></div></div>
+      {run.mode === 'booking' ? <Calendar key={simulated ? 'preview' : observed ?? 'empty'} available={hasData ? availability : []} initialMonth={simulated ? '2026-12' : observed?.slice(0, 7) ?? new Date().toISOString().slice(0, 7)} /> : <div className={`${styles.group} ${styles.consulates}`} aria-label="Other consulate dates">{CITIES.filter(city => city !== preferences.consulate).map(city => <div className={styles.row} key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : NO_VALUE}</span></div>)}</div>}
     </>}
     </div>
     <button className={`${styles.runButton} ${active || title ? styles.red : styles.green}`} aria-label={`${active ? 'Stop' : run.status === 'idle' && !retrying ? 'Start' : 'Retry'}${simulated ? ' preview' : ''}`} onClick={() => void change(active ? 'idle' : 'running')}>
       {active ? <Square size={22} fill="currentColor" strokeWidth={0} /> : run.status === 'idle' && !retrying ? <Play size={24} fill="currentColor" strokeWidth={0} /> : <RotateCw size={28} />}
     </button>
-    {(message || run.mode === 'booking') && <p className={`${styles.workflowFooter}${title ? ` ${styles.failureFooter}` : ''}`}>{message?.footer ?? `Current appointment   ${currentDate && (hasData || !simulated) ? formatDate(currentDate) : '—'}`}</p>}
+    {(message || run.mode === 'booking') && <p className={`${styles.workflowFooter}${title ? ` ${styles.failureFooter}` : ''}`}>{message?.footer ?? (currentDate && (hasData || !simulated) ? `Current appointment   ${formatDate(currentDate)}` : 'No current appointment')}</p>}
   </div>;
 }
 
@@ -96,6 +98,7 @@ export function App() {
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
   const [termsOrigin, setTermsOrigin] = useState<TermsOrigin>(null);
   const [coffeeFromConfig, setCoffeeFromConfig] = useState(false);
+  const [previewHistory, setPreviewHistory] = useState(false);
   const [ready, setReady] = useState(false);
   const [hidden, setHidden] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -291,7 +294,12 @@ export function App() {
       : (panelFailure && panelFailure.mode === run.mode ? panelFailure.kind : null))
     : null;
   const activeTab = view === 'workflow' ? run.mode : view === 'config' ? 'settings' : view === 'coffee' ? 'coffee' : null;
-  const keepConfigMounted = view === 'config' || (view === 'terms' && termsOrigin === 'config') || (view === 'coffee' && coffeeFromConfig);
+  const keepConfigMounted = view === 'config' || view === 'history' || (view === 'terms' && termsOrigin === 'config') || (view === 'coffee' && coffeeFromConfig);
+  const previewRows: HistoryRow[] = useMemo(() => previewHistory ? Array.from({ length: 14 }, (_, index) => ({
+    id: `synthetic-history-${index}`, checkedAt: new Date(Date.now() - index * 3600_000).toISOString(),
+    earliestDate: ['2026-11-19', '2027-01-20', '2026-12-31', '2026-12-30'][index % 4],
+    booked: index === 0 ? 'Yes' : index === 2 || index === 3 ? 'Attempted' : 'No',
+  })) : [], [previewHistory]);
   // Figma 96:23766: saved Test Mode shows one orange line at the panel bottom
   // on every view except Settings, which keeps Save/Cancel at the bottom.
   const showTestMode = ready && preferences.testMode && view !== 'config';
@@ -308,13 +316,14 @@ export function App() {
       <button className={styles.previewButton} onClick={hide}>Hide panel</button>
       <button className={styles.previewButton} onClick={() => { setHidden(false); setPendingMode(pendingMode ?? run.mode); setView('config'); }}>Open configuration</button>
       <button className={styles.previewButton} onClick={() => { setHidden(false); setPendingMode(null); setTermsOrigin('home'); setView('terms'); }}>Review terms</button>
+      <label>Logs<select aria-label="Preview date history" value={previewHistory ? 'history' : 'empty'} onChange={event => setPreviewHistory(event.target.value === 'history')}><option value="empty">Empty history</option><option value="history">Synthetic history</option></select></label>
       <p className={styles.previewNote}>Calendar tiles show availability only. Hiding the panel preserves the preview run; Stop ends it.</p>
       {isExtension && import.meta.env.MODE !== 'production' && <a href="probe.html">Open development probe</a>}
     </aside>}
     {hidden ? <button className={styles.reopen} onClick={() => setHidden(false)}>Show scheduler · {run.status}</button> : <div className={styles.panelWrap}>
       <section className={`${styles.panel}${showTestMode ? ` ${styles.testModeOn}` : ''}`} aria-label="US Visa Scheduler for Canada">
-        {view !== 'home' && (view === 'terms' ? <nav className={`${styles.toolbar} ${styles.toolbarTerms}${toolbarScrolled ? ` ${styles.toolbarScrolled}` : ''}`} aria-label="Scheduler navigation">
-          <button aria-label="Back" className={styles.tab} onClick={backFromTerms}><ChevronLeft size={20} /></button>
+        {view !== 'home' && (view === 'terms' || view === 'history' ? <nav className={`${styles.toolbar} ${styles.toolbarTerms}${toolbarScrolled ? ` ${styles.toolbarScrolled}` : ''}`} aria-label="Scheduler navigation">
+          <button aria-label="Back" className={styles.tab} onClick={view === 'history' ? () => setView('config') : backFromTerms}><ChevronLeft size={20} /></button>
           <img className={styles.separator} src="assets/toolbar-line.svg" alt="" />
         </nav> : <nav className={`${styles.toolbar}${toolbarScrolled ? ` ${styles.toolbarScrolled}` : ''}`} aria-label="Scheduler navigation">
           <button aria-label="Booking" aria-current={activeTab === 'booking' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'booking' ? ` ${styles.tabActive}` : ''}`} onClick={() => void selectWorkflow('booking')}><img src="assets/toolbar-booking.svg" width={23} height={23} alt="" />{activeTab === 'booking' && <span aria-hidden className={styles.tabUnderline} />}</button>
@@ -332,7 +341,7 @@ export function App() {
         {!ready ? <p className={styles.loading}>{error ? 'Preferences unavailable' : 'Loading preferences…'}</p> : view === 'home' ? <HomeScreen choose={(mode: Mode) => void choose(mode)} openTerms={openTermsFromHome} testMode={showTestMode} />
         : <>
           {keepConfigMounted && <div style={view === 'config' ? { display: 'contents' } : { display: 'none' }}>
-            <Configuration preferences={preferences} active={settingsLocked} trackScroll={trackScroll} openTerms={openTermsFromConfig} cancel={() => setView(preferencesError(preferences) ? 'home' : 'workflow')} save={async value => {
+            <Configuration preferences={preferences} active={settingsLocked} trackScroll={trackScroll} openTerms={openTermsFromConfig} openHistory={() => setView('history')} cancel={() => setView(preferencesError(preferences) ? 'home' : 'workflow')} save={async value => {
               cancelRestartCommand();
               await savePreferences(value); setPreferences(value);
               const mode = pendingMode ?? run.mode;
@@ -348,7 +357,7 @@ export function App() {
               setView('workflow');
             }} />
           </div>}
-          {view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} testMode={showTestMode} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
+          {view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} testMode={showTestMode} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
             if (engineEnabled && status === 'idle') { cancelRestartCommand(); try { applySnapshot(await panelCommand('STOP')); setPanelFailure(null); setError(''); } catch (failure) { setError((failure as Error).message); } return; }
             if (preferencesError(preferences)) { setPendingMode(run.mode); setView('config'); return; }
             if (engineEnabled) {

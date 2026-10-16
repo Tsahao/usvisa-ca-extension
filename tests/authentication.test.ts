@@ -674,17 +674,63 @@ describe('durable automatic authentication', () => {
     }
     expect(h.actions).toEqual([]);
   });
-  it('retains alert history across renewal and bounds renewal attempts at three', async () => {
+  it('keeps successful renewals running beyond four hours and retains alert history', async () => {
     const h = harness(); h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
     let state: EngineState = { ...bound(), alert: { observed: '2026-11-19', delivered: '2026-11-19', pending: false } };
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      h.tick(3600);
       state = beginAuthentication(state, 'renew', h.deps.nowIso());
-      state = await runAuthentication(h.deps, state); h.tick(30);
       state = await runAuthentication(h.deps, state);
-      expect(state.authentication).toBeNull();
+      h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups'); h.tick(2);
+      state = await runAuthentication(h.deps, state);
+      expect(validateEngineState(state)).toMatchObject({ status: 'running', authentication: null, sessionRenewals: 0,
+        alert: { observed: '2026-11-19', delivered: '2026-11-19', pending: false } });
     }
-    expect(beginAuthentication(state, 'renew', h.deps.nowIso())).toMatchObject({ status: 'verifying', sessionRenewals: 3, alert: state.alert });
+    expect(h.deps.createTab).toHaveBeenCalledTimes(1); // legacy unbound first renewal only
+    expect(h.deps.navigateTab).toHaveBeenCalledTimes(7);
   });
+  it('still bounds renewals which have not reached a validated dashboard', () => {
+    let state = bound();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      state = beginAuthentication(state, 'renew', NOW);
+      state = { ...state, authentication: null };
+    }
+    expect(beginAuthentication(state, 'renew', NOW)).toMatchObject({ status: 'verifying', sessionRenewals: 3 });
+  });
+  it.each(['booking', 'alerts'] as const)('renews %s in its owned tab with a durable GET checkpoint', async mode => {
+    const h = harness();
+    h.setUrl(`https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/${mode === 'booking' ? 'appointment?applicants[]=77777777&applicants[]=88888888' : 'payment'}`);
+    const state: EngineState = { ...bound(), mode, monitorTabId: mode === 'alerts' ? 7 : null,
+      executor: mode === 'booking' ? { tabId: 7, applicantIds: ids, targetTime: null, skippedDates: [], actionPending: false } : null };
+    const result = await runAuthentication(h.deps, beginAuthentication(state, 'renew', NOW));
+    expect(result).toMatchObject({ status: 'running', authentication: { tabId: 7, purpose: 'renew', pending: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledExactlyOnceWith(7, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
+    expect(h.deps.createTab).not.toHaveBeenCalled(); expect(h.deps.inject).not.toHaveBeenCalled();
+    expect(reconcileStartup(h.saved.at(-1)!, NOW)).toMatchObject({ status: 'verifying', authentication: null, nextPollAt: null });
+  });
+  it.each(['wrong-group', 'offsite', 'unknown-route', 'query', 'fragment', 'pending-offsite', 'closed', 'changed-after-save', 'settings-change', 'cancelled', 'storage-failure'])(
+    'refuses unsafe owned-tab renewal without opening a replacement (%s)', async issue => {
+      const h = harness(); const base = 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment';
+      h.setUrl(base);
+      const initial: EngineState = { ...bound(), executor: { tabId: 7, applicantIds: ids, targetTime: null, skippedDates: [], actionPending: false } };
+      if (issue === 'wrong-group') h.setUrl(base.replace('11111111', '99999999'));
+      if (issue === 'offsite') h.setUrl(base.replace('ais.usvisa-info.com', 'example.invalid'));
+      if (issue === 'unknown-route') h.setUrl(base + '/other');
+      if (issue === 'query') h.setUrl(base + '?next=other');
+      if (issue === 'fragment') h.setUrl(base + '#other');
+      if (issue === 'pending-offsite') h.deps.getTab = async () => ({ id: 7, url: base, pendingUrl: 'https://example.invalid/' });
+      if (issue === 'closed') h.deps.getTab = async () => { throw new Error('synthetic closed tab'); };
+      const save = h.deps.saveState;
+      h.deps.saveState = async checkpoint => {
+        if (issue === 'storage-failure') throw new Error('synthetic storage failure');
+        await save(checkpoint);
+        if (issue === 'changed-after-save') h.setUrl('https://example.invalid/');
+        if (issue === 'settings-change') h.deps.loadPrefs = async () => ({ ...prefs, interval: 600 });
+        if (issue === 'cancelled') h.deps.isCancelled = () => true;
+      };
+      expect(await runAuthentication(h.deps, beginAuthentication(initial, 'renew', NOW))).toMatchObject({ status: 'stopped', authentication: null });
+      expect(h.deps.navigateTab).not.toHaveBeenCalled(); expect(h.deps.createTab).not.toHaveBeenCalled(); expect(h.deps.inject).not.toHaveBeenCalled();
+    });
   it('logs in for verification without resetting the baseline or arming another booking', async () => {
     const h = harness();
     const initial: EngineState = { ...bound(), status: 'verifying', intent: { runId: args.runId, mode: 'booking', groupId: '11111111', targetDate: '2026-11-19', consulate: 'Vancouver', testMode: false, createdAt: NOW } };

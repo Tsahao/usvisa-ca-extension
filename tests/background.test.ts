@@ -523,7 +523,7 @@ describe('read-only probe boundaries', () => {
     chromeMock.tabs.query.mockResolvedValue([{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' }]);
     chromeMock.scripting.executeScript.mockImplementation(async (input: { func: { name: string }; args?: unknown[] }) => {
       if (input.func.name === 'readDashboardGroups') return [{ result: { groups: [{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' }] } }];
-      expect(input.args).toEqual(['11111111', '22222222', true, true, '/en-ca/niv/groups/55555555']);
+      expect(input.args).toEqual(['11111111', '22222222', true, true, '/en-ca/niv/groups/55555555', true]);
       return [{ result: { scheduleId: '11111111', ivr: '22222222', kind: booked ? 'booked' : 'unbooked', text: booked ? '6 November, 2026' : null, applicantIds: ['77777777', '88888888'] } }];
     });
     const respond = vi.fn();
@@ -1071,6 +1071,10 @@ describe('read-only probe boundaries', () => {
       '/en-ca/niv/schedule/11111111/appointment',
       95,
     ]);
+    const history = vi.fn();
+    message({ type: 'PANEL_HISTORY' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, history);
+    await vi.waitFor(() => expect(history).toHaveBeenCalledWith({ ok: true, rows: [expect.objectContaining({ earliestDate: '2026-11-19', booked: 'No' })] }));
+    expect(JSON.stringify(history.mock.calls)).not.toContain('11111111');
   });
 
   it.each(['booking', 'alerts'] as const)('paces %s cooldown expiry and ignores duplicate alarms', async mode => {
@@ -1097,7 +1101,7 @@ describe('read-only probe boundaries', () => {
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ cooldownUntil: expect.any(String), nextPollAt: null }));
     const state = stored.engineStateV1 as { cooldownUntil: string; nextPollAt: string | null };
-    expect(chromeMock.alarms.create).toHaveBeenLastCalledWith('enginePoll', { when: Date.parse(state.cooldownUntil) });
+    expect(chromeMock.alarms.create.mock.calls.filter((call: unknown[]) => call[0] === 'enginePoll').at(-1)).toEqual(['enginePoll', { when: Date.parse(state.cooldownUntil) }]);
     alarmed({ name: 'enginePoll' });
     // A queued status response is a barrier after the alarm handler.
     const status = vi.fn();
@@ -1193,6 +1197,25 @@ describe('read-only probe boundaries', () => {
     expect((stored.engineStateV1 as { nextPollAt: string }).nextPollAt).not.toBeNull();
     const saved = stored.unpaidMonitorV1 as { scopeKey: string; monitor: { alert: { delivered: string } } };
     expect(saved.monitor.alert.delivered).toBe('2026-11-19');
+    const history = vi.fn();
+    message({ type: 'PANEL_HISTORY' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, history);
+    await vi.waitFor(() => expect(history).toHaveBeenCalledWith({ ok: true, rows: [expect.objectContaining({ earliestDate: '2026-11-19', booked: 'No' })] }));
+  });
+
+  it('restricts history reads to the product panel and ignores supplied observations/outcomes', async () => {
+    const denied = vi.fn();
+    for (const sender of [
+      { id: 'other-extension', url: 'chrome-extension://synthetic-extension/panel.html' },
+      { id: 'synthetic-extension', url: 'https://ais.usvisa-info.com/en-ca/niv/groups' },
+      { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/probe.html' },
+    ]) message({ type: 'PANEL_HISTORY' }, sender, denied);
+    expect(denied).not.toHaveBeenCalled();
+    const accepted = vi.fn();
+    message({ type: 'PANEL_HISTORY', rows: [{ earliestDate: '2026-11-19', booked: 'Yes' }], url: 'https://example.invalid' },
+      { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, accepted);
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledWith({ ok: true, rows: [] }));
+    expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
+    expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
 
   it('retries malformed summaries and parks without a payment tab', async () => {    const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');

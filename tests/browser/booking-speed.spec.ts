@@ -137,6 +137,8 @@ for (const scenario of ['gated', 'direct', 'test-gated', 'test-direct', 'stop-di
         expect(Date.parse(verified.verification!.nextReadAt!) - postedAt).toBeGreaterThanOrEqual(29_000);
       }
       expect(daysReads).toBe(1);
+      const history = await panel.evaluate(async () => chrome.runtime.sendMessage({ type: 'PANEL_HISTORY' }));
+      expect(history).toMatchObject({ ok: true, rows: [{ earliestDate: '2026-11-19', booked: testMode || scenario === 'stop-switch' ? 'No' : 'Attempted' }] });
       if (scenario !== 'stop-switch') {
         expect(timesReads).toBe(1);
         await expect(host.locator('#appointments_consulate_appointment_time')).toHaveValue('09:15');

@@ -45,6 +45,85 @@ function harness(kind: PaidPage['kind']) {
 }
 
 describe('paid executor', () => {
+  it.each([0, 502, 503, 401, 403])('retries/renews a failed dashboard baseline GET before Continue (%s)', async status => {
+    const h = harness('actions'); const state = seeded('actions');
+    state.lastCandidate = null;
+    state.group!.dashboardPath = '/en-ca/niv/groups/55555555';
+    state.executor!.applicantIds = IDS;
+    h.d.getTab = async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    const original = h.d.inject;
+    h.d.inject = vi.fn(async (_id, func, args) => {
+      expect(func.name).toBe('readCurrentAppointment');
+      expect(args).toEqual(['11111111', '22222222', true, true, state.group!.dashboardPath, true]);
+      return { scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', text: null, status };
+    });
+    const next = validateEngineState(await runBookingStage(h.d, state));
+    expect(next).toMatchObject({ status: status === 401 || status === 403 ? 'stopped' : 'running', stage: 'actions',
+      intent: null, lastCandidate: null, executor: { tabId: 7, actionPending: false } });
+    expect(h.checkpoints).toEqual([]); expect(h.mutations).toEqual([]); expect(h.d.createTab).not.toHaveBeenCalled();
+    if (status === 401 || status === 403) return;
+    expect(next.nextPollAt).toBe('2026-10-12T00:01:00.000Z'); expect(next.consecutiveFailures).toBe(1);
+    const cooled = await runBookingStage(h.d, { ...state, consecutiveFailures: 9 });
+    expect(cooled).toMatchObject({ status: 'running', consecutiveFailures: 10, nextPollAt: null, cooldownUntil: '2026-10-12T00:30:00.000Z' });
+    h.d.inject = vi.fn(async (...args) => args[1].name === 'performDashboardContinue' ? { ok: true } : original(args[0], args[1], args[2]));
+    expect(await runBookingStage(h.d, next)).toMatchObject({ status: 'running', stage: 'actions', executor: { tabId: 7, actionPending: false } });
+    expect(h.checkpoints).toHaveLength(1); expect(h.checkpoints[0].executor?.actionPending).toBe(true);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
+  });
+  it.each(['wrong-group', 'wrong-ivr', 'malformed-status', 'changed-roster', 'changed-baseline', 'missing-reading', 'cancelled'])(
+    'still parks an unsafe dashboard handoff without clicking Continue (%s)', async issue => {
+      const h = harness('actions'); const state = seeded('actions');
+      state.lastCandidate = null; state.group!.dashboardPath = '/en-ca/niv/groups/55555555'; state.executor!.applicantIds = IDS;
+      h.d.getTab = async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+      let cancelled = false; h.d.isCancelled = () => cancelled;
+      h.d.inject = vi.fn(async () => {
+        if (issue === 'cancelled') cancelled = true;
+        if (issue === 'missing-reading') return null;
+        if (issue === 'changed-roster' || issue === 'changed-baseline') return { scheduleId: '11111111', ivr: '22222222', kind: 'booked',
+          text: issue === 'changed-baseline' ? 'December 1, 2026' : 'January 1, 2027', applicantIds: issue === 'changed-roster' ? IDS.slice(0, 1) : IDS };
+        return { scheduleId: issue === 'wrong-group' ? '99999999' : '11111111', ivr: issue === 'wrong-ivr' ? '99999999' : '22222222', kind: 'read-failure', status: issue === 'malformed-status' ? '502' : 502 };
+      });
+      expect(await runBookingStage(h.d, state)).toMatchObject({ status: 'verifying', nextPollAt: null, intent: null });
+      expect(h.d.inject).toHaveBeenCalledOnce(); expect(h.checkpoints).toEqual([]); expect(h.mutations).toEqual([]);
+    });
+  it.each([0, 503, 401, 403])('classifies transient single-applicant re-entry reads without booking (%s)', async status => {
+    const h = harness('form');
+    const state = seeded('warning');
+    state.lastCandidate = null;
+    state.group = { ...state.group!, applicantIds: [IDS[0]], dashboardPath: '/en-ca/niv/groups/99999999' };
+    state.executor = { ...state.executor!, applicantIds: [IDS[0]] };
+    h.d.getTab = async () => ({ id: 7, url: `${BASE}/appointment` });
+    h.d.inject = vi.fn(async (_id, func, args) => {
+      if (func.name === 'readPaidPage') return null;
+      expect(func.name).toBe('readCurrentAppointment');
+      expect(args?.slice(2)).toEqual([true, true, '/en-ca/niv/groups/99999999', true]);
+      return { scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', text: null, status };
+    });
+    const next = await runBookingStage(h.d, state);
+    expect(next).toMatchObject({ status: status === 401 || status === 403 ? 'stopped' : 'running', intent: null, stage: 'warning', lastCandidate: null });
+    if (status === 0 || status === 503) {
+      expect(next.consecutiveFailures).toBe(1);
+      expect(next.nextPollAt).toBe('2026-10-12T00:01:00.000Z');
+      const cooled = await runBookingStage(h.d, { ...state, consecutiveFailures: 9 });
+      expect(cooled).toMatchObject({ status: 'running', consecutiveFailures: 10, nextPollAt: null, cooldownUntil: '2026-10-12T00:30:00.000Z' });
+    }
+    expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
+  });
+  it.each(['wrong-identity', 'malformed-status', 'changed-roster', 'changed-baseline', 'missing-reading'])(
+    'still parks unsafe single-applicant re-entry readings (%s)', async issue => {
+      const h = harness('form'); const state = seeded('warning');
+      state.lastCandidate = null;
+      state.group = { ...state.group!, applicantIds: [IDS[0]], dashboardPath: '/en-ca/niv/groups/99999999' };
+      state.executor = { ...state.executor!, applicantIds: [IDS[0]] };
+      h.d.getTab = async () => ({ id: 7, url: `${BASE}/appointment` });
+      h.d.inject = vi.fn(async (_id, func) => {
+        if (func.name === 'readPaidPage' || issue === 'missing-reading') return null;
+        if (issue === 'wrong-identity' || issue === 'malformed-status') return { scheduleId: issue === 'wrong-identity' ? '99999999' : '11111111', ivr: '22222222', kind: 'read-failure', status: issue === 'malformed-status' ? '503' : 503 };
+        return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: issue === 'changed-baseline' ? 'December 1, 2026' : 'January 1, 2027', applicantIds: issue === 'changed-roster' ? IDS : [IDS[0]] };
+      });
+      expect(await runBookingStage(h.d, state)).toMatchObject({ status: 'verifying', intent: null, nextPollAt: null });
+      expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
+    });
   it('reselects an equal date whose portal calendar state has not been loaded', async () => {
     const h = harness('form');
     h.page.calendarReady = false;

@@ -26,6 +26,27 @@ export function isVerificationErrorMessage(value: unknown): value is string {
   return typeof value === 'string' && (VERIFICATION_ERRORS as readonly string[]).includes(value);
 }
 
+// Fixed identifier-free authentication failure reasons (developer state only,
+// never shown in product UI/copy). Optional in saves; old saves migrate to
+// null and malformed values fail closed. Cleared on fresh/healthy
+// authentication and preserved existing panel/analytics semantics (panel
+// keeps using loginFailed/authenticationError; analytics keeps its existing
+// terminal-failure classification).
+export const AUTHENTICATION_FAILURE_REASONS = [
+  'configuration-changed',
+  'cancelled',
+  'tab-unavailable',
+  'untrusted-navigation',
+  'context-changed',
+  'navigation-failed',
+  'unrecognized-reading',
+  'credential-rejected',
+] as const;
+export type AuthenticationFailureReason = (typeof AUTHENTICATION_FAILURE_REASONS)[number];
+export function isAuthenticationFailureReason(value: unknown): value is AuthenticationFailureReason {
+  return typeof value === 'string' && (AUTHENTICATION_FAILURE_REASONS as readonly string[]).includes(value);
+}
+
 // Durable permission to restart AFTER verification resolves, created by an
 // explicit product Start during unresolved intent. Scoped to the verifying
 // run and the requested configuration (policy snapshot at request time).
@@ -92,9 +113,16 @@ export type EngineState = {
   policyKey: string | null;
   pollIntervalS: number;
   authentication: AuthenticationState | null;
+  // Renewal starts since the last fully validated authentication success.
+  // Successful hourly renewals reset this; it is not a lifetime run limit.
   sessionRenewals: number;
   loginFailed: boolean;
   authenticationError?: string | null;
+  // Retained fixed identifier-free authentication failure diagnostic reason.
+  // Developer state only: never rendered in product UI/copy, never carries
+  // URLs, credentials, identifiers or page contents. Optional; old saves
+  // migrate to null.
+  authenticationFailureReason?: AuthenticationFailureReason | null;
   manualAuthentication: boolean;
   verificationTabId: number | null;
   queuedStart?: QueuedStart | null;
@@ -137,7 +165,7 @@ export function emptyEngineState(now: string): EngineState {
     startedAt: null,
     policyKey: null,
     pollIntervalS: 60,
-    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, manualAuthentication: false, verificationTabId: null,
+    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false, verificationTabId: null,
     queuedStart: null, verificationError: null, restartPending: false, restartFailed: false,
   };
 }
@@ -196,6 +224,10 @@ export function validateEngineState(value: unknown): EngineState {
   const loginFailed = state.loginFailed ?? false;
   const authenticationError = state.authenticationError ?? null;
   if (authenticationError !== null && !isPanelCommandErrorMessage(authenticationError)) throw new Error('Invalid authentication diagnostic.');
+  const authenticationFailureReason = state.authenticationFailureReason === undefined || state.authenticationFailureReason === null
+    ? null : state.authenticationFailureReason;
+  if (authenticationFailureReason !== null && !isAuthenticationFailureReason(authenticationFailureReason))
+    throw new Error('Invalid authentication diagnostic.');
   const manualAuthentication = state.manualAuthentication ?? false;
   const verificationTabId = state.verificationTabId ?? null;
   const monitorTabId = state.monitorTabId ?? null;
@@ -309,7 +341,7 @@ export function validateEngineState(value: unknown): EngineState {
     policyKey,
     pollIntervalS: pollIntervalS as number,
     authentication, sessionRenewals: sessionRenewals as number,
-    loginFailed: loginFailed as boolean, authenticationError: authenticationError as string | null, manualAuthentication: manualAuthentication as boolean, verificationTabId: verificationTabId as number | null,
+    loginFailed: loginFailed as boolean, authenticationError: authenticationError as string | null, authenticationFailureReason: authenticationFailureReason as AuthenticationFailureReason | null, manualAuthentication: manualAuthentication as boolean, verificationTabId: verificationTabId as number | null,
     queuedStart, verificationError: verificationError as string | null, restartPending, restartFailed,
   };
 }
@@ -351,7 +383,7 @@ export function startRun(
     startedAt: args.now,
     policyKey: null,
     pollIntervalS: 60,
-    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, manualAuthentication: false, verificationTabId: null,
+    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false, verificationTabId: null,
     queuedStart: null, verificationError: null, restartPending: false, restartFailed: false,
   };
 }
