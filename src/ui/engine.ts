@@ -1,3 +1,4 @@
+import { platform } from '../platform';
 import { isPanelFailureKind, type PanelFailureKind } from '../engine/panel-errors';
 import type { PanelSnapshot } from '../engine/panel';
 import type { Mode } from './model';
@@ -13,7 +14,7 @@ export class PanelCommandError extends Error {
 }
 
 export async function panelCommand(action: 'STATE' | 'START' | 'STOP', mode?: Mode, restart = false): Promise<PanelSnapshot> {
-  const response = await chrome.runtime.sendMessage({ type: `PANEL_${action}`, ...(mode ? { mode } : {}), ...(action === 'START' && restart ? { restart: true } : {}) });
+  const response = await platform.runtime.sendMessage({ type: `PANEL_${action}`, ...(mode ? { mode } : {}), ...(action === 'START' && restart ? { restart: true } : {}) });
   if (!response?.ok || !response.snapshot) {
     // Worker replies carry fixed safe diagnostics beside validated failure
     // metadata. Unknown metadata falls back to the catch-all kind; the
@@ -30,7 +31,7 @@ export async function panelCommand(action: 'STATE' | 'START' | 'STOP', mode?: Mo
 }
 
 export async function focusVisaTab(): Promise<void> {
-  const response = await chrome.runtime.sendMessage({ type: 'PANEL_FOCUS_TAB' });
+  const response = await platform.runtime.sendMessage({ type: 'PANEL_FOCUS_TAB' });
   if (!response?.ok) throw new Error(typeof response?.error === 'string' ? response.error : 'Unable to show the Visa tab. Try again.');
 }
 

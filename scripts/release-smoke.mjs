@@ -5,9 +5,11 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { filesUnder } from './archive-utils.mjs';
+import { parseBrowserArgs } from './browser-target.mjs';
 
 const PRODUCT_NAME = 'US Visa Scheduler for Canada';
-const distDir = resolve(process.argv[2] ?? 'dist');
+const { target, args } = parseBrowserArgs(process.argv.slice(2));
+const distDir = resolve(args[0] ?? target.outDir);
 const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8'));
 
 const failures = [];
@@ -25,11 +27,9 @@ for (const banned of ['Development', 'default-on', 'pending', 'Live validation']
 }
 check(JSON.stringify(manifest.permissions) === JSON.stringify(['storage', 'alarms', 'activeTab', 'scripting', 'notifications']),
   'manifest permissions are the audited narrow set');
-const allowedHosts = new Set(['https://ais.usvisa-info.com/*', 'https://us.i.posthog.com/*', 'https://eu.i.posthog.com/*']);
 const hosts = Array.isArray(manifest.host_permissions) ? manifest.host_permissions : [];
-check(hosts.includes('https://ais.usvisa-info.com/*'), 'manifest keeps the visa-site host permission');
-check(hosts.every(h => allowedHosts.has(h)), 'manifest host permissions contain only allowlisted hosts');
-check(new Set(hosts).size === hosts.length && hosts.length <= 2, 'manifest includes at most one analytics region');
+check(JSON.stringify(hosts) === JSON.stringify(['https://ais.usvisa-info.com/*']),
+  'manifest requests only visa-site host access, including analytics-enabled builds');
 check(!manifest.web_accessible_resources?.length, 'production exposes no developer iframe resources to websites');
 check(manifest.action?.default_title === `Open ${PRODUCT_NAME}`, 'action title uses the product name');
 for (const icon of ['icons/icon16.png', 'icons/icon32.png', 'icons/icon48.png', 'icons/icon128.png']) {

@@ -1,17 +1,18 @@
+import { platform } from '../platform';
 import { EMPTY_PREFERENCES, EMPTY_RUN, type Mode, type Preferences, type Run } from './model';
 
 const KEY = 'uiPreferencesV1';
 const TERMS_KEY = 'uiTermsVersion';
 const RUN_KEY = 'uiSimulatedRunV1';
 const LAST_MODE_KEY = 'uiLastModeV1';
-export const isExtension = typeof chrome !== 'undefined' && Boolean(chrome.runtime?.id);
+export const isExtension = platform.hasRuntimeId;
 function parseLastMode(value: unknown): Mode | null {
   return value === 'booking' || value === 'alerts' ? value : null;
 }
 export async function loadUiState(includeSimulatedRun = true): Promise<{ preferences: Preferences; terms: string; run: Run; lastMode: Mode | null }> {
   if (!isExtension) return { preferences: structuredClone(EMPTY_PREFERENCES), terms: '', run: { ...EMPTY_RUN }, lastMode: null };
-  await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
-  const [local, session] = await Promise.all([chrome.storage.local.get([KEY, TERMS_KEY, LAST_MODE_KEY]), chrome.storage.session.get(RUN_KEY)]);
+  await platform.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+  const [local, session] = await Promise.all([platform.storage.local.get([KEY, TERMS_KEY, LAST_MODE_KEY]), platform.storage.session.get(RUN_KEY)]);
   const saved = local[KEY] as Preferences | undefined;
   const terms = local[TERMS_KEY];
   const run = includeSimulatedRun ? session[RUN_KEY] as Run | undefined : undefined;
@@ -22,14 +23,14 @@ export async function loadUiState(includeSimulatedRun = true): Promise<{ prefere
   return { preferences, terms: typeof terms === 'string' ? terms : '', run: restoredRun, lastMode: parseLastMode(local[LAST_MODE_KEY]) };
 }
 export async function savePreferences(preferences: Preferences): Promise<void> {
-  if (isExtension) await chrome.storage.local.set({ [KEY]: preferences });
+  if (isExtension) await platform.storage.local.set({ [KEY]: preferences });
 }
 export async function saveTerms(version: string): Promise<void> {
-  if (isExtension) await chrome.storage.local.set({ [TERMS_KEY]: version });
+  if (isExtension) await platform.storage.local.set({ [TERMS_KEY]: version });
 }
 export async function saveRun(run: Run): Promise<void> {
-  if (isExtension) await chrome.storage.session.set({ [RUN_KEY]: run });
+  if (isExtension) await platform.storage.session.set({ [RUN_KEY]: run });
 }
 export async function saveLastMode(mode: Mode): Promise<void> {
-  if (isExtension) await chrome.storage.local.set({ [LAST_MODE_KEY]: mode });
+  if (isExtension) await platform.storage.local.set({ [LAST_MODE_KEY]: mode });
 }

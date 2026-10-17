@@ -83,7 +83,9 @@ events: installation, accepted workflow Start, terminal workflow failure, and
 validated unpaid-alert activation. Payloads exclude credentials, visa and
 applicant identifiers, portal content, URLs, consulates and appointment dates.
 No autocapture, heatmaps or session replay is used. The first release has no
-analytics opt-out switch in its panel.
+analytics opt-out switch in its panel. Analytics uses ordinary cross-origin
+requests (CORS), without requesting host access to PostHog. Delivery remains
+best-effort; a blocked analytics request never stops visa workflows.
 
 Production tracking is disabled unless valid build configuration is supplied.
 Copy `.env.example` to `.env.local` to configure it, or set

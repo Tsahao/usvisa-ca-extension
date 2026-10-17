@@ -1,3 +1,4 @@
+import { platform } from '../platform';
 import { useEffect, useState, type UIEvent } from 'react';
 import { HISTORY_KEY, HISTORY_TTL_MS, type HistoryRow } from '../domain/history';
 import { formatDate } from './model';
@@ -5,7 +6,7 @@ import local from './History.module.css';
 const EMPTY_ROWS: HistoryRow[] = [];
 
 export async function readDateHistory(): Promise<HistoryRow[]> {
-  const response = await chrome.runtime.sendMessage({ type: 'PANEL_HISTORY' });
+  const response = await platform.runtime.sendMessage({ type: 'PANEL_HISTORY' });
   if (!response?.ok || !Array.isArray(response.rows)) throw new Error('Unable to read date history. Reopen View Logs to try again.');
   return response.rows;
 }
@@ -28,9 +29,9 @@ export function History({ live, previewRows = EMPTY_ROWS, trackScroll }: { live:
     const changed = (changes: Record<string, unknown>, area: string) => {
       if (area === 'local' && HISTORY_KEY in changes) refresh();
     };
-    chrome.storage.onChanged.addListener(changed);
+    platform.storage.onChanged.addListener(changed);
     refresh();
-    return () => { disposed = true; chrome.storage.onChanged.removeListener(changed); };
+    return () => { disposed = true; platform.storage.onChanged.removeListener(changed); };
   }, [live]);
   const visible = (rows ?? []).filter(row => Date.parse(row.checkedAt) > now - HISTORY_TTL_MS && Date.parse(row.checkedAt) <= now);
   useEffect(() => {

@@ -1,3 +1,4 @@
+import { platform, type InjectionResult, type Tab } from './platform';
 import { classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { resolveGroup, validateDashboardSnapshot } from './domain/groups';
 import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
@@ -52,11 +53,11 @@ import { DIAGNOSTICS_ALARM, type DiagnosticCode, type DiagnosticDetail, type Dia
 import { createEngineDiagnostics } from './engine/diagnostics';
 
 const dateHistory = createDateHistory({
-  area: { get: keys => chrome.storage.local.get(keys), set: values => chrome.storage.local.set(values) },
+  area: { get: keys => platform.storage.local.get(keys), set: values => platform.storage.local.set(values) },
   now: () => new Date().toISOString(),
   schedule: async expiry => {
-    if (expiry === null) await chrome.alarms.clear(HISTORY_ALARM);
-    else await chrome.alarms.create(HISTORY_ALARM, { when: Date.parse(expiry) });
+    if (expiry === null) await platform.alarms.clear(HISTORY_ALARM);
+    else await platform.alarms.create(HISTORY_ALARM, { when: Date.parse(expiry) });
   },
 });
 
@@ -65,12 +66,12 @@ const dateHistory = createDateHistory({
 // queue, so it can neither block nor alter a booking/engine transition, and
 // the log is never cleared by success, Stop/Start or worker suspension.
 const engineDiagnostics = createEngineDiagnostics({
-  area: { get: keys => chrome.storage.local.get(keys), set: values => chrome.storage.local.set(values) },
+  area: { get: keys => platform.storage.local.get(keys), set: values => platform.storage.local.set(values) },
   now: () => new Date().toISOString(),
-  extensionVersion: () => chrome.runtime.getManifest?.().version,
+  extensionVersion: () => platform.runtime.getManifest?.().version,
   schedule: async expiry => {
-    if (expiry === null) await chrome.alarms.clear(DIAGNOSTICS_ALARM);
-    else await chrome.alarms.create(DIAGNOSTICS_ALARM, { when: Date.parse(expiry) });
+    if (expiry === null) await platform.alarms.clear(DIAGNOSTICS_ALARM);
+    else await platform.alarms.create(DIAGNOSTICS_ALARM, { when: Date.parse(expiry) });
   },
 });
 
@@ -116,7 +117,7 @@ function analyticsDeps(area: { get: (keys: string[]) => Promise<Record<string, u
     if (typeof fetchFn !== 'function') return null;
     let version = '0.1.0';
     try {
-      const manifest = (chrome.runtime as unknown as { getManifest?: () => { version?: unknown } }).getManifest?.();
+      const manifest = (platform.runtime as unknown as { getManifest?: () => { version?: unknown } }).getManifest?.();
       if (typeof manifest?.version === 'string' && manifest.version.length > 0) version = manifest.version;
     } catch { /* Fallback version above. */ }
     return {
@@ -125,15 +126,15 @@ function analyticsDeps(area: { get: (keys: string[]) => Promise<Record<string, u
       uuid: () => crypto.randomUUID(),
       extensionVersion: version,
       scheduleFlush: (delayMs: number) => {
-        chrome.alarms.create(ANALYTICS_ALARM, { when: Date.now() + delayMs }).catch(() => undefined);
+        platform.alarms.create(ANALYTICS_ALARM, { when: Date.now() + delayMs }).catch(() => undefined);
       },
     };
   } catch { return null; }
 }
 
 const analyticsConfig = analyticsDeps({
-  get: keys => chrome.storage.local.get(keys),
-  set: values => chrome.storage.local.set(values),
+  get: keys => platform.storage.local.get(keys),
+  set: values => platform.storage.local.set(values),
 });
 const analytics = analyticsConfig ? createAnalyticsTracker(analyticsConfig) : null;
 
@@ -178,8 +179,8 @@ let lastTrustedTab: { tabId: number } | null = null;
 // Session storage survives worker suspension but is cleared on browser restart
 // or extension reload. Establish this before processing any queued event.
 const ready = Promise.all([
-  chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
-  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
+  platform.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
+  platform.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
 ]).then(async () => {
   await initializeEngineSession();
   analytics?.wake();
@@ -195,8 +196,8 @@ function enqueue(task: () => Promise<void>): void {
 }
 
 enqueue(async () => {
-  const saved = (await chrome.storage.local.get(KEY))[KEY] as ProbeState | undefined;
-  if (saved) await chrome.storage.local.set({ [KEY]: { ...saved, workerStarts: saved.workerStarts + 1 } });
+  const saved = (await platform.storage.local.get(KEY))[KEY] as ProbeState | undefined;
+  if (saved) await platform.storage.local.set({ [KEY]: { ...saved, workerStarts: saved.workerStarts + 1 } });
 });
 
 // The alarm is a wake-up signal; durable state controls whether a cycle is due.
@@ -205,15 +206,15 @@ async function syncEngineAlarm(nextPollAt: string | null): Promise<void> {
   try {
     if (nextPollAt === null) {
       storageRetryAt = null;
-      await chrome.alarms.clear(ENGINE_ALARM);
+      await platform.alarms.clear(ENGINE_ALARM);
       return;
     }
     const when = Date.parse(nextPollAt);
     if (!Number.isFinite(when)) {
-      await chrome.alarms.clear(ENGINE_ALARM);
+      await platform.alarms.clear(ENGINE_ALARM);
       return;
     }
-    await chrome.alarms.create(ENGINE_ALARM, { when: Math.max(when, Date.now()) });
+    await platform.alarms.create(ENGINE_ALARM, { when: Math.max(when, Date.now()) });
     const remaining = Math.max(0, when - Date.now());
     if (remaining <= 5_000) fastWake = setTimeout(() => { fastWake = null; queueEnginePoll(); }, remaining);
   } catch {
@@ -234,7 +235,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   // without navigating an untrusted tab. Active good verifiers keep progress.
   if (state.verificationTabId !== null) {
     let live: { id?: number; url?: string } | null = null;
-    try { live = await chrome.tabs.get(state.verificationTabId); } catch { live = null; }
+    try { live = await platform.tabs.get(state.verificationTabId); } catch { live = null; }
     if (!live) {
       const cleared = { ...state, verificationTabId: null, verification: null };
       return beginTrackedAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
@@ -256,7 +257,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       }
       try {
         const parsed = new URL(live.url ?? '');
-        if (parsed.origin === SITE_ORIGIN && live.id !== undefined) await chrome.tabs.remove(live.id).catch(() => undefined);
+        if (parsed.origin === SITE_ORIGIN && live.id !== undefined) await platform.tabs.remove(live.id).catch(() => undefined);
       } catch { /* Non-URL tab; custody released without navigation. */ }
       const cleared = { ...state, verificationTabId: null, verification: null };
       return beginTrackedAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
@@ -270,7 +271,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   let currentInterval = 60;
   let currentPreferences: Preferences | undefined;
   try {
-    const prefs = (await chrome.storage.local.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
+    const prefs = (await platform.storage.local.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
     if (prefs && !preferencesError(prefs)) {
       currentPolicy = policyKey(prefs as unknown as Record<string, unknown>);
       if (Number.isInteger(prefs.interval)) currentInterval = prefs.interval;
@@ -285,23 +286,23 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   const readVerification = async (includeApplicants: boolean): Promise<unknown> => {
     if (!group) throw new Error('Missing verification identity.');
     const failedRead = () => ({ scheduleId: group.scheduleId, ivr: group.ivr, kind: 'read-failure', text: null, status: 0 });
-    const trusted = (tab: chrome.tabs.Tab) => {
+    const trusted = (tab: Tab) => {
       if (!tab.url || tab.id !== verifierTabId) return false;
       const url = new URL(tab.url);
       return classifyRoute(tab.url) === 'dashboard' && !url.search && !url.hash &&
         (!group.dashboardPath || url.pathname === group.dashboardPath) &&
         (!tab.pendingUrl || tab.pendingUrl === 'about:blank' || tab.pendingUrl === tab.url);
     };
-    const tab = await chrome.tabs.get(verifierTabId!);
+    const tab = await platform.tabs.get(verifierTabId!);
     if (!trusted(tab)) throw new Error('Verification context changed.');
     if (tab.status === 'loading' || (tab.pendingUrl && tab.pendingUrl !== 'about:blank')) return failedRead();
     let raw: unknown;
     try {
-      const result = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment,
+      const result = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment,
         args: [group.scheduleId, group.ivr, true, includeApplicants, group.dashboardPath ?? new URL(tab.url!).pathname, true] });
       raw = result[0]?.result;
     } catch {
-      const live = await chrome.tabs.get(verifierTabId!);
+      const live = await platform.tabs.get(verifierTabId!);
       if (!trusted(live) || live.url !== tab.url) throw new Error('Verification context changed.');
       raw = failedRead();
     }
@@ -329,7 +330,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   const verifiedSuccess = prevIntent && !prevIntent.testMode && next.intent === null &&
     next.status === 'stopped' && next.verificationError === null;
   if (verifiedSuccess) {
-    await chrome.storage.local.set({ engineSuccessV1: { runId: state.runId, date: prevIntent!.targetDate } });
+    await platform.storage.local.set({ engineSuccessV1: { runId: state.runId, date: prevIntent!.targetDate } });
     void dateHistory.confirmed(state);
   }
   if (prevIntent && !prevIntent.testMode && prevQueued && next.intent === null) {
@@ -356,12 +357,12 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
     let selectionOk = false;
     if (policyOk && currentPreferences && group && verifierTabId !== null) {
       try {
-        const latest = (await chrome.storage.local.get(['uiPreferencesV1'])).uiPreferencesV1;
+        const latest = (await platform.storage.local.get(['uiPreferencesV1'])).uiPreferencesV1;
         if (JSON.stringify(latest) !== JSON.stringify(currentPreferences)) throw new Error('Configuration changed.');
-        const tab = await chrome.tabs.get(verifierTabId);
+        const tab = await platform.tabs.get(verifierTabId);
         if (tab.id === undefined || classifyRoute(tab.url ?? '') !== 'dashboard' ||
             (group.dashboardPath && new URL(tab.url!).pathname !== group.dashboardPath)) throw new Error('Dashboard changed.');
-        const snapshot = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
+        const snapshot = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
         const selected = resolveGroup(validateDashboardSnapshot(snapshot[0]?.result), { mode: 'booking',
           paidIvr: currentPreferences.paidIvr, unpaidIvr: currentPreferences.unpaidIvr });
         selectionOk = selected.scheduleId === group.scheduleId && selected.ivr === group.ivr;
@@ -385,9 +386,9 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       let freshRosterOk = false;
       try {
         if (verifierTabId !== null) {
-          const tab = await chrome.tabs.get(verifierTabId).catch(() => null);
+          const tab = await platform.tabs.get(verifierTabId).catch(() => null);
           if (tab?.id !== undefined && classifyRoute(tab.url ?? '') === 'dashboard' && group) {
-            const fresh = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment,
+            const fresh = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment,
               args: [group.scheduleId, group.ivr, true, true, group.dashboardPath ?? new URL(tab.url!).pathname] });
             const raw = fresh[0]?.result;
             freshDateOk = appointmentDateRelaxed(raw, group) === prevIntent.targetDate;
@@ -432,9 +433,9 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       let freshRosterOk = false;
       try {
         if (verifierTabId !== null) {
-          const tab = await chrome.tabs.get(verifierTabId).catch(() => null);
+          const tab = await platform.tabs.get(verifierTabId).catch(() => null);
           if (tab?.id !== undefined && classifyRoute(tab.url ?? '') === 'dashboard' && group) {
-            const fresh = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment,
+            const fresh = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment,
               args: [group.scheduleId, group.ivr, true, true, group.dashboardPath ?? new URL(tab.url!).pathname] });
             const raw = fresh[0]?.result;
             freshDateOk = appointmentDateRelaxed(raw, group) === baseline;
@@ -468,13 +469,13 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
 
 async function closeOwnedDashboard(tabId: number): Promise<void> {
   try {
-    const tab = await chrome.tabs.get(tabId);
-    if (classifyRoute(tab.url ?? '') === 'dashboard') await chrome.tabs.remove(tabId);
+    const tab = await platform.tabs.get(tabId);
+    if (classifyRoute(tab.url ?? '') === 'dashboard') await platform.tabs.remove(tabId);
   } catch { return; }
 }
 
 async function dashboardTab() {
-  const tabs = (await chrome.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
+  const tabs = (await platform.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
   if (tabs.length > 1) throw new Error('Open one trusted dashboard.');
   if (tabs.length !== 1 || tabs[0].id === undefined) throw new Error('Dashboard unavailable.');
   return tabs[0];
@@ -533,21 +534,21 @@ async function attemptRestart(area: import('./engine/storage').StorageArea, stat
   if (cancelled() || !prefs || preferencesError(prefs) || state.policyKey !== policyKey(prefs as unknown as Record<string, unknown>))
     return parkForReview(state, now);
   const unchanged = async () => !cancelled() && JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) === JSON.stringify(prefs);
-  const dashboards = (await chrome.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
+  const dashboards = (await platform.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
   if (dashboards.length === 0) {
     let next = beginTrackedAuthentication(state, 'start', now, Math.random);
     const entry = await startEntryTab();
     if (!await unchanged()) return parkForReview(state, now);
     if (entry !== null && next.authentication) {
-      const live = await chrome.tabs.get(entry);
+      const live = await platform.tabs.get(entry);
       const parsed = new URL(live.url ?? '');
       const blank = live.url === 'about:blank' || live.url?.startsWith('chrome://newtab');
       if (!blank && (parsed.origin !== SITE_ORIGIN || parsed.username || parsed.password || parsed.port)) return parkForReview(state, now);
       next = { ...next, authentication: { ...next.authentication, tabId: entry, pending: true } };
       await saveEngineState(area, next);
-      if (!await unchanged() || (await chrome.tabs.get(entry)).url !== live.url) return parkForReview(state, now);
+      if (!await unchanged() || (await platform.tabs.get(entry)).url !== live.url) return parkForReview(state, now);
       if (!['/en-ca/niv', '/en-ca/niv/', '/en-ca/niv/users/sign_in'].includes(parsed.pathname))
-        await chrome.tabs.update(entry, { url: `${SITE_ORIGIN}/en-ca/niv/` });
+        await platform.tabs.update(entry, { url: `${SITE_ORIGIN}/en-ca/niv/` });
       next = { ...next, authentication: { ...next.authentication!, pending: false }, nextPollAt: new Date(Date.now() + 2_000).toISOString() };
     }
     return next;
@@ -555,17 +556,17 @@ async function attemptRestart(area: import('./engine/storage').StorageArea, stat
   if (dashboards.length !== 1 || dashboards[0].id === undefined) throw new Error('Dashboard unavailable.');
   const tab = dashboards[0];
   const dashboardPath = new URL(tab.url!).pathname;
-  const result = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
+  const result = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
   const match = resolveGroup(result[0]?.result as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr });
   let currentDate: string | null = null;
   let applicantIds: string[] | undefined;
   if (state.mode === 'booking') {
-    const baseline = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment,
+    const baseline = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment,
       args: [match.scheduleId, match.ivr, true, true, dashboardPath] });
     currentDate = appointmentDate(baseline[0]?.result, match);
     applicantIds = appointmentApplicants(baseline[0]?.result);
   }
-  const live = await chrome.tabs.get(tab.id!);
+  const live = await platform.tabs.get(tab.id!);
   if (live.url !== tab.url || live.status === 'loading' || !await unchanged()) return parkForReview(state, now);
   let next = bindGroup(state, { owner: state.owner!, runId: state.runId!, now,
     binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath, ...(applicantIds ? { applicantIds } : {}) } });
@@ -574,19 +575,19 @@ async function attemptRestart(area: import('./engine/storage').StorageArea, stat
   if (state.mode === 'booking') return { ...next, stage: 'actions',
     executor: { tabId: tab.id!, applicantIds: applicantIds!, targetTime: null, skippedDates: [], actionPending: false } };
   await prepareAlertScope(area, next);
-  const payments = (await chrome.tabs.query({})).filter(entry => entry.id !== undefined && classifyRoute(entry.url ?? '') === 'payment' && isSameGroupUrl(entry.url!, match.scheduleId));
+  const payments = (await platform.tabs.query({})).filter(entry => entry.id !== undefined && classifyRoute(entry.url ?? '') === 'payment' && isSameGroupUrl(entry.url!, match.scheduleId));
   next = { ...next, monitorTabId: payments[0]?.id ?? tab.id! };
   await saveEngineState(area, next);
   if (!payments.length) {
-    const current = await chrome.tabs.get(tab.id!);
+    const current = await platform.tabs.get(tab.id!);
     if (current.url !== tab.url || !await unchanged()) return parkForReview(next, now);
-    await chrome.tabs.update(tab.id!, { url: `${SITE_ORIGIN}/en-ca/niv/schedule/${match.scheduleId}/payment` });
+    await platform.tabs.update(tab.id!, { url: `${SITE_ORIGIN}/en-ca/niv/schedule/${match.scheduleId}/payment` });
   }
   return next;
 }
 
 async function preferredVisaTabId(): Promise<number | null> {
-  const saved = (await chrome.storage.session.get('lastTrustedVisaTabV1')).lastTrustedVisaTabV1;
+  const saved = (await platform.storage.session.get('lastTrustedVisaTabV1')).lastTrustedVisaTabV1;
   return lastTrustedTab?.tabId ?? (typeof saved === 'number' && Number.isSafeInteger(saved) && saved >= 0 ? saved : null);
 }
 
@@ -600,8 +601,8 @@ async function preferredVisaTabId(): Promise<number | null> {
 // stale toolbar selection is revalidated live. Entry only runs when no
 // workflow is live, so no owned tab is ever taken.
 async function startEntryTab(): Promise<number | null> {
-  const tabs = await chrome.tabs.query({});
-  const focused = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tabs = await platform.tabs.query({});
+  const focused = await platform.tabs.query({ active: true, lastFocusedWindow: true });
   const active = focused[0] ?? tabs.find(tab => tab.active);
   const isEntry = (tab: { url?: string } | undefined) =>
     tab?.url !== undefined && ['appointment', 'payment', 'landing', 'login', 'actions'].includes(classifyRoute(tab.url));
@@ -617,7 +618,7 @@ async function startEntryTab(): Promise<number | null> {
   const preferred = await preferredVisaTabId();
   if (preferred !== null) {
     try {
-      const trusted = await chrome.tabs.get(preferred);
+      const trusted = await platform.tabs.get(preferred);
       if (trusted.id !== undefined && (isEntry(trusted) || isSiteTab(trusted))) return trusted.id;
     } catch { /* Closed since selection; fall through to heuristics. */ }
   }
@@ -633,15 +634,15 @@ async function startEntryTab(): Promise<number | null> {
 function executionDependencies(area: { get: (keys: string[]) => Promise<Record<string, unknown>>; set: (values: Record<string, unknown>) => Promise<void> }, state: import('./engine/workflow').EngineState) {
   return {
     nowIso: () => new Date().toISOString(), random: Math.random,
-    queryTabs: () => chrome.tabs.query({}), getTab: (tabId: number) => chrome.tabs.get(tabId),
-    createTab: (url: string) => chrome.tabs.create({ url }),
-    inject: (tabId: number, func: (...args: never[]) => unknown, args?: unknown[]) => chrome.scripting
+    queryTabs: () => platform.tabs.query({}), getTab: (tabId: number) => platform.tabs.get(tabId),
+    createTab: (url: string) => platform.tabs.create({ url }),
+    inject: (tabId: number, func: (...args: never[]) => unknown, args?: unknown[]) => platform.scripting
       .executeScript({ target: { tabId }, func: func as never, args: args as never[],
         ...(func === performPaidAction && ['date', 'facility'].includes((args?.[0] as PaidAction | undefined)?.action ?? '') ? { world: 'MAIN' as const } : {}),
       }).then(results => results[0]?.result),
     // Browser-side navigation for stalled-load recovery: fixed approved
     // targets only, never DOM injection into a loading tab.
-    navigateTab: (tabId: number, url: string) => chrome.tabs.update(tabId, { url }).then(() => undefined),
+    navigateTab: (tabId: number, url: string) => platform.tabs.update(tabId, { url }).then(() => undefined),
     loadPrefs: async () => (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined,
     saveState: (checkpoint: import('./engine/workflow').EngineState) => saveEngineState(area, checkpoint),
     onBookingAttempt: (checkpoint: import('./engine/workflow').EngineState) => { void dateHistory.attempted(checkpoint); },
@@ -653,15 +654,15 @@ function executionDependencies(area: { get: (keys: string[]) => Promise<Record<s
 // Recreate the alarm after worker suspension without shortening backoff or
 // cooldowns. A fresh browser session surfaces existing work for review.
 async function initializeEngineSession(): Promise<void> {
-  const session = await chrome.storage.session.get('engineSessionV1');
+  const session = await platform.storage.session.get('engineSessionV1');
   if (session.engineSessionV1 !== true) analytics?.end();
   const area = {
-    get: (keys: string[]) => chrome.storage.local.get(keys),
-    set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+    get: (keys: string[]) => platform.storage.local.get(keys),
+    set: (values: Record<string, unknown>) => platform.storage.local.set(values),
   };
   const state = await loadEngineState(area);
   if (!state) {
-    await chrome.storage.session.set({ engineSessionV1: true });
+    await platform.storage.session.set({ engineSessionV1: true });
     return;
   }
   const now = new Date().toISOString();
@@ -688,10 +689,10 @@ async function initializeEngineSession(): Promise<void> {
   await syncEngineAlarm(engineAlarmAt(next));
   // Mark the session only after reconciliation is durably committed. A
   // failed write blocks queued work and is retried on the next worker wake.
-  await chrome.storage.session.set({ engineSessionV1: true });
+  await platform.storage.session.set({ engineSessionV1: true });
 }
 
-chrome.action.onClicked.addListener(tab => enqueue(async () => {
+platform.action.onClicked.addListener(tab => enqueue(async () => {
   const route = classifyRoute(tab.url ?? '');
   let documentReachable = false;
   const isSiteTab = (() => {
@@ -702,7 +703,7 @@ chrome.action.onClicked.addListener(tab => enqueue(async () => {
   })();
   if (tab.id !== undefined && isSiteTab) {
     try {
-      const results = await chrome.scripting.executeScript({
+      const results = await platform.scripting.executeScript({
         target: { tabId: tab.id },
         // Deliberately reads no form values, cookies, account identifiers, or HTML.
         func: () => document.readyState === 'interactive' || document.readyState === 'complete',
@@ -710,22 +711,22 @@ chrome.action.onClicked.addListener(tab => enqueue(async () => {
       documentReachable = results[0]?.result === true;
     } catch { /* The page may have closed or navigated; do not inspect another tab. */ }
   }
-  const previous = (await chrome.storage.local.get(KEY))[KEY] as ProbeState | undefined;
-  await chrome.storage.local.set({ [KEY]: {
+  const previous = (await platform.storage.local.get(KEY))[KEY] as ProbeState | undefined;
+  await platform.storage.local.set({ [KEY]: {
     version: 1, checkedAt: new Date().toISOString(), route, documentReachable,
     workerStarts: previous?.workerStarts ?? 1,
   } satisfies ProbeState });
   if (documentReachable && tab.id !== undefined) {
     lastTrustedTab = { tabId: tab.id };
-    await chrome.storage.session.set({ lastTrustedVisaTabV1: tab.id });
+    await platform.storage.session.set({ lastTrustedVisaTabV1: tab.id });
   }
   await openPanelWindow();
 }));
 
-chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (sender.id !== chrome.runtime.id) return;
+platform.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== platform.runtime.id) return;
   if (typeof message?.type === 'string' && message.type.startsWith('PANEL_')) {
-    if (!sender.url?.startsWith(chrome.runtime.getURL('')) || new URL(sender.url).pathname !== '/panel.html') return;
+    if (!sender.url?.startsWith(platform.runtime.getURL('')) || new URL(sender.url).pathname !== '/panel.html') return;
     if (message.type === 'PANEL_HISTORY') {
       // Read-only and independent of a slow portal action in the engine queue.
       void ready.then(() => dateHistory.read()).then(rows => respond({ ok: true, rows }))
@@ -735,7 +736,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message.type === 'PANEL_FOCUS_TAB') {
       enqueue(async () => {
         try {
-          const area = { get: (keys: string[]) => chrome.storage.local.get(keys), set: (values: Record<string, unknown>) => chrome.storage.local.set(values) };
+          const area = { get: (keys: string[]) => platform.storage.local.get(keys), set: (values: Record<string, unknown>) => platform.storage.local.set(values) };
           await pinpointVisaTab(await loadEngineState(area), await preferredVisaTabId());
           respond({ ok: true });
         } catch (error) {
@@ -751,7 +752,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message.type === 'PANEL_STOP' && executingRun) cancelledRuns.add(`${executingRun.owner}:${executingRun.runId}`);
     const requestEpoch = explicitStartEpoch;
     enqueue(async () => {
-      const area = { get: (keys: string[]) => chrome.storage.local.get(keys), set: (values: Record<string, unknown>) => chrome.storage.local.set(values) };
+      const area = { get: (keys: string[]) => platform.storage.local.get(keys), set: (values: Record<string, unknown>) => platform.storage.local.set(values) };
       const requestCancelled = () => requestEpoch !== explicitStartEpoch;
       let readStep: PanelReadStep = 'state';
       let analyticsStart: string | null = null;
@@ -812,7 +813,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
               return;
             }
             readStep = 'dashboard';
-            const dashboards = (await chrome.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
+            const dashboards = (await platform.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
             if (dashboards.length === 0) {
               state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
               state = beginTrackedAuthentication(state, 'start', now, Math.random);
@@ -833,11 +834,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                     // welcome landing when signed out). Skip the navigation
                     // when already at the root (its redirect/auto-advance
                     // still resolves) or login (preserved for sign-in).
-                    const live = await chrome.tabs.get(entry).catch(() => null);
+                    const live = await platform.tabs.get(entry).catch(() => null);
                     let path = '';
                     try { path = new URL(live?.url ?? '').pathname; } catch { path = ''; }
                     if (path !== '/en-ca/niv' && path !== '/en-ca/niv/' && path !== '/en-ca/niv/users/sign_in')
-                      await chrome.tabs.update(entry, { url: 'https://ais.usvisa-info.com/en-ca/niv/' });
+                      await platform.tabs.update(entry, { url: 'https://ais.usvisa-info.com/en-ca/niv/' });
                     state = { ...state, authentication: { ...state.authentication, tabId: entry },
                       nextPollAt: new Date(Date.parse(now) + 2_000).toISOString(), updatedAt: new Date().toISOString() };
                   } catch { state = parkForReview(state, now); }
@@ -849,14 +850,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
               const tab = await dashboardTab();
               const dashboardPath = new URL(tab.url!).pathname;
               readStep = 'groups';
-              const results = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
+              const results = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
               // Maintenance cannot establish a group. Keep Start active and
               // retry this owned dashboard before resolving any identities.
               const discovered = (results[0]?.result as { groups?: unknown } | undefined)?.groups;
               let maintenance = false;
               if (Array.isArray(discovered) && discovered.length === 0) {
                 try {
-                  const check = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readSiteMaintenance });
+                  const check = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readSiteMaintenance });
                   maintenance = (check[0]?.result as { maintenance?: unknown } | undefined)?.maintenance === true;
                 } catch { /* An unreadable document still fails normal group resolution. */ }
               }
@@ -874,7 +875,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                 let applicantIds: string[] | undefined;
                 if (message.mode === 'booking') {
                   readStep = 'appointment';
-                  const appt = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, true, true, dashboardPath, true] });
+                  const appt = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, true, true, dashboardPath, true] });
                   const raw = appt[0]?.result;
                   // Stale signed-in-looking dashboard with an expired session:
                   // the cached DOM still resolves a group, but the bounded
@@ -911,7 +912,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                     };
                     try {
                       if (requestCancelled()) throw new Error('Dashboard context changed.');
-                      await chrome.tabs.get(tab.id!);
+                      await platform.tabs.get(tab.id!);
                       if (requestCancelled()) throw new Error('Dashboard context changed.');
                       const freshPrefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1;
                       if (requestCancelled() || JSON.stringify(freshPrefs) !== prefsSnapshot) throw new Error('Dashboard context changed.');
@@ -919,13 +920,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                       // earlier live object. Exact clean dashboard URL, stable
                       // entire saved URL, complete (non-loading) tab and quiet
                       // (no pending navigation, including about:blank).
-                      const live = await chrome.tabs.get(tab.id!);
+                      const live = await platform.tabs.get(tab.id!);
                       if (requestCancelled()) throw new Error('Dashboard context changed.');
                       const pendingUrl = (live as { pendingUrl?: unknown }).pendingUrl;
                       const pendingQuiet = pendingUrl === undefined || pendingUrl === '';
                       if (!isExactDashboardUrl(live.url, dashboardPath) || live.url !== savedTabUrl) throw new Error('Dashboard context changed.');
                       if ((live as { status?: unknown }).status === 'loading' || !pendingQuiet) throw new Error('Dashboard context changed.');
-                      await chrome.tabs.update(tab.id!, { url: FIXED_SIGN_IN });
+                      await platform.tabs.update(tab.id!, { url: FIXED_SIGN_IN });
                     } catch {
                       await parkPending();
                       return;
@@ -963,7 +964,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                 readStep = 'save';
                 await saveEngineState(area, state);
                 if (message.mode === 'alerts') {
-                  const tabs = await chrome.tabs.query({});
+                  const tabs = await platform.tabs.query({});
                   const payment = tabs.find(entry => entry.id !== undefined && entry.url !== undefined && classifyRoute(entry.url) === 'payment' && isSameGroupUrl(entry.url, match.scheduleId));
                   state = { ...state, monitorTabId: payment?.id ?? tab.id! };
                   await saveEngineState(area, state);
@@ -972,10 +973,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                     // and navigate it to the bound group's payment summary
                     // instead of opening a second tab.
                     try {
-                      const live = await chrome.tabs.get(tab.id!);
+                      const live = await platform.tabs.get(tab.id!);
                       if (classifyRoute(live.url ?? '') !== 'dashboard' || new URL(live.url!).pathname !== dashboardPath)
                         throw new Error('Dashboard context changed.');
-                      await chrome.tabs.update(tab.id!, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${match.scheduleId}/payment` });
+                      await platform.tabs.update(tab.id!, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${match.scheduleId}/payment` });
                     } catch { state = parkForReview(state, now); await saveEngineState(area, state); }
                   }
                 }
@@ -1004,12 +1005,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // state, credentials, URLs or page content).
   if (message?.type === 'PROBE_DIAGNOSTICS' || message?.type === 'ENGINE_DIAGNOSTICS') {
     if (message.type === 'PROBE_DIAGNOSTICS') {
-      if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+      if (sender.url !== platform.runtime.getURL('probe.html')) return;
     } else {
       // Production developer-console reader: only the bundled panel, with
       // the runtime sender id checked above. Website content scripts cannot
       // read diagnostics or use this to export any other storage keys.
-      if (!isProductPanelSender(sender.url) || new URL(sender.url!).host !== chrome.runtime.id) return;
+      if (!isProductPanelSender(sender.url) || new URL(sender.url!).host !== platform.runtime.id) return;
     }
     void ready.then(() => engineDiagnostics.read())
       .then(diagnostics => respond({ ok: true, diagnostics }))
@@ -1018,10 +1019,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
   // Only the bundled report page can operate the probe's wake-up test.
   if (message?.type === 'PROBE_WAKE') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     enqueue(async () => {
       try {
-        await chrome.alarms.create(ALARM, { delayInMinutes: 1 });
+        await platform.alarms.create(ALARM, { delayInMinutes: 1 });
         respond({ ok: true });
       } catch { respond({ ok: false }); }
     });
@@ -1032,7 +1033,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // binds a probe-owned run. Reads only: no clicks, fills, or navigation.
   // Only the bundled report page may trigger it.
   if (message?.type === 'PROBE_RESOLVE') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     enqueue(async () => {
       try {
         const mode = (message as { mode?: unknown }).mode;
@@ -1044,21 +1045,21 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           respond({ ok: false });
           return;
         }
-        const tab = await chrome.tabs.get(lastTrustedTab.tabId);
+        const tab = await platform.tabs.get(lastTrustedTab.tabId);
         if (classifyRoute(tab?.url ?? '') !== 'dashboard' || tab?.id === undefined) {
           respond({ ok: false });
           return;
         }
         const area = {
-          get: (keys: string[]) => chrome.storage.local.get(keys),
-          set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+          get: (keys: string[]) => platform.storage.local.get(keys),
+          set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as
           | { paidIvr?: unknown; unpaidIvr?: unknown }
           | undefined;
         const paidIvr = typeof prefs?.paidIvr === 'string' ? prefs.paidIvr : '';
         const unpaidIvr = typeof prefs?.unpaidIvr === 'string' ? prefs.unpaidIvr : '';
-        const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
+        const results = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
         const raw = results[0]?.result as { groups?: { scheduleId?: unknown; ivr?: unknown; paymentStatus?: unknown }[] } | undefined;
         const identified = Array.isArray(raw?.groups)
           ? raw.groups.filter(
@@ -1072,7 +1073,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         let currentDate: string | null = null;
         let applicantIds: string[] | undefined;
         if (mode === 'booking') {
-          const appt = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, false, true] });
+          const appt = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, false, true] });
           currentDate = appointmentDate(appt[0]?.result, match);
           applicantIds = appointmentApplicants(appt[0]?.result);
         }
@@ -1101,13 +1102,13 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Stops a probe-owned run. Ownership is enforced by the pure transition:
   // foreign runs are never touched.
   if (message?.type === 'PROBE_STOP') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     if (executingRun?.owner === 'probe-owner-dev') cancelledRuns.add(`${executingRun.owner}:${executingRun.runId}`);
     enqueue(async () => {
       try {
         const area = {
-          get: (keys: string[]) => chrome.storage.local.get(keys),
-          set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+          get: (keys: string[]) => platform.storage.local.get(keys),
+          set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const now = new Date().toISOString();
         const current = await loadEngineState(area);
@@ -1128,12 +1129,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Kicks one poll cycle for the bound run by holding its deadline now. The
   // alarm loop still owns planning, budgets, and execution.
   if (message?.type === 'PROBE_POLL') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     enqueue(async () => {
       try {
         const area = {
-          get: (keys: string[]) => chrome.storage.local.get(keys),
-          set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+          get: (keys: string[]) => platform.storage.local.get(keys),
+          set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const now = new Date().toISOString();
         const current = await loadEngineState(area);
@@ -1160,12 +1161,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Dev-only delivery check: scope and history stay intact, only the
   // observation/delivery state returns to fresh. Never touches engine runs.
   if (message?.type === 'PROBE_RESET') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     enqueue(async () => {
       try {
         const area = {
-          get: (keys: string[]) => chrome.storage.local.get(keys),
-          set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+          get: (keys: string[]) => platform.storage.local.get(keys),
+          set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1 as
           | { scopeKey?: unknown; monitor?: unknown }
@@ -1193,7 +1194,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // responses or diagnostics. No clicks, no fills, no navigation. Only the
   // bundled report page may trigger it.
   if (message?.type === 'PROBE_READ') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     enqueue(async () => {
       try {
         const kind = (message as { kind?: unknown }).kind;
@@ -1205,7 +1206,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           respond({ ok: false, route: 'untrusted' });
           return;
         }
-        const tab = await chrome.tabs.get(lastTrustedTab.tabId);
+        const tab = await platform.tabs.get(lastTrustedTab.tabId);
         const route = classifyRoute(tab?.url ?? '');
         const allowed =
           (kind === 'dashboard' && route === 'dashboard') ||
@@ -1218,7 +1219,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const func = kind === 'dashboard' ? readDashboardGroups : kind === 'summary' ? readSummaryRaw : readAppointmentForm;
         // One union member per call keeps the injected function serializable
         // and typed; all three readers are dependency-free by construction.
-        const results = await chrome.scripting.executeScript({
+        const results = await platform.scripting.executeScript({
           target: { tabId: tab.id },
           func: func as () => { groups?: { ivr?: unknown }[]; headingFound?: unknown; rows?: unknown[]; facilityId?: unknown },
         });
@@ -1243,12 +1244,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // monitor progress with counts and dates the owner already knows — never
   // identifiers, never page text. Only the bundled report page may ask.
   if (message?.type === 'PROBE_STATUS') {
-    if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    if (sender.url !== platform.runtime.getURL('probe.html')) return;
     enqueue(async () => {
       try {
         const area = {
-          get: (keys: string[]) => chrome.storage.local.get(keys),
-          set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+          get: (keys: string[]) => platform.storage.local.get(keys),
+          set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const saved = await area.get([ENGINE_KEY, 'unpaidMonitorV1', 'lastPollV1']);
         const state = saved[ENGINE_KEY] as
@@ -1294,7 +1295,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (typeof message?.type === 'string' && message.type.startsWith('ENGINE_')) {
     // Compare against the full base URL: URL.origin is "null" for
     // chrome-extension: URLs outside the browser, so prefix-match instead.
-    const extensionBase = chrome.runtime.getURL('');
+    const extensionBase = platform.runtime.getURL('');
     if (!sender.url || !sender.url.startsWith(extensionBase)) return;
     if (message.type === 'ENGINE_STOP' && executingRun && executingRun.owner === message.owner && executingRun.runId === message.runId)
       cancelledRuns.add(`${message.owner}:${message.runId}`);
@@ -1302,8 +1303,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       try {
         const validated = validateEngineMessage(message);
         const area = {
-          get: (keys: string[]) => chrome.storage.local.get(keys),
-          set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+          get: (keys: string[]) => platform.storage.local.get(keys),
+          set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const now = new Date().toISOString();
         const current = (await loadEngineState(area)) ?? emptyEngineState(now);
@@ -1347,7 +1348,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
             if (validated.mode === 'booking') {
               const tab = await dashboardTab();
               dashboardPath = new URL(tab.url!).pathname;
-              const result = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, false, true, dashboardPath] });
+              const result = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, false, true, dashboardPath] });
               currentDate = appointmentDate(result[0]?.result, match);
               applicantIds = appointmentApplicants(result[0]?.result);
             }
@@ -1406,8 +1407,8 @@ async function recoverPollException(area: import('./engine/storage').StorageArea
 function queueEnginePoll(): void {
     enqueue(async () => {
       const area = {
-        get: (keys: string[]) => chrome.storage.local.get(keys),
-        set: (values: Record<string, unknown>) => chrome.storage.local.set(values),
+        get: (keys: string[]) => platform.storage.local.get(keys),
+        set: (values: Record<string, unknown>) => platform.storage.local.set(values),
       };
       try {
         if (storageRetryAt && Date.parse(storageRetryAt) > Date.now()) { await syncEngineAlarm(storageRetryAt); return; }
@@ -1443,19 +1444,19 @@ function queueEnginePoll(): void {
               if (state.authentication.purpose === 'start') await prepareAlertScope(area, next);
               const group = next.group;
               // Renewal retains custody even when duplicate summaries exist.
-              const existing = state.authentication.purpose === 'renew' ? undefined : (await chrome.tabs.query({})).find(entry =>
+              const existing = state.authentication.purpose === 'renew' ? undefined : (await platform.tabs.query({})).find(entry =>
                 entry.id !== undefined && entry.url !== undefined && classifyRoute(entry.url) === 'payment' && isSameGroupUrl(entry.url, next.group!.scheduleId));
               next = { ...next, monitorTabId: existing?.id ?? state.authentication.tabId };
               if (!existing) {
                 const authTabId = state.authentication.tabId;
                 if (authTabId === null || authTabId === undefined) throw new Error('Missing authentication tab.');
-                const live = await chrome.tabs.get(authTabId);
+                const live = await platform.tabs.get(authTabId);
                 if (classifyRoute(live.url ?? '') !== 'dashboard' || !group.dashboardPath ||
                     new URL(live.url!).pathname !== group.dashboardPath || cancelledRuns.has(`${state.owner}:${state.runId}`))
                   throw new Error('Authentication context changed.');
                 await saveEngineState(area, next);
                 if (cancelledRuns.has(`${state.owner}:${state.runId}`)) throw new Error('Authentication cancelled.');
-                await chrome.tabs.update(authTabId, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${group.scheduleId}/payment` });
+                await platform.tabs.update(authTabId, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${group.scheduleId}/payment` });
               }
             } catch { next = parkForReview(next, new Date().toISOString()); }
           }
@@ -1481,7 +1482,7 @@ function queueEnginePoll(): void {
         const durablePrefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
         let sessionExpired = state.startedAt !== null && Date.parse(now) - Date.parse(state.startedAt) >= SESSION_AGE_MINUTES * 60_000;
         if (state.executor && !state.intent) {
-          try { sessionExpired ||= classifyRoute((await chrome.tabs.get(state.executor.tabId)).url ?? '') === 'login'; }
+          try { sessionExpired ||= classifyRoute((await platform.tabs.get(state.executor.tabId)).url ?? '') === 'login'; }
           catch {
             const next = parkForReview(state, now);
             await saveEngineState(area, next);
@@ -1537,7 +1538,7 @@ function queueEnginePoll(): void {
             return;
           }
           const scheduleId = state.group.scheduleId;
-          const paymentTabs = await chrome.tabs.query({});
+          const paymentTabs = await platform.tabs.query({});
           const matchingPayments = paymentTabs.filter(
             tab => tab.url !== undefined && classifyRoute(tab.url) === 'payment' && isSameGroupUrl(tab.url, scheduleId),
           );
@@ -1560,7 +1561,7 @@ function queueEnginePoll(): void {
           }
           let raw: unknown;
           try {
-            const results = await chrome.scripting.executeScript({ target: { tabId: payment.id }, func: readSummaryRaw, args: [scheduleId] });
+            const results = await platform.scripting.executeScript({ target: { tabId: payment.id }, func: readSummaryRaw, args: [scheduleId] });
             raw = results[0]?.result;
           } catch {
             await failSoft();
@@ -1573,7 +1574,7 @@ function queueEnginePoll(): void {
           if (typeof raw === 'object' && raw !== null && (raw as { maintenance?: unknown }).maintenance === true) {
             noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
             try {
-              await chrome.tabs.reload(payment.id, { bypassCache: true });
+              await platform.tabs.reload(payment.id, { bypassCache: true });
               maintenanceReload = state.runId ? { runId: state.runId, tabId: payment.id } : null;
             } catch { maintenanceReload = null; }
             await failSoft();
@@ -1606,7 +1607,7 @@ function queueEnginePoll(): void {
             if (alertDue) {
               if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
               // Acceptance records creation only, never proof of delivery.
-              await chrome.notifications.create({
+              await platform.notifications.create({
                 type: 'basic',
                 iconUrl: 'icons/icon128.png',
                 title: 'US Visa Scheduler for Canada',
@@ -1677,7 +1678,7 @@ function queueEnginePoll(): void {
           return;
         }
         const scheduleId = state.group.scheduleId;
-        const tabs = await chrome.tabs.query({});
+        const tabs = await platform.tabs.query({});
         // Once the executor owns a tab, never poll a replacement or another
         // same-group tab after closure/navigation.
         const reader = tabs.find(tab => tab.id === state.executor!.tabId &&
@@ -1703,9 +1704,9 @@ function queueEnginePoll(): void {
         if (state.group.applicantIds?.length === 1 &&
             sameApplicants(state.executor!.applicantIds, state.group.applicantIds) && !new URL(reader.url!).search) {
           if (!state.group.dashboardPath) { await park(); return; }
-          let baseline: chrome.scripting.InjectionResult[];
+          let baseline: InjectionResult[];
           try {
-            baseline = await chrome.scripting.executeScript({ target: { tabId: reader.id }, func: readCurrentAppointment,
+            baseline = await platform.scripting.executeScript({ target: { tabId: reader.id }, func: readCurrentAppointment,
               args: [scheduleId, state.group.ivr, true, true, state.group.dashboardPath, true] });
           } catch {
             // No reading means no permission to poll or infer an applicant.
@@ -1738,7 +1739,7 @@ function queueEnginePoll(): void {
         }
         let page: PaidPage | null;
         try {
-          const result = await chrome.scripting.executeScript({ target: { tabId: reader.id }, func: readPaidPage, args: [scheduleId, implicitApplicantId] });
+          const result = await platform.scripting.executeScript({ target: { tabId: reader.id }, func: readPaidPage, args: [scheduleId, implicitApplicantId] });
           page = result[0]?.result as PaidPage;
         } catch { await retryRead('script-interrupted'); return; }
         // A maintenance page keeps the form URL but renders no usable form. As
@@ -1748,12 +1749,12 @@ function queueEnginePoll(): void {
         if (!page || page.kind !== 'form') {
           let maintenance = false;
           try {
-            const check = await chrome.scripting.executeScript({ target: { tabId: reader.id }, func: readSiteMaintenance });
+            const check = await platform.scripting.executeScript({ target: { tabId: reader.id }, func: readSiteMaintenance });
             maintenance = (check[0]?.result as { maintenance?: unknown } | undefined)?.maintenance === true;
           } catch { maintenance = false; }
           if (maintenance) {
             noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
-            try { await chrome.tabs.reload(reader.id, { bypassCache: true }); } catch { /* Tab loss parks below via retry budget. */ }
+            try { await platform.tabs.reload(reader.id, { bypassCache: true }); } catch { /* Tab loss parks below via retry budget. */ }
             const next = pollRetry(state, 'maintenance');
             await saveEngineState(area, next);
             await syncEngineAlarm(engineAlarmAt(next));
@@ -1778,7 +1779,7 @@ function queueEnginePoll(): void {
         let status = 0;
         let body: unknown = null;
         try {
-          const results = await chrome.scripting.executeScript({
+          const results = await platform.scripting.executeScript({
             target: { tabId: reader.id },
             func: fetchDaysJson,
             args: [schedulePath, CONSULATES[consulate as keyof typeof CONSULATES]],
@@ -1862,21 +1863,21 @@ function queueEnginePoll(): void {
     });
 }
 
-chrome.alarms.onAlarm.addListener(alarm => {
+platform.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === HISTORY_ALARM) { void ready.then(() => dateHistory.prune()).catch(() => undefined); return; }
   if (alarm.name === ANALYTICS_ALARM) { void ready.then(() => analytics?.flush()).catch(() => undefined); return; }
   if (alarm.name === DIAGNOSTICS_ALARM) { void ready.then(() => engineDiagnostics.prune()).catch(() => undefined); return; }
   if (alarm.name === ENGINE_ALARM) { queueEnginePoll(); return; }
   if (alarm.name !== ALARM) return;
   enqueue(async () => {
-    await chrome.storage.local.set({ developmentProbeWakeAt: new Date().toISOString() });
+    await platform.storage.local.set({ developmentProbeWakeAt: new Date().toISOString() });
   });
 });
 
-chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
+platform.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   if ((changeInfo as { status?: unknown } | undefined)?.status !== 'complete') return;
   enqueue(async () => {
-    const area = { get: (keys: string[]) => chrome.storage.local.get(keys), set: (values: Record<string, unknown>) => chrome.storage.local.set(values) };
+    const area = { get: (keys: string[]) => platform.storage.local.get(keys), set: (values: Record<string, unknown>) => platform.storage.local.set(values) };
     const state = await loadEngineState(area);
     if (!state || !state.owner || !state.runId || cancelledRuns.has(`${state.owner}:${state.runId}`)) return;
     const url = (tab as { url?: unknown } | undefined)?.url;
@@ -1888,7 +1889,7 @@ chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
           (state.cooldownUntil && Date.parse(state.cooldownUntil) > Date.now()) ||
           !['login', 'dashboard'].includes(classifyRoute(url))) return;
       let live;
-      try { live = await chrome.tabs.get(tabId); } catch { return; }
+      try { live = await platform.tabs.get(tabId); } catch { return; }
       if (live.url !== url || live.status === 'loading') return;
       const next = { ...state, nextPollAt: now, updatedAt: now };
       await saveEngineState(area, next);
@@ -1903,7 +1904,7 @@ chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
       if (!((['actions', 'appointment'].includes(route) && isSameGroupUrl(url, state.group.scheduleId)) ||
           (state.stage === 'actions' && route === 'dashboard' && new URL(url).pathname === state.group.dashboardPath))) return;
       let live;
-      try { live = await chrome.tabs.get(tabId); } catch { return; }
+      try { live = await platform.tabs.get(tabId); } catch { return; }
       if (live.url !== url || live.status === 'loading') return;
       const next = setNextPoll(state, { owner: state.owner, runId: state.runId, nextPollAt: now, now });
       await saveEngineState(area, next);
@@ -1929,14 +1930,14 @@ chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   });
 });
 
-chrome.storage.onChanged?.addListener((changes, areaName) => {
+platform.storage.onChanged?.addListener((changes, areaName) => {
   if (areaName !== 'local' || !changes.uiPreferencesV1) return;
   explicitStartEpoch += 1;
   analytics?.end();
   if (executingRun) cancelledRuns.add(`${executingRun.owner}:${executingRun.runId}`);
   enqueue(async () => {
     analytics?.end();
-    const area = { get: (keys: string[]) => chrome.storage.local.get(keys), set: (values: Record<string, unknown>) => chrome.storage.local.set(values) };
+    const area = { get: (keys: string[]) => platform.storage.local.get(keys), set: (values: Record<string, unknown>) => platform.storage.local.set(values) };
     const state = await loadEngineState(area);
     // Settings or credential changes after a queued verification restart cancel
     // the request (scoped to the requested configuration) while preserving

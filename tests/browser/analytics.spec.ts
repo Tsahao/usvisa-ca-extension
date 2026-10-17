@@ -28,7 +28,7 @@ test('packaged explicit telemetry distinguishes paid curiosity from healthy unpa
   const profile = await mkdtemp(path.join(tmpdir(), 'usvisa-analytics-fixture-'));
   const extensionPath = path.resolve('dist-analytics-test');
   const manifest = JSON.parse(await readFile(path.join(extensionPath, 'manifest.json'), 'utf8'));
-  expect(manifest.host_permissions).toEqual(['https://ais.usvisa-info.com/*', 'https://us.i.posthog.com/*']);
+  expect(manifest.host_permissions).toEqual(['https://ais.usvisa-info.com/*']);
   const context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: true,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`,
       '--host-resolver-rules=MAP ais.usvisa-info.com ~NOTFOUND, MAP us.i.posthog.com ~NOTFOUND, MAP eu.i.posthog.com ~NOTFOUND'] });

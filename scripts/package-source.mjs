@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deterministicArchive, filesUnder, thirdPartyLicenses } from './archive-utils.mjs';
+import { parseBrowserArgs, resolveBrowserTarget } from './browser-target.mjs';
 
 export const sourceRoots = ['src', 'public', 'tests', 'scripts', 'docs'];
 export const sourceFiles = ['.env.example', '.gitignore', 'LICENSE', 'README.md',
@@ -36,9 +37,10 @@ export function sourceInventory(root) {
   return publicFiles.sort();
 }
 
-export function packageSource(root) {
+export function packageSource(root, browser = process.env.BROWSER_TARGET) {
+  const target = resolveBrowserTarget(browser);
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  const slug = `us-visa-scheduler-for-canada-${pkg.version}`;
+  const slug = `us-visa-scheduler-for-canada-${pkg.version}${target.artifactSuffix}`;
   const release = join(root, 'release');
   mkdirSync(release, { recursive: true });
   const generated = {
@@ -50,4 +52,7 @@ export function packageSource(root) {
   console.log(`package-source OK: ${output}\nsha256: ${digest}`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) packageSource(resolve('.'));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { target } = parseBrowserArgs(process.argv.slice(2));
+  packageSource(resolve('.'), target.name);
+}

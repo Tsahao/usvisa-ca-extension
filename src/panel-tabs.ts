@@ -1,11 +1,12 @@
+import { platform, type Tab } from './platform';
 import { classifyRoute, SITE_ORIGIN } from './domain/routes';
 import { isSameGroupUrl } from './domain/trust';
 import type { EngineState } from './engine/workflow';
 
 export const VISA_LOGIN_URL = `${SITE_ORIGIN}/en-ca/niv/users/sign_in`;
-const trusted = (tab: chrome.tabs.Tab) => tab.id !== undefined && !['untrusted', 'unsupported'].includes(classifyRoute(tab.url ?? ''));
+const trusted = (tab: Tab) => tab.id !== undefined && !['untrusted', 'unsupported'].includes(classifyRoute(tab.url ?? ''));
 
-function matchesGroup(tab: chrome.tabs.Tab, state: EngineState): boolean {
+function matchesGroup(tab: Tab, state: EngineState): boolean {
   if (!trusted(tab) || !state.group) return false;
   const route = classifyRoute(tab.url!);
   if (route === 'dashboard') return !!state.group.dashboardPath && new URL(tab.url!).pathname === state.group.dashboardPath;
@@ -19,10 +20,10 @@ export async function pinpointVisaTab(state: EngineState | null, preferredTabId:
   const ownedIds = [state?.authentication?.tabId,
     state?.intent ? state.verificationTabId : null,
     state?.mode === 'booking' ? state.executor?.tabId : state?.monitorTabId];
-  let target: chrome.tabs.Tab | undefined;
+  let target: Tab | undefined;
   for (const tabId of ownedIds) {
     if (tabId === undefined || tabId === null) continue;
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tab = await platform.tabs.get(tabId).catch(() => null);
     if (!tab || !trusted(tab)) continue;
     const route = classifyRoute(tab.url!);
     const authenticating = tabId === state?.authentication?.tabId;
@@ -30,7 +31,7 @@ export async function pinpointVisaTab(state: EngineState | null, preferredTabId:
         (state && matchesGroup(tab, state))) { target = tab; break; }
   }
   if (!target) {
-    const tabs = (await chrome.tabs.query({})).filter(trusted);
+    const tabs = (await platform.tabs.query({})).filter(trusted);
     const scoped = state?.group
       ? tabs.filter(tab => matchesGroup(tab, state) || classifyRoute(tab.url!) === 'login')
       : tabs;
@@ -39,15 +40,15 @@ export async function pinpointVisaTab(state: EngineState | null, preferredTabId:
     if (!target && scoped.length > 1) throw new Error('Several matching Visa tabs are open. Click the extension icon on the tab you want to view, then try again.');
   }
   if (!target) {
-    await chrome.tabs.create({ url: VISA_LOGIN_URL, active: true });
+    await platform.tabs.create({ url: VISA_LOGIN_URL, active: true });
     return;
   }
   // Revalidate after discovery so a changed URL cannot redirect this action
   // to an unrelated site. Use its current window if the user moved the tab.
-  const live = await chrome.tabs.get(target.id!);
+  const live = await platform.tabs.get(target.id!);
   if (!trusted(live) || live.url !== target.url) throw new Error('The Visa tab changed. Try again.');
-  const window = await chrome.windows.get(live.windowId);
-  if (window.state === 'minimized') await chrome.windows.update(live.windowId, { state: 'normal' });
-  const activated = await chrome.tabs.update(live.id!, { active: true });
-  await chrome.windows.update(activated?.windowId ?? live.windowId, { focused: true });
+  const window = await platform.windows.get(live.windowId);
+  if (window.state === 'minimized') await platform.windows.update(live.windowId, { state: 'normal' });
+  const activated = await platform.tabs.update(live.id!, { active: true });
+  await platform.windows.update(activated?.windowId ?? live.windowId, { focused: true });
 }

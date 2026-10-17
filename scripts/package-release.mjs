@@ -3,12 +3,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { deterministicArchive, filesUnder, thirdPartyLicenses } from './archive-utils.mjs';
+import { parseBrowserArgs } from './browser-target.mjs';
 
+const { target } = parseBrowserArgs(process.argv.slice(2));
 const root = resolve('.');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-const slug = `us-visa-scheduler-for-canada-${pkg.version}`;
-const dist = join(root, 'dist');
-execFileSync(process.execPath, [join(root, 'scripts/release-smoke.mjs'), dist], { stdio: 'inherit' });
+const slug = `us-visa-scheduler-for-canada-${pkg.version}${target.artifactSuffix}`;
+const dist = join(root, target.outDir);
+execFileSync(process.execPath, [join(root, 'scripts/release-smoke.mjs'), '--browser', target.name, dist], { stdio: 'inherit' });
 const release = join(root, 'release');
 mkdirSync(release, { recursive: true });
 const generated = {
