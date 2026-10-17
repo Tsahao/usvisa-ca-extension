@@ -85,3 +85,15 @@ document.querySelector('#engine-status')!.addEventListener('click', async () => 
     result.textContent = response?.ok ? `Engine: ${JSON.stringify(response)}` : 'Could not read engine status.';
   } catch { result.textContent = 'Could not contact the background worker.'; }
 });
+
+// Developer read/export of the bounded local diagnostics log. Read-only and
+// allowlisted: the worker returns the pruned snapshot only.
+document.querySelector('#read-diagnostics')!.addEventListener('click', async () => {
+  const output = document.querySelector('#diagnostics-output')!;
+  try {
+    const response = await platform.runtime.sendMessage({ type: 'PROBE_DIAGNOSTICS' });
+    output.textContent = response?.ok
+      ? JSON.stringify(response.diagnostics, null, 2)
+      : 'Could not read developer diagnostics.';
+  } catch { output.textContent = 'Could not contact the background worker.'; }
+});

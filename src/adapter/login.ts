@@ -1,6 +1,21 @@
 export type LoginRequest = { action: 'prepare' | 'submit'; email: string; password: string };
-export type LoginResult = { ok: boolean; reason?: 'manual-authentication' | 'sign-in-notice-dismissed' | 'retryable' | 'credential-rejected' };
-export type LoginProbeResult = { ok: boolean; reason?: 'manual-authentication' | 'retryable' | 'credential-rejected' };
+// Fixed allowlisted validation-branch codes. Injected functions are
+// self-contained (no imports in page context), so the literals below are the
+// source of truth and the worker validates them against the same allowlist in
+// src/domain/diagnostics.ts. Detail codes carry no page content, identifiers
+// or values.
+export type LoginFailureDetail =
+  | 'url-mismatch'
+  | 'form-missing' | 'form-duplicate' | 'form-loading'
+  | 'email-missing' | 'email-duplicate' | 'password-missing' | 'password-duplicate'
+  | 'policy-missing' | 'policy-duplicate'
+  | 'form-method' | 'form-destination' | 'submit-count' | 'submit-disabled' | 'submit-override'
+  | 'control-detached' | 'control-disabled' | 'policy-type' | 'password-type' | 'email-type'
+  | 'credentials-invalid' | 'fields-changed' | 'policy-unchecked' | 'prepare-not-retained'
+  | 'banner-unclassified' | 'notice-unrecognized'
+  | 'challenge-detected' | 'captcha-detected' | 'overlay-detected';
+export type LoginResult = { ok: boolean; reason?: 'manual-authentication' | 'sign-in-notice-dismissed' | 'retryable' | 'credential-rejected'; detail?: LoginFailureDetail };
+export type LoginProbeResult = { ok: boolean; reason?: 'manual-authentication' | 'retryable' | 'credential-rejected'; detail?: LoginFailureDetail };
 
 // Strictly read-only post-submit probe for the worker `wait` phase. Mirrors
 // the trusted route/form/challenge/flash checks of performLoginAction without
@@ -34,7 +49,7 @@ export function goToLoginFromLanding(): { ok: boolean } {
 export function performLoginAction(request: LoginRequest): LoginResult {
   const current = new URL(location.href);
   if (current.origin !== 'https://ais.usvisa-info.com' || current.username || current.password || current.port || current.hash ||
-      current.pathname !== '/en-ca/niv/users/sign_in' || current.search) return { ok: false };
+      current.pathname !== '/en-ca/niv/users/sign_in' || current.search) return { ok: false, detail: 'url-mismatch' };
   const visible = (element: Element) => {
     for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
       const style = getComputedStyle(ancestor);
@@ -55,20 +70,30 @@ export function performLoginAction(request: LoginRequest): LoginResult {
     const duplicated = forms.length > 1 || emails.length > 1 || passwords.length > 1 || policies.length > 1;
     let loading = false;
     try { loading = document.readyState !== 'complete'; } catch { loading = false; }
-    if (missing && !duplicated && loading) return { ok: false, reason: 'retryable' };
-    return { ok: false };
+    if (missing && !duplicated && loading) return { ok: false, reason: 'retryable', detail: 'form-loading' };
+    return { ok: false, detail: missing ? 'form-missing' : 'form-duplicate' };
   }
   const form = forms[0];
   const target = new URL(form.getAttribute('action') ?? '', current.href);
   const submits = form.querySelectorAll<HTMLInputElement>('input[type="submit"]');
-  if (form.method.toLowerCase() !== 'post' || target.origin !== current.origin || target.username || target.password || target.port || target.hash || target.search ||
-      target.pathname !== '/en-ca/niv/users/sign_in' || submits.length !== 1 || submits[0].disabled || submits[0].hasAttribute('formaction') || submits[0].hasAttribute('formmethod') ||
-      [emails[0], passwords[0], policies[0]].some(control => control.form !== form || control.disabled) || policies[0].type !== 'checkbox' ||
-      passwords[0].type !== 'password' || !['text', 'email'].includes(emails[0].type)) return { ok: false };
+  if (form.method.toLowerCase() !== 'post') return { ok: false, detail: 'form-method' };
+  if (target.origin !== current.origin || target.username || target.password || target.port || target.hash || target.search ||
+      target.pathname !== '/en-ca/niv/users/sign_in') return { ok: false, detail: 'form-destination' };
+  if (submits.length !== 1) return { ok: false, detail: 'submit-count' };
+  if (submits[0].disabled) return { ok: false, detail: 'submit-disabled' };
+  if (submits[0].hasAttribute('formaction') || submits[0].hasAttribute('formmethod')) return { ok: false, detail: 'submit-override' };
+  if ([emails[0], passwords[0], policies[0]].some(control => control.form !== form)) return { ok: false, detail: 'control-detached' };
+  if ([emails[0], passwords[0], policies[0]].some(control => control.disabled)) return { ok: false, detail: 'control-disabled' };
+  if (policies[0].type !== 'checkbox') return { ok: false, detail: 'policy-type' };
+  if (passwords[0].type !== 'password') return { ok: false, detail: 'password-type' };
+  if (!['text', 'email'].includes(emails[0].type)) return { ok: false, detail: 'email-type' };
   if (typeof request.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(request.email) ||
-      typeof request.password !== 'string' || request.password.length === 0) return { ok: false };
-  if (request.action !== 'prepare' && (request.action !== 'submit' || emails[0].value !== request.email ||
-      passwords[0].value !== request.password || !policies[0].checked)) return { ok: false };
+      typeof request.password !== 'string' || request.password.length === 0) return { ok: false, detail: 'credentials-invalid' };
+  if (request.action !== 'prepare') {
+    if (request.action !== 'submit' || emails[0].value !== request.email ||
+        passwords[0].value !== request.password) return { ok: false, detail: 'fields-changed' };
+    if (!policies[0].checked) return { ok: false, detail: 'policy-unchecked' };
+  }
   // The intermittent sign-in notice is recognized semantically so decorative
   // jQuery classes cannot block dismissal: one visible dialog containing the
   // unique flash message with the exact notice text and a single safe OK
@@ -141,13 +166,13 @@ export function performLoginAction(request: LoginRequest): LoginResult {
       !message.querySelector('a, button, input, select, textarea, iframe, [contenteditable]') &&
       (describedBy === null || describedBy.trim() === '' || describedBy.trim() === 'flash_messages') &&
       controls.filter(isDismissalControl).length === 1 && controls.every(control => isDismissalControl(control) || isCloseControl(control));
-    if (!recognized) return { ok: false, reason: 'manual-authentication' };
+    if (!recognized) return { ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' };
     (controls.filter(isDismissalControl)[0] as HTMLElement).click();
     // Let the site's close handler finish. The worker keeps this phase and
     // validates the whole page again before filling or submitting anything.
     return { ok: false, reason: 'sign-in-notice-dismissed' };
   }
-  if (document.querySelector('iframe[src*="captcha" i], iframe[src*="challenge" i], [data-sitekey], .cf-turnstile, #challenge-running, #cf-challenge-running, input[autocomplete="one-time-code"], input[name*="otp" i]')) return { ok: false, reason: 'manual-authentication' };
+  if (document.querySelector('iframe[src*="captcha" i], iframe[src*="challenge" i], [data-sitekey], .cf-turnstile, #challenge-running, #cf-challenge-running, input[autocomplete="one-time-code"], input[name*="otp" i]')) return { ok: false, reason: 'manual-authentication', detail: 'challenge-detected' };
   for (const element of Array.from(document.querySelectorAll<HTMLElement>('[class*="captcha" i]'))) {
     const captchaClasses = Array.from(element.classList).filter(name => name.toLowerCase().includes('captcha'));
     const image = element.firstElementChild;
@@ -155,7 +180,7 @@ export function performLoginAction(request: LoginRequest): LoginResult {
       element.childElementCount === 1 && image?.tagName === 'IMG' && image.childElementCount === 0 && !element.textContent?.trim() &&
       !element.matches('[onclick], [tabindex], [role="button"], [contenteditable]') &&
       !image.matches('[onclick], [tabindex], [role="button"], [contenteditable]');
-    if (!passiveLogo) return { ok: false, reason: 'manual-authentication' };
+    if (!passiveLogo) return { ok: false, reason: 'manual-authentication', detail: 'captcha-detected' };
   }
   // An explicit credential rejection stops instead of retrying; any other
   // flash styling stays an unrecognized stop without a reason.
@@ -164,18 +189,19 @@ export function performLoginAction(request: LoginRequest): LoginResult {
     const text = failures.map(element => element.textContent ?? '').join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
     if (['invalid', 'incorrect', 'wrong'].some(word => text.includes(word)) &&
         ['email', 'password', 'login', 'credential'].some(word => text.includes(word))) {
-      return { ok: false, reason: 'credential-rejected' };
+      return { ok: false, reason: 'credential-rejected', detail: 'credentials-invalid' };
     }
-    return { ok: false };
+    return { ok: false, detail: 'banner-unclassified' };
   }
-  if (Array.from(document.querySelectorAll('.ui-widget-overlay, .reveal-overlay')).some(visible)) return { ok: false, reason: 'manual-authentication' };
+  if (Array.from(document.querySelectorAll('.ui-widget-overlay, .reveal-overlay')).some(visible)) return { ok: false, reason: 'manual-authentication', detail: 'overlay-detected' };
   if (request.action === 'prepare') {
     emails[0].value = request.email;
     passwords[0].value = request.password;
     emails[0].dispatchEvent(new Event('input', { bubbles: true }));
     passwords[0].dispatchEvent(new Event('input', { bubbles: true }));
     if (!policies[0].checked) policies[0].click();
-    return { ok: policies[0].checked && emails[0].value === request.email && passwords[0].value === request.password };
+    return policies[0].checked && emails[0].value === request.email && passwords[0].value === request.password
+      ? { ok: true } : { ok: false, detail: 'prepare-not-retained' };
   }
   submits[0].click();
   return { ok: true };
@@ -184,7 +210,7 @@ export function performLoginAction(request: LoginRequest): LoginResult {
 export function probeLoginStatus(): LoginProbeResult {
   const current = new URL(location.href);
   if (current.origin !== 'https://ais.usvisa-info.com' || current.username || current.password || current.port || current.hash ||
-      current.pathname !== '/en-ca/niv/users/sign_in' || current.search) return { ok: false };
+      current.pathname !== '/en-ca/niv/users/sign_in' || current.search) return { ok: false, detail: 'url-mismatch' };
   const visible = (element: Element) => {
     for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
       const style = getComputedStyle(ancestor);
@@ -202,16 +228,23 @@ export function probeLoginStatus(): LoginProbeResult {
     const duplicated = forms.length > 1 || emails.length > 1 || passwords.length > 1 || policies.length > 1;
     let loading = false;
     try { loading = document.readyState !== 'complete'; } catch { loading = false; }
-    if (missing && !duplicated && loading) return { ok: false, reason: 'retryable' };
-    return { ok: false };
+    if (missing && !duplicated && loading) return { ok: false, reason: 'retryable', detail: 'form-loading' };
+    return { ok: false, detail: missing ? 'form-missing' : 'form-duplicate' };
   }
   const form = forms[0];
   const target = new URL(form.getAttribute('action') ?? '', current.href);
   const submits = form.querySelectorAll<HTMLInputElement>('input[type="submit"]');
-  if (form.method.toLowerCase() !== 'post' || target.origin !== current.origin || target.username || target.password || target.port || target.hash || target.search ||
-      target.pathname !== '/en-ca/niv/users/sign_in' || submits.length !== 1 || submits[0].disabled || submits[0].hasAttribute('formaction') || submits[0].hasAttribute('formmethod') ||
-      [emails[0], passwords[0], policies[0]].some(control => control.form !== form || control.disabled) || policies[0].type !== 'checkbox' ||
-      passwords[0].type !== 'password' || !['text', 'email'].includes(emails[0].type)) return { ok: false };
+  if (form.method.toLowerCase() !== 'post') return { ok: false, detail: 'form-method' };
+  if (target.origin !== current.origin || target.username || target.password || target.port || target.hash || target.search ||
+      target.pathname !== '/en-ca/niv/users/sign_in') return { ok: false, detail: 'form-destination' };
+  if (submits.length !== 1) return { ok: false, detail: 'submit-count' };
+  if (submits[0].disabled) return { ok: false, detail: 'submit-disabled' };
+  if (submits[0].hasAttribute('formaction') || submits[0].hasAttribute('formmethod')) return { ok: false, detail: 'submit-override' };
+  if ([emails[0], passwords[0], policies[0]].some(control => control.form !== form)) return { ok: false, detail: 'control-detached' };
+  if ([emails[0], passwords[0], policies[0]].some(control => control.disabled)) return { ok: false, detail: 'control-disabled' };
+  if (policies[0].type !== 'checkbox') return { ok: false, detail: 'policy-type' };
+  if (passwords[0].type !== 'password') return { ok: false, detail: 'password-type' };
+  if (!['text', 'email'].includes(emails[0].type)) return { ok: false, detail: 'email-type' };
   // Same two known notices as performLoginAction, but strictly read-only: a
   // present notice is transient (the next fresh cycle dismisses it before any
   // credential handling) and is never clicked here.
@@ -263,10 +296,10 @@ export function probeLoginStatus(): LoginProbeResult {
       !message.querySelector('a, button, input, select, textarea, iframe, [contenteditable]') &&
       (describedBy === null || describedBy.trim() === '' || describedBy.trim() === 'flash_messages') &&
       controls.filter(isDismissalControl).length === 1 && controls.every(control => isDismissalControl(control) || isCloseControl(control));
-    if (!recognized) return { ok: false, reason: 'manual-authentication' };
+    if (!recognized) return { ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' };
     return { ok: false, reason: 'retryable' };
   }
-  if (document.querySelector('iframe[src*="captcha" i], iframe[src*="challenge" i], [data-sitekey], .cf-turnstile, #challenge-running, #cf-challenge-running, input[autocomplete="one-time-code"], input[name*="otp" i]')) return { ok: false, reason: 'manual-authentication' };
+  if (document.querySelector('iframe[src*="captcha" i], iframe[src*="challenge" i], [data-sitekey], .cf-turnstile, #challenge-running, #cf-challenge-running, input[autocomplete="one-time-code"], input[name*="otp" i]')) return { ok: false, reason: 'manual-authentication', detail: 'challenge-detected' };
   for (const element of Array.from(document.querySelectorAll<HTMLElement>('[class*="captcha" i]'))) {
     const captchaClasses = Array.from(element.classList).filter(name => name.toLowerCase().includes('captcha'));
     const image = element.firstElementChild;
@@ -274,17 +307,17 @@ export function probeLoginStatus(): LoginProbeResult {
       element.childElementCount === 1 && image?.tagName === 'IMG' && image.childElementCount === 0 && !element.textContent?.trim() &&
       !element.matches('[onclick], [tabindex], [role="button"], [contenteditable]') &&
       !image.matches('[onclick], [tabindex], [role="button"], [contenteditable]');
-    if (!passiveLogo) return { ok: false, reason: 'manual-authentication' };
+    if (!passiveLogo) return { ok: false, reason: 'manual-authentication', detail: 'captcha-detected' };
   }
   const failures = Array.from(document.querySelectorAll('.alert.alert-danger, .flash.error'));
   if (failures.length) {
     const text = failures.map(element => element.textContent ?? '').join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
     if (['invalid', 'incorrect', 'wrong'].some(word => text.includes(word)) &&
         ['email', 'password', 'login', 'credential'].some(word => text.includes(word))) {
-      return { ok: false, reason: 'credential-rejected' };
+      return { ok: false, reason: 'credential-rejected', detail: 'credentials-invalid' };
     }
-    return { ok: false };
+    return { ok: false, detail: 'banner-unclassified' };
   }
-  if (Array.from(document.querySelectorAll('.ui-widget-overlay, .reveal-overlay')).some(visible)) return { ok: false, reason: 'manual-authentication' };
+  if (Array.from(document.querySelectorAll('.ui-widget-overlay, .reveal-overlay')).some(visible)) return { ok: false, reason: 'manual-authentication', detail: 'overlay-detected' };
   return { ok: true };
 }

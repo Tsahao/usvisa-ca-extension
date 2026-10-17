@@ -1,4 +1,5 @@
 import { isPanelCommandErrorMessage } from './start-errors';
+import { isAuthenticationFailureReason, type AuthenticationFailureReason } from '../domain/diagnostics';
 import { emptyAlertState, type AlertState } from '../domain/alerts';
 import { validateApplicantIds } from '../domain/applicants';
 import { isIsoDate } from '../domain/dates';
@@ -31,21 +32,9 @@ export function isVerificationErrorMessage(value: unknown): value is string {
 // null and malformed values fail closed. Cleared on fresh/healthy
 // authentication and preserved existing panel/analytics semantics (panel
 // keeps using loginFailed/authenticationError; analytics keeps its existing
-// terminal-failure classification).
-export const AUTHENTICATION_FAILURE_REASONS = [
-  'configuration-changed',
-  'cancelled',
-  'tab-unavailable',
-  'untrusted-navigation',
-  'context-changed',
-  'navigation-failed',
-  'unrecognized-reading',
-  'credential-rejected',
-] as const;
-export type AuthenticationFailureReason = (typeof AUTHENTICATION_FAILURE_REASONS)[number];
-export function isAuthenticationFailureReason(value: unknown): value is AuthenticationFailureReason {
-  return typeof value === 'string' && (AUTHENTICATION_FAILURE_REASONS as readonly string[]).includes(value);
-}
+// terminal-failure classification). The allowlist lives with the diagnostics
+// schema so workflow saves and diagnostic events cannot drift apart.
+export { AUTHENTICATION_FAILURE_REASONS, isAuthenticationFailureReason, type AuthenticationFailureReason } from '../domain/diagnostics';
 
 // Durable permission to restart AFTER verification resolves, created by an
 // explicit product Start during unresolved intent. Scoped to the verifying
@@ -88,6 +77,12 @@ export type AuthenticationState = {
   cycleStartedAt?: string;
   cycleDeadline?: string | null;
   submittedInCycle?: boolean;
+  // What the durable pending checkpoint guards: 'navigation' is a browser-side
+  // GET to a fixed approved target (an interrupted one is safely recoverable
+  // on worker wake), 'action' is an injected login form action which may have
+  // submitted a POST (never replayed; resumes read-only on worker wake).
+  // Optional: unknown/legacy checkpoints still park for explicit review.
+  checkpoint?: 'navigation' | 'action';
 };
 
 export type EngineState = {
@@ -255,8 +250,11 @@ export function validateEngineState(value: unknown): EngineState {
     if (cycleDeadline !== null && !isIsoDateTime(cycleDeadline)) throw new Error('Invalid authentication state.');
     const submittedInCycle = auth.submittedInCycle === undefined ? auth.phase === 'wait' : auth.submittedInCycle;
     if (typeof submittedInCycle !== 'boolean') throw new Error('Invalid authentication state.');
+    if (!(auth.checkpoint === undefined || auth.checkpoint === 'navigation' || auth.checkpoint === 'action'))
+      throw new Error('Invalid authentication state.');
     authentication = { tabId: auth.tabId, phase: auth.phase, pending: auth.pending, startedAt: auth.startedAt, purpose: auth.purpose,
-      cycleStartedAt, cycleDeadline, submittedInCycle };
+      cycleStartedAt, cycleDeadline, submittedInCycle,
+      ...(auth.checkpoint === undefined ? {} : { checkpoint: auth.checkpoint }) };
   }
   if (!Number.isInteger(pollIntervalS) || (pollIntervalS as number) < 60 || (pollIntervalS as number) > 86400) throw new Error('Invalid poll interval.');
   if (!(startedAt === null || isIsoDateTime(startedAt)) ||
@@ -480,7 +478,31 @@ export function setNextPoll(  state: EngineState,
 // revalidated cycle, never a replay of every missed poll.
 export function reconcileStartup(state: EngineState, now: string, browserRestart = false): EngineState {
   if (!isIsoDateTime(now)) throw new Error('Invalid engine timestamp.');
-  if (state.authentication?.pending) state = { ...state, status: 'verifying', authentication: null, verification: null, nextPollAt: null,
+  // An interrupted browser-side GET checkpoint is provably safe to recover on
+  // worker wake: no POST can be replayed by a navigation, and the recovered
+  // state revalidates the owned tab, settings, group, baseline and roster
+  // before any fill, click or submit. The durable wait is held (the saved
+  // cycle deadline when still in the future); Stop and edited settings keep
+  // being respected by the resumed pass. Login action checkpoints resume
+  // read-only below; unknown/legacy checkpoints and a real browser restart
+  // stay parked per the product contract.
+  if (state.authentication?.pending && !browserRestart && state.authentication.checkpoint === 'navigation') {
+    const deadline = state.authentication.cycleDeadline && Date.parse(state.authentication.cycleDeadline) > Date.parse(now)
+      ? state.authentication.cycleDeadline : now;
+    state = { ...state, authentication: { ...state.authentication, pending: false, checkpoint: undefined, phase: 'retry' },
+      nextPollAt: deadline, updatedAt: now };
+  }
+  else if (state.authentication?.pending && !browserRestart && state.authentication.checkpoint === 'action') {
+    // This checkpoint covers login preparation/submission only, never a
+    // booking action. Treat its reply as uncertain, consume the cycle's
+    // single submit allowance, and resume read-only at the durable deadline.
+    // A subsequent cycle must start with a fresh GET; no POST is replayed.
+    const deadline = state.authentication.cycleDeadline && Date.parse(state.authentication.cycleDeadline) > Date.parse(now)
+      ? state.authentication.cycleDeadline : now;
+    state = { ...state, authentication: { ...state.authentication, pending: false, checkpoint: undefined,
+      submittedInCycle: true, phase: 'wait' }, nextPollAt: deadline, updatedAt: now };
+  }
+  else if (state.authentication?.pending) state = { ...state, status: 'verifying', authentication: null, verification: null, nextPollAt: null,
     verificationTabId: null, restartPending: false, ...(browserRestart ? { queuedStart: null } : {}), updatedAt: now } as EngineState;
   else if (browserRestart && state.authentication) state = { ...state, status: 'verifying', authentication: null, verification: null, nextPollAt: null,
     verificationTabId: null, queuedStart: null, restartPending: false, updatedAt: now };

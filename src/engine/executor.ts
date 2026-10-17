@@ -5,6 +5,7 @@ import { parseTimesPayload } from '../domain/availability';
 import { classifyRoute } from '../domain/routes';
 import { isSameGroupUrl } from '../domain/trust';
 import { mapHttpStatus, SESSION_AGE_MINUTES } from '../domain/timing';
+import { isDiagnosticPhase, type DiagnosticDetail, type DiagnosticEvent } from '../domain/diagnostics';
 import { performPaidAction, type ActResult, type PaidAction } from '../adapter/acts';
 import { readPaidPage, type PaidPage } from '../adapter/paid';
 import { readCurrentAppointment } from '../adapter/reads';
@@ -13,6 +14,7 @@ import { fetchTimesJson, type PollResponse } from '../adapter/poll';
 import { applyPollResult, setStage, type BookingStage } from './poll';
 import { parkForReview, recordIntent, type EngineState } from './workflow';
 import { policyKey } from './lifecycle';
+import { beginAuthentication } from './authentication';
 import { performAppointmentSubmission, waitForAppointmentDialog, type SubmissionRequest } from '../adapter/confirmation';
 import { performDashboardContinue } from '../adapter/dashboard-entry';
 
@@ -35,6 +37,11 @@ export type ExecDeps = {
   isCancelled?: () => boolean;
   // Best-effort local history only; never awaited or allowed to gate an action.
   onBookingAttempt?: (state: EngineState) => void;
+  // Best-effort bounded local developer diagnostics (fixed allowlisted codes
+  // only). Fire-and-forget by contract: recording never blocks, gates or
+  // alters a booking/authentication/engine action. Optional so unit
+  // harnesses without a diagnostics recorder stay unchanged.
+  recordDiagnostic?: (event: DiagnosticEvent) => void;
 };
 
 type Prefs = {
@@ -66,42 +73,71 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   const scheduleId = state.group.scheduleId;
   const owner = state.owner;
   const runId = state.runId;
-  const verify = (): EngineState => ({ ...parkForReview(state, deps.nowIso()), stage: 'done',
-    verification: { reads: [], nextReadAt: new Date(Date.parse(deps.nowIso()) + 30_000).toISOString() } });
-  const parkBare = () => parkForReview(state, deps.nowIso());
+  // Best-effort bounded developer diagnostics: fixed allowlisted codes only,
+  // recorded around the existing decisions without ever changing them. The
+  // current booking stage is attached when it is an allowlisted phase so
+  // post-run analysis can place each retry/park/verification in its stage.
+  const note = (code: DiagnosticEvent['code'], detail?: DiagnosticDetail, failures?: number): void => {
+    const stage = state.stage;
+    try { deps.recordDiagnostic?.({ code, ...(detail === undefined ? {} : { detail }), mode: 'booking', ...(isDiagnosticPhase(stage) ? { phase: stage } : {}),
+      ...(failures === undefined ? {} : { failures }) }); } catch { /* Diagnostics never gate booking. */ }
+  };
+  const verify = (): EngineState => {
+    note('executor-verification', 'action-unconfirmed');
+    return { ...parkForReview(state, deps.nowIso()), stage: 'done',
+      verification: { reads: [], nextReadAt: new Date(Date.parse(deps.nowIso()) + 30_000).toISOString() } };
+  };
   // An interrupted mutation checkpoint (actionPending) with a durable intent
   // must route into scheduled verification, never park without a deadline.
   // Explicit cancellation still parks bare; other guards with an intent also
-  // schedule verification instead of stalling.
-  const park = () => (state.intent && !deps.isCancelled?.() ? verify() : parkBare());
+  // schedule verification instead of stalling. The caller passes the exact
+  // fixed reason so post-run analysis never reads a generic stage guard.
+  const parkBare = (detail: DiagnosticDetail = 'stage-guard') => {
+    note('executor-park', detail);
+    return parkForReview(state, deps.nowIso());
+  };
+  const park = (detail?: DiagnosticDetail) => (state.intent && !deps.isCancelled?.() ? verify() : parkBare(detail));
   if (state.executor?.actionPending && state.intent) return verify();
   if (state.mode !== 'booking' || state.group.kind !== 'paid' || !owner || !runId || state.executor?.actionPending ||
       (state.stage === 'confirm' && !state.intent) ||
       (state.intent && !(state.stage === 'confirm' && state.intent.phase === 'submitted' && state.intent.runId === runId && state.intent.groupId === scheduleId))) return park();
   const prefs = await readPrefs(deps);
-  if (deps.isCancelled?.()) return park();
+  if (deps.isCancelled?.()) return park('cancelled');
   if (!state.startedAt || Date.parse(deps.nowIso()) - Date.parse(state.startedAt) >= SESSION_AGE_MINUTES * 60_000 ||
-      (state.policyKey !== null && state.policyKey !== prefs?.policyKey)) return park();
+      (state.policyKey !== null && state.policyKey !== prefs?.policyKey)) return park('config-changed');
   const windowPrefs = prefs && { earliest: prefs.earliest, latest: prefs.latest, exclusions: [], onlyEarlier: prefs.onlyEarlier };
-  if (!prefs || !windowPrefs ||
-      (state.lastCandidate !== null && !canBook(state.lastCandidate, state.group.currentDate, windowPrefs))) return park();
-  if (state.stage === 'actions' && !state.group.applicantIds) return park();
+  if (!prefs || !windowPrefs) return park('config-changed');
+  if (state.lastCandidate !== null && !canBook(state.lastCandidate, state.group.currentDate, windowPrefs)) return park('candidate-invalid');
+  if (state.stage === 'actions' && !state.group.applicantIds) return park('roster-missing');
   const prefsUnchanged = async () => JSON.stringify(await readPrefs(deps)) === JSON.stringify(prefs);
   const pace = (stage: BookingStage, delayMs = state.lastCandidate !== null &&
     ((state.stage === 'form' && stage === 'form') || stage === 'confirm') ? 0 : 2_000): EngineState => ({
     ...setStage(state, stage, deps.nowIso()),
     nextPollAt: new Date(Date.parse(deps.nowIso()) + delayMs).toISOString(), updatedAt: deps.nowIso(),
   });
-  const retry = () => applyPollResult(state, { outcome: 'retryable', now: deps.nowIso(), random: deps.random });
+  const retry = (detail: DiagnosticDetail = 'transport'): EngineState => {
+    if (state.intent) return verify();
+    if (deps.isCancelled?.()) return parkBare('cancelled');
+    const next = applyPollResult(state, { outcome: 'retryable', now: deps.nowIso(), random: deps.random });
+    note('executor-retry', detail, next.consecutiveFailures);
+    return next;
+  };
+  const recoverEntry = (): EngineState => {
+    const failed = retry('reply-missing');
+    if (failed.status !== 'running' || failed.intent) return failed;
+    const renewed = beginAuthentication(failed, 'renew', deps.nowIso(), deps.random);
+    return renewed.authentication ? { ...renewed, nextPollAt: failed.nextPollAt, cooldownUntil: failed.cooldownUntil } : renewed;
+  };
   // Both dashboard handoff and sole-applicant re-entry use fresh baseline
   // GETs. A classified transport failure needs the shared retry/cooldown
   // budget, not a permanent safety pause. Invalid/changed readings still
   // reach the strict baseline/roster checks; unresolved intent never retries.
   const baselineFailure = (raw: unknown): EngineState | null => {
     const reading = raw as { scheduleId?: unknown; ivr?: unknown; kind?: unknown; status?: unknown } | null;
-    if (state.intent || reading?.kind !== 'read-failure' || reading.scheduleId !== scheduleId || reading.ivr !== state.group!.ivr ||
-        typeof reading.status !== 'number' || !Number.isInteger(reading.status) || reading.status < 0 || reading.status > 599) return null;
+    if (state.intent || reading?.kind !== 'read-failure') return null;
+    if (reading.scheduleId !== scheduleId || reading.ivr !== state.group!.ivr) return park('group-changed');
     if (deps.isCancelled?.()) return park();
+    if (typeof reading.status !== 'number' || !Number.isInteger(reading.status) || reading.status < 0 || reading.status > 599) return retry('reply-malformed');
     return mapHttpStatus(reading.status) === 'denied'
       ? applyPollResult(state, { outcome: 'denied', now: deps.nowIso(), random: deps.random }) : retry();
   };
@@ -109,6 +145,12 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     ((['actions', 'appointment'].includes(classifyRoute(tab.url)) && isSameGroupUrl(tab.url, scheduleId)) ||
       (state.stage === 'actions' && state.group!.dashboardPath !== undefined && classifyRoute(tab.url) === 'dashboard' &&
         new URL(tab.url).pathname === state.group!.dashboardPath));
+  const baselineInvalid = (error: unknown): EngineState => {
+    const message = error instanceof Error ? error.message : '';
+    if (message === 'Appointment identity changed.') return park('group-changed');
+    if (message === 'Applicant roster changed.') return park('roster-changed');
+    return retry('reply-malformed');
+  };
   if (!state.executor) {
     // Legacy downstream stages cannot bootstrap their expected roster from
     // the same form they intend to validate.
@@ -127,15 +169,35 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     if (tab.id === undefined) return park();
     state = { ...state, executor: { tabId: tab.id, applicantIds: state.group!.applicantIds ?? null, targetTime: null, skippedDates: [], actionPending: false } };
   }
-  if (state.group!.applicantIds && state.executor!.applicantIds && !sameApplicants(state.group!.applicantIds, state.executor!.applicantIds)) return park();
+  if (state.group!.applicantIds && state.executor!.applicantIds && !sameApplicants(state.group!.applicantIds, state.executor!.applicantIds)) return park('roster-changed');
   const tabId = state.executor!.tabId;
   let owned;
-  try { owned = await deps.getTab(tabId); } catch { return park(); }
-  if (!trusted(owned)) return park();
+  try { owned = await deps.getTab(tabId); } catch { return park('tab-lost'); }
+  if (!trusted(owned) || (owned.pendingUrl && owned.pendingUrl !== 'about:blank' && !trusted({ url: owned.pendingUrl }))) return park('untrusted-url');
   if (owned.status === 'loading') {
     const loadingSince = state.executor!.loadingSince ?? deps.nowIso();
     const elapsed = Date.parse(deps.nowIso()) - Date.parse(loadingSince);
-    if (elapsed < 0 || elapsed >= 15_000) return park();
+    if (elapsed < 0) return park();
+    if (elapsed >= 15_000) {
+      // An uncertain booking intent never retries on readiness alone: the
+      // stalled load routes into the existing fresh verification. Without an
+      // intent the readiness stall is recoverable: count it once, clear the
+      // loading marker, and — only after re-confirming cancellation,
+      // preferences and live trust — give the same trusted document one
+      // fresh browser GET (never DOM injection).
+      if (state.intent) return verify();
+      if (deps.isCancelled?.() || !await prefsUnchanged()) return park();
+      const { loadingSince: _stalled, ...executor } = state.executor!;
+      const next = { ...retry('stalled-load'), executor, updatedAt: deps.nowIso() };
+      if (!deps.navigateTab) return next;
+      try {
+        const live = await deps.getTab(tabId);
+        if (live.url !== owned.url || live.status !== 'loading' || !trusted(live) ||
+            (live.pendingUrl && live.pendingUrl !== 'about:blank') || deps.isCancelled?.() || !await prefsUnchanged()) return next;
+        await deps.navigateTab(tabId, owned.url!);
+      } catch { /* The counted retry already holds; the reload is best effort. */ }
+      return next;
+    }
     state = { ...state, executor: { ...state.executor!, loadingSince } };
     return pace(state.stage as BookingStage, 2_000);
   }
@@ -145,30 +207,36 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   }
   const inject = async (func: (...args: never[]) => unknown, args: unknown[]): Promise<unknown> => {
     const tab = await deps.getTab(tabId);
-    if (!trusted(tab) || deps.isCancelled?.()) throw new Error('Executor context changed.');
+    if (!trusted(tab) || (tab.pendingUrl && tab.pendingUrl !== 'about:blank') || tab.status === 'loading' || deps.isCancelled?.()) throw new Error('Executor context changed.');
     return deps.inject(tabId, func, args);
   };
   if (classifyRoute(owned.url!) === 'dashboard') {
     if (!state.group!.dashboardPath || !state.group!.applicantIds || !await prefsUnchanged()) return park();
-    try {
-      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]);
-      const failure = baselineFailure(baseline);
-      if (failure) return failure;
-      if (appointmentDate(baseline, state.group!) !== state.group!.currentDate) return park();
-    } catch { return park(); }
+    // The pre-continue baseline read is read-only: a transient interruption
+    // or malformed reply retries on the shared budget with a full re-read
+    // before the mutation below; only a changed baseline stays terminal.
+    let baseline: unknown;
+    try { baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]); }
+    catch { return retry('script-interrupted'); }
+    const failure = baselineFailure(baseline);
+    if (failure) return failure;
+    let baselineDate: string | null;
+    try { baselineDate = appointmentDate(baseline, state.group!); }
+    catch (error) { return baselineInvalid(error); }
+    if (baselineDate !== state.group!.currentDate) return park('baseline-changed');
     state = { ...state, executor: { ...state.executor!, actionPending: true }, updatedAt: deps.nowIso() };
     await deps.saveState(state);
     if (deps.isCancelled?.() || !await prefsUnchanged()) return park();
     try {
       const result = await inject(performDashboardContinue, [{ scheduleId, ivr: state.group!.ivr,
         dashboardPath: state.group!.dashboardPath, applicantIds: state.group!.applicantIds }]) as { ok?: boolean };
-      if (result?.ok !== true) return park();
-    } catch { return park(); }
+      if (result?.ok !== true) return park('navigation-unconfirmed');
+    } catch { return park('navigation-unconfirmed'); }
     state = { ...state, executor: { ...state.executor!, actionPending: false } };
     return pace('actions');
   }
   let implicitApplicantId: string | null = null;
-  let page: PaidPage;
+  let page: PaidPage | null;
   try {
     page = await inject(readPaidPage, [scheduleId]) as PaidPage;
     if (!page && state.group!.applicantIds?.length === 1 &&
@@ -177,18 +245,27 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       // Revalidate the independent complete roster before relying on a form
       // with no applicant IDs. Warning/selection pages keep their own guards.
       if (!state.group!.dashboardPath) return park();
-      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]);
+      let baseline: unknown;
+      try { baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]); }
+      catch { return retry('script-interrupted'); }
       const failure = baselineFailure(baseline);
       if (failure) return failure;
-      if (appointmentDate(baseline, state.group!) !== state.group!.currentDate) return park();
+      let baselineDate: string | null;
+      try { baselineDate = appointmentDate(baseline, state.group!); }
+      catch (error) { return baselineInvalid(error); }
+      if (baselineDate !== state.group!.currentDate) return park('baseline-changed');
       implicitApplicantId = state.group!.applicantIds[0];
       page = await inject(readPaidPage, [scheduleId, implicitApplicantId]) as PaidPage;
     }
-    if (!page || page.scheduleId !== scheduleId) return park();
-  } catch { return park(); }
+  } catch { return retry('script-interrupted'); }
+  // A missing reply or a foreign schedule never mutates or retries blindly:
+  // the missing read retries read-only on the shared budget, while a page for
+  // a different group stays terminal.
+  if (!page) return recoverEntry();
+  if (page.scheduleId !== scheduleId) return park('group-changed');
   if ((state.stage === 'warning' || state.stage === 'applicants') && page.kind === 'form') {
     const expected = state.group!.applicantIds ?? state.executor!.applicantIds;
-    if (!expected || !sameApplicants(page.applicantIds, expected)) return park();
+    if (!expected || !sameApplicants(page.applicantIds, expected)) return park('roster-changed');
     state = { ...state, executor: { ...state.executor!, applicantIds: expected } };
     return pace('form');
   }
@@ -215,12 +292,17 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     onlyEarlier: prefs.onlyEarlier, testMode: prefs.testMode,
     ...(implicitApplicantId ? { implicitApplicantId } : {}),
   });
-  const baselineUnchanged = async () => {
-    if (!state.group!.applicantIds) return false;
+  const baselineGuard = async (): Promise<EngineState | null> => {
+    if (!state.group!.applicantIds) return park('roster-missing');
+    let baseline: unknown;
     try {
-      const baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath]);
-      return appointmentDate(baseline, state.group!) === state.group!.currentDate;
-    } catch { return false; }
+      baseline = await inject(readCurrentAppointment, [scheduleId, state.group!.ivr, true, true, state.group!.dashboardPath, true]);
+    } catch { return retry('script-interrupted'); }
+    const failure = baselineFailure(baseline);
+    if (failure) return failure;
+    try {
+      return appointmentDate(baseline, state.group!) === state.group!.currentDate ? null : park('baseline-changed');
+    } catch (error) { return baselineInvalid(error); }
   };
   switch (state.stage) {
     case 'confirm': {
@@ -240,7 +322,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
         if (deps.isCancelled?.()) return parkBare();
         if (ready?.ok !== true) return verify();
       } catch { return park(); }
-      if (deps.isCancelled?.() || !await prefsUnchanged() || !await baselineUnchanged()) return park();
+      if (deps.isCancelled?.() || !await prefsUnchanged()) return park('config-changed');
+      const refused = await baselineGuard();
+      if (refused) return refused;
       state = { ...state, intent: { ...intent, phase: 'confirming' }, executor: { ...state.executor!, actionPending: true }, updatedAt: deps.nowIso() };
       // Durable mutation checkpoint before the final confirmation click. An
       // interrupted checkpoint or click must route into automatic verification
@@ -273,6 +357,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       if (page.kind !== 'form' || !sameApplicants(page.applicantIds, ids) || !ids) return park();
       if (state.lastCandidate === null) {
         if (!await prefsUnchanged()) return park();
+        if (state.consecutiveFailures > 0) note('executor-recovered', undefined, 0);
         return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
           nextPollAt: deps.nowIso(), stage: null, executor: { ...state.executor!, targetTime: null } };
       }
@@ -291,13 +376,13 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       if (time === null || page.time !== time) {
         let response: PollResponse;
         try { response = await inject(fetchTimesJson, [`/en-ca/niv/schedule/${scheduleId}/appointment`, facilityId, date, ids, implicitApplicantId]) as PollResponse; }
-        catch { return park(); }
+        catch { return retry('script-interrupted'); }
         if (!response || mapHttpStatus(response.status) !== 'ok') {
           return response && mapHttpStatus(response.status) === 'denied'
             ? applyPollResult(state, { outcome: 'denied', now: deps.nowIso(), random: deps.random }) : retry();
         }
         let times: string[];
-        try { times = parseTimesPayload(response.body); } catch { return retry(); }
+        try { times = parseTimesPayload(response.body); } catch { return retry('reply-malformed'); }
         if (!times.length) {
           // Candidate disappeared; discard it and return to days polling.
           return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
@@ -313,10 +398,11 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       // never copied from this form's query.
       if (!await prefsUnchanged()) return park();
       let fresh: PaidPage;
-      try { fresh = await inject(readPaidPage, [scheduleId, implicitApplicantId]) as PaidPage; } catch { return park(); }
+      try { fresh = await inject(readPaidPage, [scheduleId, implicitApplicantId]) as PaidPage; } catch { return retry('script-interrupted'); }
       if (!fresh || fresh.kind !== 'form' || fresh.calendarReady !== true || fresh.slotWarning === true ||
           fresh.date !== date || fresh.time !== time || typeof fresh.facilityId !== 'number') return park();
-      if (!await baselineUnchanged()) return park();
+      const refused = await baselineGuard();
+      if (refused) return refused;
       const expected = { scheduleId, applicantIds: ids, consulate: prefs.consulate, currentDate: state.group!.currentDate,
         prefs: windowPrefs, testMode: false };
       try {

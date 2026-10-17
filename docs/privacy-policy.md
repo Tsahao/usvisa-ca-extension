@@ -33,6 +33,16 @@ the last 24 hours. Internal comparison and attempt references are hashed;
 history records contain no credentials, raw visa/applicant identifiers, portal
 URLs or page content. History is not sent to analytics or the publisher.
 
+A bounded internal diagnostics log supports reliability analysis of failed or
+recovered unattended checks. It keeps up to 1500 fixed developer event codes
+for up to 7 days outside the user interface: event code, timestamp, fixed
+validation-branch detail, workflow phase, run purpose, run mode, extension version and a failure
+count — never credentials, settings, portal URLs or page content, applicant
+identifiers, appointment dates or raw errors. It is not sent to analytics or
+the publisher, and it is separate from the user-facing View Logs.
+Recording is best effort; the entry limit can remove older events sooner,
+and storage failures or a full recording queue can result in missing events.
+
 **Local storage is not an encrypted password vault.** Someone with access to
 your device or Chrome profile may be able to read it. Protect your device and
 browser profile accordingly.

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { bindGroup, emptyEngineState, reconcileStartup, startRun, validateEngineState, type EngineState } from '../src/engine/workflow';
 import { recordCandidate, setStage, type BookingStage } from '../src/engine/poll';
 import { runBookingStage, type ExecDeps } from '../src/engine/executor';
+import type { DiagnosticEvent } from '../src/domain/diagnostics';
 import type { PaidPage } from '../src/adapter/paid';
 import type { PaidAction } from '../src/adapter/acts';
 
@@ -45,6 +46,29 @@ function harness(kind: PaidPage['kind']) {
 }
 
 describe('paid executor', () => {
+  it('retries a read-only page interruption and recovers without skipping the action checkpoint', async () => {
+    const h = harness('actions');
+    const original = h.d.inject;
+    h.d.inject = vi.fn(async () => { throw new Error('synthetic transport interruption'); });
+    const state = await runBookingStage(h.d, seeded('actions'));
+    expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1, intent: null, executor: { actionPending: false } });
+    expect(h.mutations).toEqual([]);
+    expect(h.checkpoints).toEqual([]);
+    h.d.nowIso = () => '2026-10-12T00:01:00.000Z';
+    h.d.inject = original;
+    const next = await runBookingStage(h.d, state);
+    expect(next).toMatchObject({ status: 'running', stage: 'warning', executor: { actionPending: false } });
+    expect(h.mutations.map(m => m.action)).toEqual(['reschedule']);
+    expect(h.checkpoints[0].executor!.actionPending).toBe(true);
+  });
+  it.each(['missing', 'malformed'] as const)('retries a %s dashboard baseline without clicking Continue', async issue => {
+    const h = harness('actions'); const state = seeded('actions');
+    state.group!.dashboardPath = '/en-ca/niv/groups/55555555';
+    h.d.getTab = async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    h.d.inject = vi.fn(async () => issue === 'missing' ? null : { scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', status: '503' });
+    expect(await runBookingStage(h.d, state)).toMatchObject({ status: 'running', consecutiveFailures: 1, nextPollAt: '2026-10-12T00:01:00.000Z' });
+    expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
+  });
   it.each([0, 502, 503, 401, 403])('retries/renews a failed dashboard baseline GET before Continue (%s)', async status => {
     const h = harness('actions'); const state = seeded('actions');
     state.lastCandidate = null;
@@ -57,11 +81,17 @@ describe('paid executor', () => {
       expect(args).toEqual(['11111111', '22222222', true, true, state.group!.dashboardPath, true]);
       return { scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', text: null, status };
     });
+    const events: DiagnosticEvent[] = [];
+    h.d.recordDiagnostic = event => { events.push(event); };
     const next = validateEngineState(await runBookingStage(h.d, state));
     expect(next).toMatchObject({ status: status === 401 || status === 403 ? 'stopped' : 'running', stage: 'actions',
       intent: null, lastCandidate: null, executor: { tabId: 7, actionPending: false } });
     expect(h.checkpoints).toEqual([]); expect(h.mutations).toEqual([]); expect(h.d.createTab).not.toHaveBeenCalled();
     if (status === 401 || status === 403) return;
+    // The counted retry carries the booking stage as its fixed phase context.
+    expect(events).toEqual([{ code: 'executor-retry', detail: 'transport', mode: 'booking', phase: 'actions', failures: 1 }]);
+    // Fixed allowlisted fields only: never the status code or page content.
+    expect(Object.keys(events[0]).sort()).toEqual(['code', 'detail', 'failures', 'mode', 'phase']);
     expect(next.nextPollAt).toBe('2026-10-12T00:01:00.000Z'); expect(next.consecutiveFailures).toBe(1);
     const cooled = await runBookingStage(h.d, { ...state, consecutiveFailures: 9 });
     expect(cooled).toMatchObject({ status: 'running', consecutiveFailures: 10, nextPollAt: null, cooldownUntil: '2026-10-12T00:30:00.000Z' });
@@ -70,7 +100,7 @@ describe('paid executor', () => {
     expect(h.checkpoints).toHaveLength(1); expect(h.checkpoints[0].executor?.actionPending).toBe(true);
     expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
   });
-  it.each(['wrong-group', 'wrong-ivr', 'malformed-status', 'changed-roster', 'changed-baseline', 'missing-reading', 'cancelled'])(
+  it.each(['wrong-group', 'wrong-ivr', 'changed-roster', 'changed-baseline', 'cancelled'])(
     'still parks an unsafe dashboard handoff without clicking Continue (%s)', async issue => {
       const h = harness('actions'); const state = seeded('actions');
       state.lastCandidate = null; state.group!.dashboardPath = '/en-ca/niv/groups/55555555'; state.executor!.applicantIds = IDS;
@@ -109,7 +139,7 @@ describe('paid executor', () => {
     }
     expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
   });
-  it.each(['wrong-identity', 'malformed-status', 'changed-roster', 'changed-baseline', 'missing-reading'])(
+  it.each(['wrong-identity', 'changed-roster', 'changed-baseline'])(
     'still parks unsafe single-applicant re-entry readings (%s)', async issue => {
       const h = harness('form'); const state = seeded('warning');
       state.lastCandidate = null;
@@ -206,8 +236,12 @@ describe('paid executor', () => {
     const next = await runBookingStage(h.d, seeded('actions'));
     expect(next).toMatchObject({ stage: 'actions', nextPollAt: '2026-10-12T00:00:02.000Z', executor: { loadingSince: NOW } });
     h.d.nowIso = () => '2026-10-12T00:00:16.000Z';
-    expect(await runBookingStage(h.d, validateEngineState(next))).toMatchObject({ status: 'verifying' });
+    const retried = await runBookingStage(h.d, validateEngineState(next));
+    expect(retried).toMatchObject({ status: 'running', consecutiveFailures: 1, nextPollAt: '2026-10-12T00:01:16.000Z' });
     expect(h.d.inject).not.toHaveBeenCalled();
+    h.d.nowIso = () => '2026-10-12T00:01:16.000Z';
+    h.d.getTab = async () => ({ id: 7, url: `${BASE}/continue_actions`, status: 'complete' });
+    expect(await runBookingStage(h.d, retried)).toMatchObject({ status: 'running', stage: 'warning', executor: { actionPending: false } });
   });
   it.each([null, ['77777777']])('refuses bootstrap form handoff without the independent full roster (%s)', async applicantIds => {
     const h = harness('form');

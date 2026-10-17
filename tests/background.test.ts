@@ -1478,9 +1478,11 @@ describe('read-only probe boundaries', () => {
       applicantIds: change === 'changed-roster' ? ['88888888'] : ['77777777'],
     } }]);
     alarmed({ name: 'enginePoll' });
-    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying', lastCandidate: null }));
-    // An unreadable warning page gets a maintenance check before parking;
-    // a readable form with a changed roster parks without one.
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject(change === 'warning'
+      ? { status: 'running', lastCandidate: null, consecutiveFailures: 1, authentication: { purpose: 'renew' } }
+      : { status: 'verifying', lastCandidate: null }));
+    // An unexpected page restarts through auth-only fresh validation;
+    // a readable form with a changed roster still parks without a GET.
     const reads = chromeMock.scripting.executeScript.mock.calls.map((call: { [index: number]: { func: { name: string } } }) => call[0].func.name as string);
     expect(reads).toEqual(change === 'warning' ? ['readPaidPage', 'readSiteMaintenance'] : ['readPaidPage']);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
@@ -1566,7 +1568,9 @@ describe('read-only probe boundaries', () => {
       throw new Error(`unexpected injection: ${name}`);
     });
     alarmed({ name: 'enginePoll' });
-    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying', consecutiveFailures: 0, nextPollAt: null }));
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject(_case === 'malformed-result'
+      ? { status: 'running', consecutiveFailures: 1, nextPollAt: expect.any(String) }
+      : { status: 'verifying', consecutiveFailures: 0, nextPollAt: null }));
     const injected = chromeMock.scripting.executeScript.mock.calls.map((call: { [index: number]: { func: { name: string } } }) => call[0].func.name as string);
     expect(injected).toEqual(['readCurrentAppointment']);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
@@ -1631,6 +1635,91 @@ describe('read-only probe boundaries', () => {
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
 
+  it('persists bounded fixed-code diagnostics for a recovered poll failure without private values', async () => {
+    const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
+    const now = new Date().toISOString();
+    stored.engineStateV1 = {
+      ...bindGroup(startRun(emptyEngineState(now), { mode: 'booking', owner: 'owner-token-01', runId: 'run-id-0001', now }), {
+        owner: 'owner-token-01', runId: 'run-id-0001', now,
+        binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null,
+          applicantIds: ['77777777'], dashboardPath: '/en-ca/niv/groups/99999999' },
+      }),
+      executor: { tabId: 9, applicantIds: ['77777777'], targetTime: null, skippedDates: [], actionPending: false },
+    };
+    stored.uiPreferencesV1 = { consulate: 'Vancouver', earliest: '2026-12-01', latest: '2026-12-31', onlyEarlier: false, testMode: true };
+    chromeMock.tabs.query.mockResolvedValue([{ id: 9, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment' }]);
+    let pageCalls = 0;
+    chromeMock.scripting.executeScript.mockImplementation(async (input: { func: { name: string } }) => {
+      const name = input.func?.name ?? '';
+      if (name === 'readCurrentAppointment') return [{ result: { scheduleId: '11111111', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: ['77777777'] } }];
+      if (name === 'readPaidPage') {
+        pageCalls += 1;
+        if (pageCalls === 1) throw new Error('synthetic transport failure');
+        return [{ result: { scheduleId: '11111111', kind: 'form', applicantIds: ['77777777'] } }];
+      }
+      if (name === 'fetchDaysJson') return [{ result: { status: 200, body: [{ date: '2026-11-19' }] } }];
+      if (name === 'readSiteMaintenance') return [{ result: { maintenance: false } }];
+      throw new Error(`unexpected injection: ${name}`);
+    });
+    alarmed({ name: 'enginePoll' });
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'running', consecutiveFailures: 1 }));
+    (stored.engineStateV1 as { nextPollAt: string }).nextPollAt = new Date(Date.now() - 1000).toISOString();
+    alarmed({ name: 'enginePoll' });
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'running', consecutiveFailures: 0 }));
+    await vi.waitFor(() => expect((stored.engineDiagnosticsV1 as { entries?: unknown[] } | undefined)?.entries?.length ?? 0).toBeGreaterThan(0));
+    const log = stored.engineDiagnosticsV1 as { version: number; entries: { code: string; detail?: string; outcome?: string; mode?: string }[] };
+    const codes = log.entries.map(entry => entry.code);
+    expect(codes).toContain('poll-retry');
+    // The successful recovery keeps the earlier retry entry and records the reset.
+    expect(codes).toContain('poll-recovered');
+    expect(log.entries.filter(entry => entry.code === 'poll-retry').at(-1)).toMatchObject({ mode: 'booking', outcome: 'retryable', detail: 'script-interrupted' });
+    expect(JSON.stringify(log)).not.toContain('synthetic transport failure');
+    expect(JSON.stringify(log)).not.toContain('11111111');
+    expect(JSON.stringify(log)).not.toContain('77777777');
+  });
+
+  it('exports the bounded diagnostics log only to the bundled report page', async () => {
+    const probe = 'chrome-extension://synthetic-extension/probe.html';
+    stored.engineDiagnosticsV1 = {
+      version: 1,
+      entries: [
+        { at: new Date().toISOString(), code: 'auth-retry-scheduled', detail: 'reply-malformed', purpose: 'start', mode: 'booking', failures: 3, count: 2 },
+        { at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(), code: 'auth-started', purpose: 'start', mode: 'booking' },
+      ],
+    };
+    const respond = vi.fn();
+    expect(message({ type: 'PROBE_DIAGNOSTICS' }, { id: 'synthetic-extension', url: probe }, respond)).toBe(true);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith(expect.objectContaining({ ok: true })));
+    const reply = respond.mock.calls[0][0] as { diagnostics: { retention: { ttlMs: number; limit: number }; entries: { code: string }[] } };
+    expect(reply.diagnostics.retention).toEqual({ ttlMs: 7 * 24 * 60 * 60 * 1000, limit: 1500 });
+    // The expired entry is pruned; the retained entry keeps its bounded repeat count.
+    expect(reply.diagnostics.entries).toEqual([
+      expect.objectContaining({ code: 'auth-retry-scheduled', detail: 'reply-malformed', failures: 3, count: 2 }),
+    ]);
+    const website = vi.fn();
+    message({ type: 'PROBE_DIAGNOSTICS' }, { id: 'synthetic-extension', url: 'https://example.invalid/' }, website);
+    expect(website).not.toHaveBeenCalled();
+    const panel = vi.fn();
+    message({ type: 'PROBE_DIAGNOSTICS' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, panel);
+    expect(panel).not.toHaveBeenCalled();
+  });
+  it('exports only sanitized diagnostics to the production panel console', async () => {
+    stored.uiPreferencesV1 = { password: 'synthetic-private-value' };
+    stored.engineDiagnosticsV1 = { version: 1, entries: [{ at: new Date().toISOString(), code: 'auth-recovered',
+      password: 'synthetic-private-value', url: 'https://example.invalid/private' }] };
+    const response = vi.fn();
+    expect(message({ type: 'ENGINE_DIAGNOSTICS' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html?detached=1' }, response)).toBe(true);
+    await vi.waitFor(() => expect(response).toHaveBeenCalled());
+    expect(response.mock.calls[0][0]).toMatchObject({ ok: true, diagnostics: { entries: [{ code: 'auth-recovered' }] } });
+    expect(JSON.stringify(response.mock.calls)).not.toContain('synthetic-private-value');
+    expect(JSON.stringify(response.mock.calls)).not.toContain('example.invalid');
+    for (const url of ['https://ais.usvisa-info.com/en-ca/niv/users/sign_in', 'chrome-extension://other-extension/panel.html']) {
+      const blocked = vi.fn();
+      expect(message({ type: 'ENGINE_DIAGNOSTICS' }, { id: 'synthetic-extension', url }, blocked)).toBeUndefined();
+      expect(blocked).not.toHaveBeenCalled();
+    }
+  });
+
   it('holds the durable cooldown after repeated bare-form preflight failures without polling or mutation', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
@@ -1650,7 +1739,7 @@ describe('read-only probe boundaries', () => {
     await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'running', consecutiveFailures: 10, nextPollAt: null, cooldownUntil: expect.any(String) }));
     const state = stored.engineStateV1 as { cooldownUntil: string };
     expect(Date.parse(state.cooldownUntil) - Date.parse(now)).toBeGreaterThanOrEqual(1_799_000);
-    expect(chromeMock.alarms.create).toHaveBeenLastCalledWith('enginePoll', { when: Date.parse(state.cooldownUntil) });
+    expect(chromeMock.alarms.create.mock.calls.filter((call: unknown[]) => call[0] === 'enginePoll').at(-1)).toEqual(['enginePoll', { when: Date.parse(state.cooldownUntil) }]);
     const calls = chromeMock.alarms.create.mock.calls.length;
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(chromeMock.alarms.create.mock.calls.length).toBeGreaterThan(calls));

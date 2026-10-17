@@ -9,7 +9,7 @@ type Scripting = Pick<typeof chrome.scripting, 'executeScript'>;
 type Alarms = Pick<typeof chrome.alarms, 'create' | 'clear' | 'onAlarm'>;
 type Notifications = Pick<typeof chrome.notifications, 'create'>;
 type Windows = Pick<typeof chrome.windows, 'get' | 'getCurrent' | 'create' | 'update'>;
-// getManifest is used only by the existing analytics version fallback.
+// getManifest supplies build versions for analytics and local diagnostics.
 type Runtime = Pick<typeof chrome.runtime, 'sendMessage' | 'onMessage' | 'getURL' | 'id' | 'getManifest'>;
 type Action = Pick<typeof chrome.action, 'onClicked'>;
 

@@ -136,7 +136,7 @@ describe('serialized trusted login adapter', () => {
     expect(isolated(request)).toEqual({ ok: false, reason: 'sign-in-notice-dismissed' });
     expect(dismissed).toHaveBeenCalledOnce();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(dismissed).toHaveBeenCalledOnce(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
   });
@@ -145,7 +145,7 @@ describe('serialized trusted login adapter', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="alert alert-danger">Invalid Email or password.</div>');
     expect(isolated(request)).toEqual({ ok: false, reason: 'sign-in-notice-dismissed' });
     expect(dismissed).toHaveBeenCalledOnce(); expect(submitted).not.toHaveBeenCalled();
-    expect(isolated(request)).toEqual({ ok: false, reason: 'credential-rejected' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'credential-rejected', detail: 'credentials-invalid' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it.each(['extra-wording', 'duplicate-dialog', 'navigating-button', 'flash-button-path', 'linked-button', 'button-onclick'])('leaves an unsafe or ambiguous session-expired dialog untouched (%s)', issue => {
@@ -156,7 +156,7 @@ describe('serialized trusted login adapter', () => {
     if (issue === 'flash-button-path') document.querySelector('#flash_messages')!.setAttribute('button-path', '/en-ca/niv/groups');
     if (issue === 'linked-button') button.outerHTML = '<a href="https://ais.usvisa-info.com/en-ca/niv">OK</a>';
     if (issue === 'button-onclick') button.setAttribute('onclick', 'void 0');
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' });
     expect(dismissed).not.toHaveBeenCalled(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
     expect(dialog.isConnected).toBe(true);
@@ -180,7 +180,7 @@ describe('serialized trusted login adapter', () => {
     expect(isolated(request)).toEqual({ ok: false, reason: 'sign-in-notice-dismissed' });
     expect(dismissed).toHaveBeenCalledOnce();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(dismissed).toHaveBeenCalledOnce(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
   });
@@ -189,7 +189,7 @@ describe('serialized trusted login adapter', () => {
     document.body.insertAdjacentHTML('beforeend', issue === 'otp' ? '<input autocomplete="one-time-code">' : '<div class="g-recaptcha"></div>');
     expect(isolated(request)).toEqual({ ok: false, reason: 'sign-in-notice-dismissed' });
     expect(dismissed).toHaveBeenCalledOnce(); expect(submitted).not.toHaveBeenCalled();
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual(issue === 'otp' ? { ok: false, reason: 'manual-authentication', detail: 'challenge-detected' } : { ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('dismisses the recognized notice before classifying a credential flash', () => {
@@ -197,12 +197,12 @@ describe('serialized trusted login adapter', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="alert alert-danger">Invalid Email or password.</div>');
     expect(isolated(request)).toEqual({ ok: false, reason: 'sign-in-notice-dismissed' });
     expect(dismissed).toHaveBeenCalledOnce(); expect(submitted).not.toHaveBeenCalled();
-    expect(isolated(request)).toEqual({ ok: false, reason: 'credential-rejected' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'credential-rejected', detail: 'credentials-invalid' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('reports an explicit credential rejection as a stop', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="alert alert-danger">Invalid Email or password.</div>');
-    expect(isolated(request)).toEqual({ ok: false, reason: 'credential-rejected' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'credential-rejected', detail: 'credentials-invalid' });
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
     expect(submitted).not.toHaveBeenCalled();
   });
@@ -210,17 +210,17 @@ describe('serialized trusted login adapter', () => {
     document.querySelector('#user_password')!.remove();
     try {
       stubReadyState('loading');
-      expect(isolated(request)).toEqual({ ok: false, reason: 'retryable' });
+      expect(isolated(request)).toEqual({ ok: false, reason: 'retryable', detail: 'form-loading' });
       expect(submitted).not.toHaveBeenCalled();
     } finally { restoreReadyState(); }
-    expect(isolated(request)).toEqual({ ok: false });
+    expect(isolated(request)).toEqual({ ok: false, detail: 'form-missing' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('never treats duplicated controls as transient, even while loading', () => {
     document.body.insertAdjacentHTML('beforeend', '<input id="user_email">');
     try {
       stubReadyState('loading');
-      expect(isolated(request)).toEqual({ ok: false });
+      expect(isolated(request)).toEqual({ ok: false, detail: 'form-duplicate' });
       expect(submitted).not.toHaveBeenCalled();
     } finally { restoreReadyState(); }
   });
@@ -238,14 +238,14 @@ describe('serialized trusted login adapter', () => {
     if (issue === 'interactive-content') document.querySelector('#flash_messages')!.insertAdjacentHTML('beforeend', '<input>');
     if (issue === 'navigating-button') button.setAttribute('data-url', '/en-ca/niv/groups');
     if (issue === 'linked-button') button.outerHTML = '<a href="https://ais.usvisa-info.com/en-ca/niv">OK</a>';
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' });
     expect(dismissed).not.toHaveBeenCalled(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
   });
   it.each(['button-path', 'alt_button-path', 'alt_button-text', 'no_close', 'data-url', 'onclick'])('leaves a flash message bearing %s untouched without filling', attribute => {
     const { button, dismissed } = notice();
     document.querySelector('#flash_messages')!.setAttribute(attribute, attribute.startsWith('alt_button-text') ? 'Synthetic' : '/en-ca/niv/groups');
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' });
     expect(dismissed).not.toHaveBeenCalled(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_email')!.value).toBe('');
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
@@ -259,7 +259,7 @@ describe('serialized trusted login adapter', () => {
     if (issue === 'ancestor-onclick') dialog.querySelector('.ui-dialog-buttonset')!.setAttribute('onclick', 'void 0');
     if (issue === 'dialog-onclick') dialog.setAttribute('onclick', 'void 0');
     if (issue === 'aria-disabled-empty') button.setAttribute('aria-disabled', '');
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' });
     expect(dismissed).not.toHaveBeenCalled(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
   });
@@ -276,7 +276,7 @@ describe('serialized trusted login adapter', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="reveal-overlay" style="display:none"><div role="dialog" data-reveal>Template</div></div><div role="dialog" aria-hidden="true">Second-factor template</div>');
     expect(isolated(request)).toEqual({ ok: true });
     document.body.insertAdjacentHTML('beforeend', '<div class="ui-widget-overlay"></div>');
-    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'manual-authentication', detail: 'overlay-detected' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('rechecks the context after dismissal rather than submitting into a newly added challenge', () => {
@@ -284,7 +284,7 @@ describe('serialized trusted login adapter', () => {
     notice();
     expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'sign-in-notice-dismissed' });
     document.body.insertAdjacentHTML('beforeend', '<div class="g-recaptcha"></div>');
-    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('prepares synthetic credentials and acknowledges the policy once, then submits separately', () => {
@@ -306,7 +306,17 @@ describe('serialized trusted login adapter', () => {
     if (issue === 'disabled') document.querySelector<HTMLInputElement>('#user_password')!.disabled = true;
     if (issue === 'override') document.querySelector('input[type="submit"]')!.setAttribute('formaction', 'https://example.invalid');
     if (issue === 'rejected') document.body.insertAdjacentHTML('beforeend', '<div class="flash error">Synthetic rejection</div>');
-    expect(isolated(request)).toEqual(issue === 'captcha' || issue === 'otp' ? { ok: false, reason: 'manual-authentication' } : { ok: false });
+    const expected = issue === 'wrong-target' ? 'form-destination'
+      : issue === 'captcha' ? 'captcha-detected'
+      : issue === 'otp' ? 'challenge-detected'
+      : issue === 'duplicate' ? 'form-duplicate'
+      : issue === 'disabled' ? 'control-disabled'
+      : issue === 'override' ? 'submit-override'
+      : issue === 'rejected' ? 'banner-unclassified'
+      : 'url-mismatch';
+    expect(isolated(request)).toEqual(issue === 'captcha' || issue === 'otp'
+      ? { ok: false, reason: 'manual-authentication', detail: expected }
+      : { ok: false, detail: expected });
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
     expect(submitted).not.toHaveBeenCalled();
   });
@@ -335,7 +345,9 @@ describe('serialized trusted login adapter', () => {
     '<div class="cf-turnstile"></div>',
   ])('retains manual handoff for challenge markup: %s', markup => {
     document.body.insertAdjacentHTML('beforeend', markup);
-    expect(isolated(request)).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated(request)).toEqual(markup.includes('iframe') || markup.includes('data-sitekey') || markup.includes('cf-turnstile')
+      ? { ok: false, reason: 'manual-authentication', detail: 'challenge-detected' }
+      : { ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(document.querySelector<HTMLInputElement>('#user_email')!.value).toBe('');
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
     expect(submitted).not.toHaveBeenCalled();
@@ -343,14 +355,14 @@ describe('serialized trusted login adapter', () => {
   it('checks for a challenge again immediately before submission', () => {
     expect(isolated(request)).toEqual({ ok: true });
     document.body.insertAdjacentHTML('beforeend', '<div class="g-recaptcha"></div>');
-    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('never submits incomplete or changed credentials', () => {
-    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false });
+    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, detail: 'fields-changed' });
     expect(isolated(request)).toEqual({ ok: true });
     document.querySelector<HTMLInputElement>('#user_password')!.value = 'changed-synthetic-value';
-    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false });
+    expect(isolated({ ...request, action: 'submit' })).toEqual({ ok: false, detail: 'fields-changed' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it.each(['https://ais.usvisa-info.com/en-ca/niv', 'https://ais.usvisa-info.com/en-ca/niv/'])('leaves the landing page for sign-in in the same tab (%s)', href => {
@@ -375,13 +387,13 @@ describe('read-only post-submit login probe', () => {
   });
   it('reports an explicit credential rejection without filling', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="alert alert-danger">Invalid Email or password.</div>');
-    expect(probed()).toEqual({ ok: false, reason: 'credential-rejected' });
+    expect(probed()).toEqual({ ok: false, reason: 'credential-rejected', detail: 'credentials-invalid' });
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
     expect(submitted).not.toHaveBeenCalled();
   });
   it('hands a fresh challenge to manual authentication without filling', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="g-recaptcha"></div>');
-    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication', detail: 'captcha-detected' });
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
     expect(submitted).not.toHaveBeenCalled();
   });
@@ -404,14 +416,14 @@ describe('read-only post-submit login probe', () => {
   it('hands an unsafe session-expired dialog to manual authentication untouched', () => {
     const { dismissed } = expiredNotice();
     document.querySelector('#flash_messages')!.textContent = `${EXPIRED_NOTICE} Synthetic suffix.`;
-    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' });
     expect(dismissed).not.toHaveBeenCalled(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
   });
   it('hands an unrecognized dialog to manual authentication untouched', () => {
     const { dismissed } = notice();
     document.querySelector('#flash_messages')!.textContent = 'Synthetic account warning';
-    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication', detail: 'notice-unrecognized' });
     expect(dismissed).not.toHaveBeenCalled(); expect(submitted).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLInputElement>('#user_password')!.value).toBe('');
   });
@@ -419,9 +431,9 @@ describe('read-only post-submit login probe', () => {
     document.querySelector('#user_password')!.remove();
     try {
       stubReadyState('loading');
-      expect(probed()).toEqual({ ok: false, reason: 'retryable' });
+      expect(probed()).toEqual({ ok: false, reason: 'retryable', detail: 'form-loading' });
     } finally { restoreReadyState(); }
-    expect(probed()).toEqual({ ok: false });
+    expect(probed()).toEqual({ ok: false, detail: 'form-missing' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it('allows the observed image-only CAPTCHA branding', () => {
@@ -431,7 +443,7 @@ describe('read-only post-submit login probe', () => {
   });
   it('leaves a blocking overlay without a dialog for manual authentication', () => {
     document.body.insertAdjacentHTML('beforeend', '<div class="ui-widget-overlay"></div>');
-    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication' });
+    expect(probed()).toEqual({ ok: false, reason: 'manual-authentication', detail: 'overlay-detected' });
     expect(submitted).not.toHaveBeenCalled();
   });
   it.each(['https://example.invalid/en-ca/niv/users/sign_in', 'https://ais.usvisa-info.com/en-ca/niv/groups',
