@@ -82,6 +82,6 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
         <a href="#terms" className={local.termsLink} onClick={event => { event.preventDefault(); openTerms(); }}>Terms & Conditions</a>
       </div>
     </div>
-    <footer className={`${panel.actions}${active ? ` ${local.locked}` : ''}`}><img className={panel.separator} src="assets/footer-line.svg" alt="" /><button type="button" className={panel.secondary} onClick={cancel}>Cancel</button><button type="submit" className={panel.primary} disabled={Boolean(invalid) || active || saving}>{saving ? 'Saving…' : 'Save'}</button></footer>
+    <footer className={panel.actions}><img className={panel.separator} src="assets/footer-line.svg" alt="" /><button type="button" className={panel.secondary} onClick={cancel}>Cancel</button><button type="submit" className={`${panel.primary}${active ? ` ${local.lockedSave}` : ''}`} disabled={Boolean(invalid) || active || saving}>{saving ? 'Saving…' : 'Save'}</button></footer>
   </form>;
 }

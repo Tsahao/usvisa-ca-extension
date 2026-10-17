@@ -1,5 +1,27 @@
 import { test, expect } from '@playwright/test';
 
+test('locked Settings keeps Cancel undimmed and usable without stopping monitoring', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Preview scenario').selectOption('running');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true });
+  const save = page.getByRole('button', { name: 'Save', exact: true });
+  await expect(page.getByLabel('Email', { exact: true })).toBeDisabled();
+  await expect(save).toBeDisabled();
+  await expect(save).toHaveCSS('opacity', '0.3');
+  await expect(cancel).toBeEnabled();
+  // Check ancestors too: a fully opaque button can still inherit a dim footer.
+  expect(await cancel.evaluate(button => {
+    let opacity = 1;
+    for (let node: Element | null = button; node; node = node.parentElement) {
+      opacity *= Number(getComputedStyle(node).opacity);
+    }
+    return opacity;
+  })).toBe(1);
+  await cancel.click();
+  await expect(page.getByRole('button', { name: 'Stop preview' })).toBeVisible();
+});
+
 test('Settings waits for field completion instead of warning ahead of the user', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Book or reschedule For Paid Visa Group' }).click();

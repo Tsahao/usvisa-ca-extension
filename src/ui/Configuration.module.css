@@ -32,7 +32,7 @@
 }
 
 /* Figma 67:29728 locked Settings: fixed notice above the scroll area, with the
-   form content and Save/Cancel footer dimmed while any worker workflow runs.
+   form content and Save dimmed while any worker workflow runs.
    Cancel and Terms stay enabled so users can leave or read terms; fieldsets
    and Save remain disabled. */
 .lockedNotice {
@@ -54,5 +54,9 @@
 }
 
 .locked {
+  opacity: 0.3;
+}
+
+.lockedSave:disabled {
   opacity: 0.3;
 }
