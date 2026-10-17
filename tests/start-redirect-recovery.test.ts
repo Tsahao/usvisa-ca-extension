@@ -460,6 +460,9 @@ describe('stale-dashboard Retry recovery', () => {
     let saves = 0;
     const realSet = async (values: Record<string, unknown>) => { Object.assign(stored, values); };
     chromeMock.storage.local.set.mockImplementation(async (values: Record<string, unknown>) => {
+      // Engine checkpoints only; the diagnostics log shares the area under its
+      // own key and must not consume the synthetic failure below.
+      if (values.engineStateV1 === undefined) return realSet(values);
       saves += 1;
       // First save commits pending:true; second save clears it after the GET.
       if (saves === 2) throw new Error('synthetic clear failure');

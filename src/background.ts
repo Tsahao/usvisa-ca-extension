@@ -48,6 +48,8 @@ import { buildTimeAnalyticsConfig } from './analytics/config';
 import { ANALYTICS_ALARM, createAnalyticsTracker, isProductPanelSender, type TrackerDeps } from './analytics/tracker';
 import { HISTORY_ALARM } from './domain/history';
 import { createDateHistory } from './engine/history';
+import { DIAGNOSTICS_ALARM, type DiagnosticCode, type DiagnosticDetail, type DiagnosticEvent } from './domain/diagnostics';
+import { createEngineDiagnostics } from './engine/diagnostics';
 
 const dateHistory = createDateHistory({
   area: { get: keys => chrome.storage.local.get(keys), set: values => chrome.storage.local.set(values) },
@@ -57,6 +59,54 @@ const dateHistory = createDateHistory({
     else await chrome.alarms.create(HISTORY_ALARM, { when: Date.parse(expiry) });
   },
 });
+
+// Bounded local developer diagnostics: separate storage key, own queue, own
+// retention alarm. Recording is best effort and never enters the workflow
+// queue, so it can neither block nor alter a booking/engine transition, and
+// the log is never cleared by success, Stop/Start or worker suspension.
+const engineDiagnostics = createEngineDiagnostics({
+  area: { get: keys => chrome.storage.local.get(keys), set: values => chrome.storage.local.set(values) },
+  now: () => new Date().toISOString(),
+  extensionVersion: () => chrome.runtime.getManifest?.().version,
+  schedule: async expiry => {
+    if (expiry === null) await chrome.alarms.clear(DIAGNOSTICS_ALARM);
+    else await chrome.alarms.create(DIAGNOSTICS_ALARM, { when: Date.parse(expiry) });
+  },
+});
+
+// Fixed-code recording helper for the engine loop: callers pass only
+// allowlisted fields — never credentials, URLs, identifiers or page content.
+function noteDiagnostic(code: DiagnosticCode, rest: Omit<DiagnosticEvent, 'code'> = {}): void {
+  try { void engineDiagnostics.record({ code, ...rest }); } catch { /* Diagnostics never gate engine work. */ }
+}
+
+// Shared poll-loop retry transition: records the retry or the cooldown entry
+// it crossed, then returns the counted state. Never rewrites fields.
+function pollRetry(state: import('./engine/workflow').EngineState, detail?: DiagnosticDetail): import('./engine/workflow').EngineState {
+  const next = applyPollResult(state, { outcome: 'retryable', now: new Date().toISOString(), random: Math.random });
+  const entered = next.cooldownUntil !== null && next.cooldownUntil !== state.cooldownUntil;
+  noteDiagnostic(entered ? 'poll-cooldown-entered' : 'poll-retry', { mode: state.mode, outcome: 'retryable', failures: next.consecutiveFailures, ...(detail === undefined ? {} : { detail }) });
+  return next;
+}
+
+function notePollRecovered(state: import('./engine/workflow').EngineState, outcome: 'healthy' | 'not-modified' | 'empty'): void {
+  if (state.consecutiveFailures > 0) noteDiagnostic('poll-recovered', { mode: state.mode, outcome, failures: 0 });
+}
+
+// An exception mid-cycle is recovered by the existing counted retry with a
+// fresh reload; record the fixed recovery transition only.
+function noteExceptionRecovery(state: import('./engine/workflow').EngineState): void {
+  noteDiagnostic('engine-exception-recovered', { mode: state.mode, outcome: 'retryable', failures: state.consecutiveFailures });
+}
+
+// Tracked begin: records the fixed auth-started transition with the run
+// purpose/mode only. A refused begin (context/status guard) changes nothing
+// and records nothing.
+function beginTrackedAuthentication(state: import('./engine/workflow').EngineState, purpose: 'start' | 'renew' | 'verify', now: string, random: () => number): import('./engine/workflow').EngineState {
+  const next = beginAuthentication(state, purpose, now, random);
+  if (next !== state && next.authentication) noteDiagnostic('auth-started', { purpose, mode: next.mode });
+  return next;
+}
 
 function analyticsDeps(area: { get: (keys: string[]) => Promise<Record<string, unknown>>; set: (values: Record<string, unknown>) => Promise<void> }): TrackerDeps | null {
   try {
@@ -134,6 +184,7 @@ const ready = Promise.all([
   await initializeEngineSession();
   analytics?.wake();
   void dateHistory.prune();
+  void engineDiagnostics.prune();
 });
 let operations = Promise.resolve();
 function enqueue(task: () => Promise<void>): void {
@@ -186,7 +237,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
     try { live = await chrome.tabs.get(state.verificationTabId); } catch { live = null; }
     if (!live) {
       const cleared = { ...state, verificationTabId: null, verification: null };
-      return beginAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
+      return beginTrackedAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
     }
     if (classifyRoute(live.url ?? '') !== 'dashboard') {
       const cleanAuthRoute = (() => {
@@ -199,7 +250,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       })();
       if (cleanAuthRoute && live.id !== undefined) {
         const cleared = { ...state, verificationTabId: null, verification: null };
-        const auth = beginAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
+        const auth = beginTrackedAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
         if (auth.authentication) return { ...auth, authentication: { ...auth.authentication, tabId: live.id } };
         return auth;
       }
@@ -208,10 +259,10 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
         if (parsed.origin === SITE_ORIGIN && live.id !== undefined) await chrome.tabs.remove(live.id).catch(() => undefined);
       } catch { /* Non-URL tab; custody released without navigation. */ }
       const cleared = { ...state, verificationTabId: null, verification: null };
-      return beginAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
+      return beginTrackedAuthentication(cleared, 'verify', new Date().toISOString(), Math.random);
     }
   }
-  if (state.verificationTabId === null) return beginAuthentication(state, 'verify', new Date().toISOString(), Math.random);
+  if (state.verificationTabId === null) return beginTrackedAuthentication(state, 'verify', new Date().toISOString(), Math.random);
   // Current prefs for the continuation guard. Missing/invalid prefs read as
   // null (blocks auto-continue, still allows original-group verification);
   // storage failure also reads as null and fails closed, never skipping.
@@ -230,26 +281,46 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   const prevQueued = state.queuedStart;
   const group = state.group;
   const verifierTabId = state.verificationTabId;
+  let verificationDenied = false;
+  const readVerification = async (includeApplicants: boolean): Promise<unknown> => {
+    if (!group) throw new Error('Missing verification identity.');
+    const failedRead = () => ({ scheduleId: group.scheduleId, ivr: group.ivr, kind: 'read-failure', text: null, status: 0 });
+    const trusted = (tab: chrome.tabs.Tab) => {
+      if (!tab.url || tab.id !== verifierTabId) return false;
+      const url = new URL(tab.url);
+      return classifyRoute(tab.url) === 'dashboard' && !url.search && !url.hash &&
+        (!group.dashboardPath || url.pathname === group.dashboardPath) &&
+        (!tab.pendingUrl || tab.pendingUrl === 'about:blank' || tab.pendingUrl === tab.url);
+    };
+    const tab = await chrome.tabs.get(verifierTabId!);
+    if (!trusted(tab)) throw new Error('Verification context changed.');
+    if (tab.status === 'loading' || (tab.pendingUrl && tab.pendingUrl !== 'about:blank')) return failedRead();
+    let raw: unknown;
+    try {
+      const result = await chrome.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment,
+        args: [group.scheduleId, group.ivr, true, includeApplicants, group.dashboardPath ?? new URL(tab.url!).pathname, true] });
+      raw = result[0]?.result;
+    } catch {
+      const live = await chrome.tabs.get(verifierTabId!);
+      if (!trusted(live) || live.url !== tab.url) throw new Error('Verification context changed.');
+      raw = failedRead();
+    }
+    const reading = raw as { kind?: unknown; status?: unknown; redirected?: unknown } | null;
+    if (reading?.kind === 'read-failure' && (reading.redirected === true || reading.status === 401 || reading.status === 403)) verificationDenied = true;
+    return raw;
+  };
   const next = await runVerificationRead(state, { now: () => new Date().toISOString(),
     currentPolicyKey: currentPolicy,
-    read: async () => {
-      if (!group) throw new Error('Missing verification identity.');
-      const tab = await chrome.tabs.get(verifierTabId!);
-      if (classifyRoute(tab.url ?? '') !== 'dashboard') throw new Error('Verification context changed.');
-      if (tab.id === undefined) throw new Error('Missing verification tab.');
-      const result = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment,
-        args: [group.scheduleId, group.ivr, true, false, group.dashboardPath ?? new URL(tab.url!).pathname] });
-      return result[0]?.result;
-    },
-    readRoster: async () => {
-      if (!group) throw new Error('Missing verification identity.');
-      const tab = await chrome.tabs.get(verifierTabId!);
-      if (classifyRoute(tab.url ?? '') !== 'dashboard') throw new Error('Verification context changed.');
-      if (tab.id === undefined) throw new Error('Missing verification tab.');
-      const result = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment,
-        args: [group.scheduleId, group.ivr, true, true, group.dashboardPath ?? new URL(tab.url!).pathname] });
-      return result[0]?.result;
-    } });
+    isCancelled: () => cancelledRuns.has(`${state.owner}:${state.runId}`),
+    recordDiagnostic: event => { noteDiagnostic(event.code, event); },
+    read: () => readVerification(false),
+    readRoster: () => readVerification(true) });
+  if (verificationDenied && next.intent && next.verification?.nextReadAt && !cancelledRuns.has(`${state.owner}:${state.runId}`)) {
+    if (verifierTabId !== null) await closeOwnedDashboard(verifierTabId);
+    // A fresh verifier login is read/verification-only; the booking intent
+    // remains intact and cannot authorize a second booking submission.
+    return beginTrackedAuthentication({ ...next, verificationTabId: null, verification: null }, 'verify', new Date().toISOString(), Math.random);
+  }
   // Verified success is explicit, never inferred from continuation status: a
   // stopped run with cleared intent AND no blocking diagnostic. Blocked known
   // failures (roster/config) also stop with cleared intent but carry a fixed
@@ -464,7 +535,7 @@ async function attemptRestart(area: import('./engine/storage').StorageArea, stat
   const unchanged = async () => !cancelled() && JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) === JSON.stringify(prefs);
   const dashboards = (await chrome.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
   if (dashboards.length === 0) {
-    let next = beginAuthentication(state, 'start', now, Math.random);
+    let next = beginTrackedAuthentication(state, 'start', now, Math.random);
     const entry = await startEntryTab();
     if (!await unchanged()) return parkForReview(state, now);
     if (entry !== null && next.authentication) {
@@ -574,6 +645,7 @@ function executionDependencies(area: { get: (keys: string[]) => Promise<Record<s
     loadPrefs: async () => (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined,
     saveState: (checkpoint: import('./engine/workflow').EngineState) => saveEngineState(area, checkpoint),
     onBookingAttempt: (checkpoint: import('./engine/workflow').EngineState) => { void dateHistory.attempted(checkpoint); },
+    recordDiagnostic: (event: DiagnosticEvent) => { noteDiagnostic(event.code, event); },
     isCancelled: () => cancelledRuns.has(`${state.owner}:${state.runId}`),
   };
 }
@@ -743,7 +815,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
             const dashboards = (await chrome.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
             if (dashboards.length === 0) {
               state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
-              state = beginAuthentication(state, 'start', now, Math.random);
+              state = beginTrackedAuthentication(state, 'start', now, Math.random);
               if (state.authentication && state.status === 'running') {
                 // Dashboard-first reuse: whichever flow page the user is on
                 // goes to the fixed site root first, which redirects to the
@@ -790,7 +862,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
               }
               if (maintenance) {
                 state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
-                state = beginAuthentication(state, 'start', now, Math.random);
+                state = beginTrackedAuthentication(state, 'start', now, Math.random);
                 state = { ...state, authentication: { ...state.authentication!, tabId: tab.id! } };
                 state = deferAuthenticationForMaintenance(state, now, Math.random);
                 readStep = 'save';
@@ -818,7 +890,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
                     const prefsSnapshot = JSON.stringify(prefs);
                     const savedTabUrl = tab.url;
                     state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
-                    state = beginAuthentication(state, 'start', now, Math.random);
+                    state = beginTrackedAuthentication(state, 'start', now, Math.random);
                     if (!state.authentication) throw new Error('Dashboard read failed.');
                     if (requestCancelled()) throw new Error('Dashboard context changed.');
                     // Durable checkpoint before any navigation: pending=true
@@ -925,6 +997,23 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         respond({ ok: false, error: detail, failureKind: panelFailureKind(error) });
       }
     });
+    return true;
+  }
+  // Developer diagnostics read/export from the trusted bundled report page:
+  // pruned, newest-first, allowlisted fields only (never preferences, engine
+  // state, credentials, URLs or page content).
+  if (message?.type === 'PROBE_DIAGNOSTICS' || message?.type === 'ENGINE_DIAGNOSTICS') {
+    if (message.type === 'PROBE_DIAGNOSTICS') {
+      if (sender.url !== chrome.runtime.getURL('probe.html')) return;
+    } else {
+      // Production developer-console reader: only the bundled panel, with
+      // the runtime sender id checked above. Website content scripts cannot
+      // read diagnostics or use this to export any other storage keys.
+      if (!isProductPanelSender(sender.url) || new URL(sender.url!).host !== chrome.runtime.id) return;
+    }
+    void ready.then(() => engineDiagnostics.read())
+      .then(diagnostics => respond({ ok: true, diagnostics }))
+      .catch(() => respond({ ok: false }));
     return true;
   }
   // Only the bundled report page can operate the probe's wake-up test.
@@ -1295,6 +1384,7 @@ async function recoverPollException(area: import('./engine/storage').StorageArea
       if (next.restartPending && next.status === 'running' && !next.authentication) next = retryRestart(next, now, Math.random);
       else if ((next.status === 'running' && next.group) || next.authentication) {
         next = applyPollResult(next, { outcome: 'retryable', now, random: Math.random });
+        noteExceptionRecovery(next);
         if (next.authentication) next = { ...next, authentication: { ...next.authentication, phase: 'retry' } };
         if (next.restartPending && next.consecutiveFailures >= SETUP_FAILURE_COOLDOWN_AFTER) next = restartExhausted(next, now);
       } else if (next.verification?.nextReadAt) {
@@ -1400,7 +1490,7 @@ function queueEnginePoll(): void {
           }
         }
         if (sessionExpired && !state.intent && state.policyKey === policyKey(durablePrefs)) {
-          const next = beginAuthentication(state, 'renew', now, Math.random);
+          const next = beginTrackedAuthentication(state, 'renew', now, Math.random);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
@@ -1416,13 +1506,14 @@ function queueEnginePoll(): void {
           // scope-bound monitor, and notify selected-consulate changes only.
           // Read failures budget a retry; corrupt baselines park for review.
           const stamped = new Date().toISOString();
-          const park = async () => {
+          const park = async (detail: DiagnosticDetail = 'stage-guard') => {
+            noteDiagnostic('poll-park', { mode: state.mode, detail });
             const parked = parkForReview(state, new Date().toISOString());
             if (parked !== state) await saveEngineState(area, parked);
             await syncEngineAlarm(null);
           };
           const failSoft = async () => {
-            const next = applyPollResult(state, { outcome: 'retryable', now: new Date().toISOString(), random: Math.random });
+            const next = pollRetry(state);
             await saveEngineState(area, next);
             await syncEngineAlarm(engineAlarmAt(next));
           };
@@ -1455,7 +1546,7 @@ function queueEnginePoll(): void {
             : matchingPayments.find(tab => tab.id === state.monitorTabId);
           if (payment?.id === undefined) {
             if (paymentTabs.some(tab => classifyRoute(tab.url ?? '') === 'login')) {
-              const next = beginAuthentication(state, 'renew', new Date().toISOString(), Math.random);
+              const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
               await saveEngineState(area, next);
               await syncEngineAlarm(engineAlarmAt(next));
               return;
@@ -1480,6 +1571,7 @@ function queueEnginePoll(): void {
           // GET) and retry on budget; the landing re-read follows on load.
           // Persistent maintenance still reaches cooldown and review.
           if (typeof raw === 'object' && raw !== null && (raw as { maintenance?: unknown }).maintenance === true) {
+            noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
             try {
               await chrome.tabs.reload(payment.id, { bypassCache: true });
               maintenanceReload = state.runId ? { runId: state.runId, tabId: payment.id } : null;
@@ -1522,6 +1614,7 @@ function queueEnginePoll(): void {
               });
               await area.set({ unpaidMonitorV1: { scopeKey, monitor: acceptNotification(advanced, alertDue) } });
             }
+            notePollRecovered(state, 'healthy');
             const next = applyPollResult(state, { outcome: 'healthy', now: stamped, random: Math.random });
             await saveEngineState(area, next);
             await syncEngineAlarm(engineAlarmAt(next));
@@ -1547,14 +1640,15 @@ function queueEnginePoll(): void {
                 verification: { reads: [], nextReadAt: new Date(Date.parse(at) + 30_000).toISOString() } };
             } else throw new Error('Engine poll alarm failed.');
           }
-          if (next!.status === 'stopped' && !next!.intent) next = beginAuthentication(prepared, 'renew', new Date().toISOString(), Math.random);
+          if (next!.status === 'stopped' && !next!.intent) next = beginTrackedAuthentication(prepared, 'renew', new Date().toISOString(), Math.random);
           if (next !== state) await saveEngineState(area, next!);
           await syncEngineAlarm(engineAlarmAt(next!));
           return;
         }
         // Paid fetch loop only; the unpaid summary loop arrives separately.
         // Anything unplannable parks for review instead of acting blindly.
-        const park = async () => {
+        const park = async (detail: DiagnosticDetail = 'stage-guard') => {
+          noteDiagnostic('poll-park', { mode: state.mode, detail });
           const parked = parkForReview(state, new Date().toISOString());
           if (parked !== state) await saveEngineState(area, parked);
           await syncEngineAlarm(null);
@@ -1600,8 +1694,8 @@ function queueEnginePoll(): void {
           } else await park();
           return;
         }
-        const retryRead = async () => {
-          const next = applyPollResult(state, { outcome: 'retryable', now: new Date().toISOString(), random: Math.random });
+        const retryRead = async (detail?: DiagnosticDetail) => {
+          const next = pollRetry(state, detail);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
         };
@@ -1617,51 +1711,67 @@ function queueEnginePoll(): void {
             // No reading means no permission to poll or infer an applicant.
             // Skip this cycle on the existing retry/cooldown budget; a failed
             // fresh GET or injection must not silently end normal monitoring.
-            await retryRead();
+            await retryRead('script-interrupted');
             return;
           }
           const reading = baseline[0]?.result as { scheduleId?: unknown; ivr?: unknown; kind?: unknown; status?: unknown } | undefined;
           if (reading?.kind === 'read-failure' && reading.scheduleId === scheduleId && reading.ivr === state.group.ivr &&
               typeof reading.status === 'number' && Number.isInteger(reading.status) && reading.status >= 0 && reading.status <= 599) {
             if (mapHttpStatus(reading.status) === 'denied') {
-              const next = beginAuthentication(state, 'renew', new Date().toISOString(), Math.random);
+              noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
+              const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
               await saveEngineState(area, next);
               await syncEngineAlarm(engineAlarmAt(next));
-            } else await retryRead();
+            } else await retryRead('transport');
             return;
           }
           try {
-            if (appointmentDate(baseline[0]?.result, state.group) !== state.group.currentDate) { await park(); return; }
-          } catch { await park(); return; }
+            if (appointmentDate(baseline[0]?.result, state.group) !== state.group.currentDate) { await park('baseline-changed'); return; }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '';
+            if (message === 'Appointment identity changed.') await park('group-changed');
+            else if (message === 'Applicant roster changed.') await park('roster-changed');
+            else await retryRead('reply-malformed');
+            return;
+          }
           implicitApplicantId = state.group.applicantIds[0];
         }
         let page: PaidPage | null;
         try {
           const result = await chrome.scripting.executeScript({ target: { tabId: reader.id }, func: readPaidPage, args: [scheduleId, implicitApplicantId] });
           page = result[0]?.result as PaidPage;
-        } catch { await retryRead(); return; }
+        } catch { await retryRead('script-interrupted'); return; }
         // A maintenance page keeps the form URL but renders no usable form. As
         // in the unpaid loop, reload it and retry on budget; anything else
         // still parks. Readable pages with changed applicants always park.
-        if (!page || page.scheduleId !== scheduleId || page.kind !== 'form') {
+        if (page && page.scheduleId !== scheduleId) { await park('group-changed'); return; }
+        if (!page || page.kind !== 'form') {
           let maintenance = false;
           try {
             const check = await chrome.scripting.executeScript({ target: { tabId: reader.id }, func: readSiteMaintenance });
             maintenance = (check[0]?.result as { maintenance?: unknown } | undefined)?.maintenance === true;
           } catch { maintenance = false; }
           if (maintenance) {
+            noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
             try { await chrome.tabs.reload(reader.id, { bypassCache: true }); } catch { /* Tab loss parks below via retry budget. */ }
-            const next = applyPollResult(state, { outcome: 'retryable', now: new Date().toISOString(), random: Math.random });
+            const next = pollRetry(state, 'maintenance');
             await saveEngineState(area, next);
             await syncEngineAlarm(engineAlarmAt(next));
             return;
           }
-          await park();
+          // Re-enter through auth-only recovery in the same owned tab. It
+          // revalidates live custody, group, baseline and roster before any
+          // booking action, and preserves the paced failure/cooldown deadline.
+          const failed = pollRetry(state, page ? 'reply-malformed' : 'reply-missing');
+          const auth = beginTrackedAuthentication(failed, 'renew', new Date().toISOString(), Math.random);
+          const next = auth.authentication ? { ...auth, nextPollAt: failed.nextPollAt, cooldownUntil: failed.cooldownUntil } : auth;
+          await saveEngineState(area, next);
+          await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
         if (!sameApplicants(page.applicantIds, state.executor!.applicantIds) ||
             (state.group.applicantIds && !sameApplicants(page.applicantIds, state.group.applicantIds)) || typeof prefs?.testMode !== 'boolean') {
-          await park();
+          await park('roster-changed');
           return;
         }
         const schedulePath = `/en-ca/niv/schedule/${scheduleId}/appointment`;
@@ -1685,13 +1795,14 @@ function queueEnginePoll(): void {
         const outcome = mapHttpStatus(status);
         if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
         if (outcome === 'denied') {
-          const next = beginAuthentication(state, 'renew', new Date().toISOString(), Math.random);
+          noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
+          const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
         if (outcome === 'retryable') {
-          const next = applyPollResult(state, { outcome, now: new Date().toISOString(), random: Math.random });
+          const next = pollRetry(state, 'transport');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
@@ -1700,23 +1811,27 @@ function queueEnginePoll(): void {
         try {
           dates = outcome === 'not-modified' ? [] : parseDaysPayload(body).map(entry => entry.date);
         } catch {
-          const next = applyPollResult(state, { outcome: 'retryable', now: new Date().toISOString(), random: Math.random });
+          const next = pollRetry(state, 'reply-malformed');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
         const stamped = new Date().toISOString();
         if (outcome === 'not-modified') {
+          notePollRecovered(state, 'not-modified');
           const next = applyPollResult(state, { outcome, now: stamped, random: Math.random });
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
+        if (dates.length > 0) notePollRecovered(state, 'healthy');
         const applied = applyPollResult(state, {
           outcome: dates.length === 0 ? 'empty' : 'healthy',
           now: stamped,
           random: Math.random,
         });
+        if (dates.length === 0) noteDiagnostic(applied.cooldownUntil && applied.cooldownUntil !== state.cooldownUntil ? 'poll-cooldown-entered' : 'poll-empty',
+          { mode: 'booking', outcome: 'empty', detail: 'empty-result', failures: applied.consecutiveFailures });
         // Counts-only poll footprint for supervised debugging: how many days
         // the portal returned, never which dates.
         await area.set({ lastPollV1: { status, dayCount: dates.length, at: stamped } });
@@ -1750,6 +1865,7 @@ function queueEnginePoll(): void {
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === HISTORY_ALARM) { void ready.then(() => dateHistory.prune()).catch(() => undefined); return; }
   if (alarm.name === ANALYTICS_ALARM) { void ready.then(() => analytics?.flush()).catch(() => undefined); return; }
+  if (alarm.name === DIAGNOSTICS_ALARM) { void ready.then(() => engineDiagnostics.prune()).catch(() => undefined); return; }
   if (alarm.name === ENGINE_ALARM) { queueEnginePoll(); return; }
   if (alarm.name !== ALARM) return;
   enqueue(async () => {

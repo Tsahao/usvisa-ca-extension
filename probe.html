@@ -23,6 +23,9 @@
       <button id="poll-now" type="button">Poll now</button>
       <button id="reset-baseline" type="button">Reset monitor baseline</button>
       <button id="engine-status" type="button">Engine status</button>
+      <p>Local developer diagnostics: bounded, event-driven, allowlisted fixed codes only (never credentials, URLs, identifiers, appointment dates, or page content). Retained about seven days and never cleared by a successful run. Export the JSON below when reporting an unattended-run issue.</p>
+      <button id="read-diagnostics" type="button">Read/export developer diagnostics</button>
+      <pre id="diagnostics-output" role="status"></pre>
       <p>To check page access, open the official visa website yourself and click the extension toolbar icon there.</p>
     </main>
     <script type="module" src="/src/probe.ts"></script>

@@ -242,7 +242,7 @@ describe('login-to-dashboard navigation race', () => {
     expect(h.saved).toHaveLength(1);
     expect(h.saved[0].authentication).toMatchObject({ pending: true });
     expect(reconcileStartup(h.saved[0], h.deps.nowIso())).toMatchObject(
-      { status: 'verifying', authentication: null, nextPollAt: null });
+      { status: 'running', authentication: { pending: false, phase: 'wait', submittedInCycle: true }, nextPollAt: expect.any(String) });
   });
   it('paces an unexpired same-login loading race with trusted dashboard pending', async () => {
     const h = harness();
@@ -389,33 +389,43 @@ describe('login-to-dashboard navigation race', () => {
     expect(state).toMatchObject({ status: 'running', authentication: { phase: 'wait', pending: false, submittedInCycle: true } });
     expect(h.actions).toEqual(['submit']);
   });
-  it('keeps an unknown-reason submit refusal fail-closed despite dashboard progress', async () => {
+  it('settles an unknown-reason submit refusal without replaying the POST', async () => {
     const h = harness();
     let state = beginAuthentication(boundSingle(), 'renew', NOW);
     state = { ...state, authentication: { ...state.authentication!, tabId: 7, phase: 'submit' } };
-    scriptTabs(h, [loginComplete, loginComplete, loginComplete, dashboardComplete, dashboardComplete]);
+    scriptTabs(h, [loginComplete, loginComplete, loginComplete, loginComplete]);
     const inject = h.deps.inject;
-    h.deps.inject = vi.fn(async (tab, func) => {
-      if (func.name === 'performLoginAction') return { ok: false, reason: 'bogus-signal' };
-      return inject(tab, func, undefined);
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'performLoginAction') {
+        h.actions.push((params![0] as { action: string }).action);
+        return { ok: false, reason: 'bogus-signal' };
+      }
+      return inject(tab, func, params);
     });
     state = validateEngineState(await runAuthentication(h.deps, state));
-    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true,
-      authenticationFailureReason: 'unrecognized-reading' });
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, authenticationFailureReason: null,
+      authentication: { tabId: 7, phase: 'wait', pending: false, submittedInCycle: true } });
+    // The settled cycle continues read-only: the next pass submits nothing.
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(h.actions).toEqual(['submit']);
   });
-  it('keeps a same-document empty reply fail-closed as unrecognized', async () => {
+  it('settles a same-document empty submit reply without replaying the POST', async () => {
     const h = harness();
     let state = beginAuthentication(boundSingle(), 'renew', NOW);
     state = { ...state, authentication: { ...state.authentication!, tabId: 7, phase: 'submit' } };
-    scriptTabs(h, [loginComplete]);
+    scriptTabs(h, [loginComplete, loginComplete]);
     const inject = h.deps.inject;
-    h.deps.inject = vi.fn(async (tab, func) => {
-      if (func.name === 'performLoginAction') return undefined;
-      return inject(tab, func, undefined);
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'performLoginAction') {
+        h.actions.push((params![0] as { action: string }).action);
+        return undefined;
+      }
+      return inject(tab, func, params);
     });
     state = validateEngineState(await runAuthentication(h.deps, state));
-    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true,
-      authenticationFailureReason: 'unrecognized-reading' });
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, authenticationFailureReason: null,
+      authentication: { tabId: 7, phase: 'wait', pending: false, submittedInCycle: true } });
+    expect(h.loginActions()).toEqual(['submit']);
   });
   it('recovers an empty probe reply via validated progress', async () => {
     const h = harness();

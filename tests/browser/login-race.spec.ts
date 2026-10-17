@@ -116,6 +116,16 @@ test('packaged renew survives a lost submit reply with zero submits and binds', 
     expect(posts).toBe(0);
     expect(flow.url() === dashboardUrl || flow.url().startsWith(`https://ais.usvisa-info.com${base}/continue`)).toBe(true);
     expect(context.pages().filter(page => page.url().startsWith('https://ais.usvisa-info.com'))).toEqual([flow]);
+    const diagnostics = await panel.evaluate(async () => {
+      const reply = await chrome.runtime.sendMessage({ type: 'ENGINE_DIAGNOSTICS' });
+      return reply.diagnostics as { extensionVersion: string; entries: { code: string; extensionVersion?: string }[] };
+    });
+    expect(diagnostics.entries.some(entry => entry.code === 'auth-redirect-progress')).toBe(true);
+    expect(diagnostics.entries.every(entry => entry.extensionVersion === diagnostics.extensionVersion)).toBe(true);
+    const diagnosticJson = JSON.stringify(diagnostics);
+    for (const privateValue of ['fixture@example.invalid', 'synthetic-password', '11111111', '77777777', 'ais.usvisa-info.com']) {
+      expect(diagnosticJson).not.toContain(privateValue);
+    }
     await panel.evaluate(async () => { await chrome.runtime.sendMessage({ type: 'PANEL_STOP' }); });
   } finally { await context.close(); await rm(profile, { recursive: true, force: true }); }
 });

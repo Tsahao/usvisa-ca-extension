@@ -4,6 +4,7 @@ import { bindGroup, emptyEngineState, reconcileStartup, startRun, validateEngine
 import { policyKey } from '../src/engine/lifecycle';
 import { panelSnapshot } from '../src/engine/panel';
 import { engineAlarmAt } from '../src/engine/poll';
+import type { DiagnosticEvent } from '../src/domain/diagnostics';
 import type { ExecDeps } from '../src/engine/executor';
 
 const NOW = '2026-10-12T00:00:00.000Z';
@@ -18,9 +19,11 @@ function harness() {
   let url = 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in';
   const saved: EngineState[] = [];
   const actions: string[] = [];
+  const diagnostics: DiagnosticEvent[] = [];
   const deps: ExecDeps = { nowIso: () => clock, random: () => 0, loadPrefs: async () => ({ ...prefs }),
     queryTabs: async () => [], getTab: async () => ({ id: 7, url }), createTab: vi.fn(async () => ({ id: 7, url })),
     saveState: async checkpoint => { saved.push(validateEngineState(JSON.parse(JSON.stringify(checkpoint)))); },
+    recordDiagnostic: event => { diagnostics.push(event); },
     navigateTab: vi.fn(async (tabId, target) => {
       expect(tabId).toBe(7);
       expect(saved.at(-1)?.authentication?.pending).toBe(true);
@@ -51,10 +54,32 @@ function harness() {
       if (func.name === 'readCurrentAppointment') return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027', applicantIds: ids };
       throw new Error('Unexpected injection');
     }) };
-  return { deps, saved, actions, setUrl: (value: string) => { url = value; }, getUrl: () => url, tick: (seconds: number) => { clock = new Date(Date.parse(clock) + seconds * 1000).toISOString(); } };
+  return { deps, saved, actions, diagnostics, setUrl: (value: string) => { url = value; }, getUrl: () => url, tick: (seconds: number) => { clock = new Date(Date.parse(clock) + seconds * 1000).toISOString(); } };
 }
 
 describe('durable automatic authentication', () => {
+  it.each(['navigation', 'action'] as const)('recovers an interrupted typed login %s checkpoint on worker wake without replay', async checkpoint => {
+    const h = harness();
+    const started = beginAuthentication(seed(), 'start', NOW);
+    const pending = validateEngineState({ ...started, authentication: { ...started.authentication!, tabId: 7,
+      pending: true, checkpoint, phase: 'submit' } });
+    const resumed = validateEngineState(reconcileStartup(pending, NOW));
+    expect(resumed).toMatchObject({ status: 'running', authentication: { pending: false,
+      phase: checkpoint === 'action' ? 'wait' : 'retry' } });
+    if (checkpoint === 'action') expect(resumed.authentication!.submittedInCycle).toBe(true);
+    const early = await runAuthentication(h.deps, resumed);
+    expect(early.authentication?.phase).toBe(checkpoint === 'action' ? 'wait' : 'retry');
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    expect(h.actions).toEqual([]);
+    h.tick(60);
+    const next = await runAuthentication(h.deps, resumed);
+    expect(next).toMatchObject({ status: 'running', authentication: { pending: false, phase: 'prepare', submittedInCycle: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledOnce();
+    expect(h.actions).toEqual([]);
+    expect(reconcileStartup(pending, NOW, true)).toMatchObject({ status: 'verifying', authentication: null, nextPollAt: null });
+    const { checkpoint: _kind, ...legacy } = pending.authentication!;
+    expect(reconcileStartup({ ...pending, authentication: legacy }, NOW)).toMatchObject({ status: 'verifying', authentication: null });
+  });
   it.each(['retry', 'wait', 'cycle-wait'] as const)('uses a checkpointed browser GET when the %s document cannot return a navigation reply', async phase => {
     const h = harness();
     let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
@@ -120,10 +145,36 @@ describe('durable automatic authentication', () => {
     expect(h.deps.inject).not.toHaveBeenCalled();
     expect(h.actions).toEqual([]);
     const interrupted = reconcileStartup(h.saved.at(-1)!, h.deps.nowIso());
-    expect(interrupted).toMatchObject({ status: 'verifying', intent: initial.intent, authentication: null, nextPollAt: null });
+    // A worker-wake interruption of a browser-side GET checkpoint is provably
+    // safe to recover: the held cycle deadline is respected and the resumed
+    // pass revalidates before any action. A real browser restart still parks.
+    expect(interrupted).toMatchObject({ status: initial.status, intent: initial.intent,
+      authentication: { tabId: 7, phase: 'retry', pending: false }, nextPollAt: interrupted.authentication!.cycleDeadline });
+    expect(reconcileStartup(h.saved.at(-1)!, h.deps.nowIso(), true))
+      .toMatchObject({ status: 'verifying', authentication: null, nextPollAt: null });
   });
 
-  it.each(['missing-api', 'navigation-failure', 'pending-offsite', 'context-change', 'settings-change', 'cancelled'] as const)('refuses unsafe browser GET recovery without DOM fallback (%s)', async issue => {
+  it('holds a counted retry without double-counting when the retry GET races to another trusted route', async () => {
+    const h = harness();
+    let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
+    state = { ...state, consecutiveFailures: 2, authentication: { ...state.authentication!, phase: 'retry' }, nextPollAt: NOW };
+    const save = h.deps.saveState;
+    h.deps.saveState = async checkpoint => {
+      await save(checkpoint);
+      // The tab completes a trusted dashboard redirect between the durable
+      // checkpoint and the fresh GET: a benign race, never a terminal failure.
+      h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups/99999999');
+    };
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, consecutiveFailures: 2, cooldownUntil: null,
+      authentication: { tabId: 7, phase: 'retry', pending: false } });
+    expect(state.nextPollAt).toBe(state.authentication!.cycleDeadline);
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    expect(h.deps.inject).not.toHaveBeenCalled();
+    expect(h.actions).toEqual([]);
+  });
+
+  it.each(['missing-api', 'navigation-failure', 'pending-offsite', 'settings-change', 'cancelled'] as const)('refuses unsafe browser GET recovery without DOM fallback (%s)', async issue => {
     const h = harness();
     let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
     state = { ...state, authentication: { ...state.authentication!, phase: 'retry' }, nextPollAt: NOW };
@@ -131,11 +182,10 @@ describe('durable automatic authentication', () => {
     if (issue === 'missing-api') h.deps.navigateTab = undefined;
     if (issue === 'navigation-failure') h.deps.navigateTab = vi.fn(async () => { throw new Error('synthetic navigation failure'); });
     if (issue === 'pending-offsite') h.deps.getTab = async () => ({ id: 7, url: h.getUrl(), pendingUrl: 'https://example.invalid/' });
-    if (issue === 'context-change' || issue === 'settings-change' || issue === 'cancelled') {
+    if (issue === 'settings-change' || issue === 'cancelled') {
       const save = h.deps.saveState;
       h.deps.saveState = async checkpoint => {
         await save(checkpoint);
-        if (issue === 'context-change') h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups/99999999');
         if (issue === 'settings-change') h.deps.loadPrefs = async () => ({ ...prefs, interval: 600 });
         if (issue === 'cancelled') h.deps.isCancelled = () => true;
       };
@@ -199,6 +249,59 @@ describe('durable automatic authentication', () => {
     if (issue === 'checkpoint') await expect(runAuthentication(h.deps, state)).rejects.toThrow('synthetic storage failure');
     else expect(await runAuthentication(h.deps, state)).toMatchObject({ authentication: null });
     expect(h.deps.inject).not.toHaveBeenCalled(); expect(h.actions).toEqual([]);
+  });
+  it('recovers a transient maintenance-read failure on the same trusted login with a counted retry', async () => {
+    const h = harness();
+    let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 }, consecutiveFailures: 1, nextPollAt: NOW };
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readSiteMaintenance') throw new Error('synthetic interruption');
+      return inject(tab, func, params);
+    });
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    // The exact login is independently revalidated: the transient read
+    // failure counts exactly once on the shared budget, clears the pending
+    // checkpoint and holds a fresh-GET retry without navigating or mutating.
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, consecutiveFailures: 2, cooldownUntil: null,
+      authentication: { tabId: 7, phase: 'retry', pending: false } });
+    expect(state.nextPollAt).toBe(state.authentication!.cycleDeadline);
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    expect(h.actions).toEqual([]);
+  });
+  it('recovers a transient maintenance-read failure on the clean landing root', async () => {
+    const h = harness();
+    let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/');
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 }, nextPollAt: NOW };
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readSiteMaintenance') throw new Error('synthetic interruption');
+      return inject(tab, func, params);
+    });
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, consecutiveFailures: 1,
+      authentication: { tabId: 7, phase: 'retry', pending: false } });
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    expect(h.actions).toEqual([]);
+  });
+  it('refuses a maintenance-read failure when the live document left the trusted login', async () => {
+    const h = harness();
+    let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 }, nextPollAt: NOW };
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readSiteMaintenance') throw new Error('synthetic interruption');
+      return inject(tab, func, params);
+    });
+    h.deps.getTab = vi.fn()
+      .mockResolvedValueOnce({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in' })
+      .mockResolvedValue({ id: 7, url: 'https://example.invalid/en-ca/niv/users/sign_in' });
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true,
+      authenticationFailureReason: 'untrusted-navigation' });
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    expect(h.actions).toEqual([]);
   });
   it('waits out an identifiable transient login gap and lets an expired cycle validate the dashboard', async () => {
     const h = harness();
@@ -338,14 +441,33 @@ describe('durable automatic authentication', () => {
       group: { currentDate: null, applicantIds: [ids[0]] }, executor: { tabId: 7, applicantIds: [ids[0]] } });
     expect(h.actions).toEqual(['prepare', 'submit']);
   });
-  it.each(['groups', 'selection', 'appointment', 'applicants'] as const)('reports post-login %s failures in the existing banner, without claiming login failed', async step => {
+  it('reports post-login selection failures in the existing banner, without claiming login failed', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }] };
+      return inject(tab, func, params);
+    });
+    const initial = beginAuthentication(seed(), 'start', NOW);
+    const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
+    expect(state).toMatchObject({ status: 'stopped', loginFailed: false, authentication: null, nextPollAt: null });
+    expect(state.authenticationError).toBeTruthy();
+    expect(JSON.stringify(state)).not.toContain('synthetic-secret');
+    expect(panelSnapshot(state, null, null)).toMatchObject({ status: 'failure', reviewRequired: true, reviewMessage: state.authenticationError,
+      failureKind: 'paid-ivr-not-found' });
+    expect(JSON.stringify(panelSnapshot(state, null, null))).not.toContain('synthetic-secret');
+    expect(h.actions).toEqual([]);
+    expect(beginAuthentication({ ...state, status: 'running' }, 'start', NOW).authenticationError).toBeNull();
+    expect(startRun(state, { ...args, runId: 'fresh-run-0001', mode: 'booking' }).authenticationError).toBeNull();
+  });
+  it.each(['groups', 'appointment', 'applicants'] as const)('recovers a post-login %s reading failure on the counted retry budget instead of stopping', async step => {
     const h = harness();
     h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
     const inject = h.deps.inject;
     h.deps.inject = vi.fn(async (tab, func, params) => {
       if (func.name === 'readDashboardGroups') {
         if (step === 'groups') throw new Error('synthetic-secret');
-        if (step === 'selection') return { groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }] };
       }
       if (func.name === 'readCurrentAppointment') {
         if (step === 'appointment') throw new Error('synthetic-secret');
@@ -355,15 +477,17 @@ describe('durable automatic authentication', () => {
     });
     const initial = beginAuthentication(seed(), 'start', NOW);
     const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
-    expect(state).toMatchObject({ status: 'stopped', loginFailed: false, authentication: null, nextPollAt: null });
-    expect(state.authenticationError).toBeTruthy();
-    expect(JSON.stringify(state)).not.toContain('synthetic-secret');
-    expect(panelSnapshot(state, null, null)).toMatchObject({ status: 'failure', reviewRequired: true, reviewMessage: state.authenticationError,
-      failureKind: step === 'selection' ? 'paid-ivr-not-found' : 'generic' });
-    expect(JSON.stringify(panelSnapshot(state, null, null))).not.toContain('synthetic-secret');
+    // A transient reading failure in a still-trusted dashboard counts exactly
+    // one failure and holds a durable retry deadline without mutating the page,
+    // opening a banner or claiming a login failure; the next wake revalidates
+    // trust, group, baseline/roster and configuration before any action.
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, authenticationError: null, authenticationFailureReason: null,
+      consecutiveFailures: 1, cooldownUntil: null, authentication: { tabId: 7, phase: 'retry', pending: false } });
+    expect(state.nextPollAt).toBe(state.authentication!.cycleDeadline);
+    expect(panelSnapshot(state, null, null)).toMatchObject({ status: 'running', reviewRequired: false });
+    expect(JSON.stringify([state, panelSnapshot(state, null, null)])).not.toContain('synthetic-secret');
     expect(h.actions).toEqual([]);
-    expect(beginAuthentication({ ...state, status: 'running' }, 'start', NOW).authenticationError).toBeNull();
-    expect(startRun(state, { ...args, runId: 'fresh-run-0001', mode: 'booking' }).authenticationError).toBeNull();
+    expect(vi.mocked(h.deps.inject).mock.calls.map(call => call[1].name)).not.toContain('performLoginAction');
   });
   it('classifies a post-login unpaid IVR mismatch without claiming login failed', async () => {
     const h = harness();
@@ -385,19 +509,42 @@ describe('durable automatic authentication', () => {
     expect(h.actions).toEqual([]);
   });
   it('keeps post-login ambiguous and changed-group diagnostics generic', async () => {
-    for (const groups of [[{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' }, { scheduleId: '11111111', ivr: '99999999' }]]) {
+    // Ambiguous duplicate dashboard cards are a malformed reading: recover on
+    // the counted retry budget with no identifiers or banner leaked.
+    {
       const h = harness();
       h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
       const inject = h.deps.inject;
       h.deps.inject = vi.fn(async (tab, func, params) => {
-        if (func.name === 'readDashboardGroups') return { groups };
+        if (func.name === 'readDashboardGroups') return { groups: [
+          { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
+          { scheduleId: '11111111', ivr: '99999999' },
+        ] };
         return inject(tab, func, params);
       });
       const initial = beginAuthentication(seed(), 'start', NOW);
       const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
+      expect(state).toMatchObject({ status: 'running', loginFailed: false, authenticationError: null, consecutiveFailures: 1,
+        authentication: { phase: 'retry', pending: false } });
+      expect(JSON.stringify(state)).not.toContain('99999999');
+      expect(panelSnapshot(state, null, null)).toMatchObject({ status: 'running', reviewRequired: false });
+    }
+    // A changed bound group stays terminal with a generic banner and no leak.
+    {
+      const h = harness();
+      h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+      const inject = h.deps.inject;
+      h.deps.inject = vi.fn(async (tab, func, params) => {
+        if (func.name === 'readDashboardGroups') return { groups: [{ scheduleId: '33333333', ivr: '22222222', paymentStatus: 'paid' }] };
+        if (func.name === 'readCurrentAppointment') return { scheduleId: '33333333', ivr: '22222222', kind: 'booked', text: 'January 1, 2027', applicantIds: ids };
+        return inject(tab, func, params);
+      });
+      const initial = beginAuthentication(bound(), 'start', NOW);
+      const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
       expect(state).toMatchObject({ status: 'stopped', loginFailed: false });
       expect(panelSnapshot(state, null, null)).toMatchObject({ status: 'failure', failureKind: 'generic' });
-      expect(JSON.stringify(panelSnapshot(state, null, null))).not.toContain('99999999');
+      expect(JSON.stringify(panelSnapshot(state, null, null))).not.toContain('33333333');
+      expect(JSON.stringify(panelSnapshot(state, null, null))).not.toContain('22222222');
     }
   });
   it('rejects arbitrary persisted authentication diagnostics and migrates older saves', () => {
@@ -518,14 +665,20 @@ describe('durable automatic authentication', () => {
     state = await runAuthentication(h.deps, state);
     expect(h.actions).toEqual(['prepare']);
   });
-  it('refuses an injection if the owned tab starts loading after the readiness check', async () => {
+  it('holds a counted read-only retry when the owned login tab starts loading mid-read', async () => {
     const h = harness();
     const state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
     h.deps.getTab = vi.fn()
       .mockResolvedValueOnce({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in', status: 'complete' })
       .mockResolvedValue({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in', status: 'loading' });
-    expect(await runAuthentication(h.deps, state)).toMatchObject({ status: 'stopped', authentication: null });
+    const next = validateEngineState(await runAuthentication(h.deps, state));
+    // Loading at the still-trusted exact login is recoverable: the injection
+    // is refused, nothing is mutated, and the counted read-only retry holds
+    // the observed failure with the context preserved.
+    expect(next).toMatchObject({ status: 'running', loginFailed: false, consecutiveFailures: 1, cooldownUntil: null,
+      authentication: { tabId: 7, phase: 'retry', pending: false } });
     expect(h.actions).toEqual([]);
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
   });
   it('authenticates an unpaid workflow without reading or entering paid booking controls', async () => {
     const h = harness(); let state = beginAuthentication({ ...seed(), mode: 'alerts' }, 'start', NOW);
@@ -706,7 +859,8 @@ describe('durable automatic authentication', () => {
     expect(result).toMatchObject({ status: 'running', authentication: { tabId: 7, purpose: 'renew', pending: false } });
     expect(h.deps.navigateTab).toHaveBeenCalledExactlyOnceWith(7, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
     expect(h.deps.createTab).not.toHaveBeenCalled(); expect(h.deps.inject).not.toHaveBeenCalled();
-    expect(reconcileStartup(h.saved.at(-1)!, NOW)).toMatchObject({ status: 'verifying', authentication: null, nextPollAt: null });
+    expect(reconcileStartup(h.saved.at(-1)!, NOW)).toMatchObject({ status: 'running',
+      authentication: { tabId: 7, purpose: 'renew', phase: 'retry', pending: false } });
   });
   it.each(['wrong-group', 'offsite', 'unknown-route', 'query', 'fragment', 'pending-offsite', 'closed', 'changed-after-save', 'settings-change', 'cancelled', 'storage-failure'])(
     'refuses unsafe owned-tab renewal without opening a replacement (%s)', async issue => {
@@ -918,7 +1072,7 @@ describe('durable automatic authentication', () => {
     expect(state.nextPollAt).toBe(state.authentication!.cycleDeadline);
     expect(h.actions).toEqual(['prepare', 'submit']);
   });
-  it('stops on an unrecognized post-submit reading without another submission', async () => {
+  it('never replays a submit after an unrecognized post-submit reading; expiry counts one fresh GET', async () => {
     const h = harness();
     let state = beginAuthentication(seed(), 'start', NOW);
     state = await runAuthentication(h.deps, state); h.tick(2);
@@ -927,7 +1081,18 @@ describe('durable automatic authentication', () => {
     h.setUrl('https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
     h.deps.inject = vi.fn(async (_tab, func) => func.name === 'readSiteMaintenance' ? { maintenance: false } : ({ ok: false }));
     state = validateEngineState(await runAuthentication(h.deps, state));
-    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true });
+    // An unrecognized post-submit reading holds the durable cycle deadline
+    // read-only (no stop, no banner) and never replays the submit.
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, consecutiveFailures: 0,
+      authentication: { phase: 'cycle-wait', tabId: 7 } });
+    expect(state.nextPollAt).toBe(state.authentication!.cycleDeadline);
+    expect(h.actions).toEqual(['prepare', 'submit']);
+    // At expiry the counted fresh-GET cycle starts; still zero extra submits.
+    h.tick(56);
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1,
+      authentication: { phase: 'prepare', pending: false, submittedInCycle: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledWith(7, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
     expect(h.actions).toEqual(['prepare', 'submit']);
   });
   it.each([
@@ -1044,7 +1209,7 @@ describe('durable automatic authentication', () => {
       manualAuthentication: true, consecutiveFailures: 0 });
     expect(h.actions).toEqual(['prepare', 'submit']);
   });
-  it('fails closed on an unrecognized wait-phase reading exactly at expiry', async () => {
+  it('counts an unrecognized wait-phase reading exactly at expiry with a fresh GET', async () => {
     const h = harness();
     let state = beginAuthentication(seed(), 'start', NOW);
     state = await runAuthentication(h.deps, state); h.tick(2);
@@ -1054,7 +1219,11 @@ describe('durable automatic authentication', () => {
     h.deps.inject = vi.fn(async (_tab, func) => func.name === 'readSiteMaintenance' ? { maintenance: false } : ({ ok: false }));
     h.tick(56);
     state = validateEngineState(await runAuthentication(h.deps, state));
-    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true, consecutiveFailures: 0 });
+    // An unrecognized reading at expiry is counted once and recovered with the
+    // fixed fresh GET instead of a terminal stop; no extra submit is replayed.
+    expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1, loginFailed: false,
+      authentication: { phase: 'prepare', pending: false, submittedInCycle: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledWith(7, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
     expect(h.actions).toEqual(['prepare', 'submit']);
   });
   it('counts a clean wait-phase reading at expiry with a fresh GET instead of pacing', async () => {
@@ -1088,7 +1257,7 @@ describe('durable automatic authentication', () => {
     if (reason === 'credential-rejected') expect(state.loginFailed).toBe(true);
     else expect(state.manualAuthentication).toBe(true);
   });
-  it('fails closed on an unrecognized cycle-wait reading after expiry', async () => {
+  it('counts an unrecognized cycle-wait reading after expiry with a fresh GET', async () => {
     const h = harness();
     let state = await runAuthentication(h.deps, beginAuthentication(seed(), 'start', NOW));
     h.deps.inject = vi.fn(async (_tab, func) => func.name === 'readSiteMaintenance'
@@ -1098,7 +1267,10 @@ describe('durable automatic authentication', () => {
     h.deps.inject = vi.fn(async (_tab, func) => func.name === 'readSiteMaintenance' ? { maintenance: false } : ({ ok: false }));
     h.tick(61);
     state = validateEngineState(await runAuthentication(h.deps, state));
-    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true, consecutiveFailures: 0 });
+    expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1,
+      authentication: { phase: 'prepare', pending: false, submittedInCycle: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledWith(7, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
+    expect(h.actions).toEqual([]);
   });
   it('counts an expired cycle-wait transient gap with a fresh GET', async () => {
     const h = harness();
@@ -1429,7 +1601,7 @@ describe('durable automatic authentication', () => {
     expect(h.actions).toEqual([]);
     expect(vi.mocked(h.deps.inject).mock.calls.map(call => call[1].name)).not.toContain('performLoginAction');
   });
-  it('fails closed an expired en-route appointment whose live path is not approved recovery', async () => {
+  it('holds a counted retry when an expired en-route appointment cannot run the fixed GET', async () => {
     const h = harness();
     let state = beginAuthentication({ ...seed(), mode: 'booking' }, 'start', NOW);
     state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
@@ -1439,7 +1611,14 @@ describe('durable automatic authentication', () => {
     h.deps.navigateTab = vi.fn(async () => undefined);
     h.tick(61);
     state = validateEngineState(await runAuthentication(h.deps, state));
-    expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true });
+    // The expiry counts exactly one failure; the live appointment path is not
+    // an approved recovery target, so the cycle holds its durable retry
+    // deadline instead of stopping, navigating or injecting. The next wake
+    // revalidates everything before any action.
+    expect(state).toMatchObject({ status: 'running', loginFailed: false, consecutiveFailures: 1, cooldownUntil: null,
+      authentication: { tabId: 7, phase: 'retry', pending: false } });
+    expect(state.nextPollAt).toBe(state.authentication!.cycleDeadline);
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
     expect(vi.mocked(h.deps.inject).mock.calls.length).toBe(0);
     expect(h.actions).toEqual([]);
   });
@@ -1603,5 +1782,103 @@ describe('durable automatic authentication', () => {
     failState = validateEngineState(await runAuthentication(failing.deps, failState));
     expect(failState).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true });
     expect(failing.actions).toEqual([]);
+  });
+  it('recovers a deferred dashboard read failure with a fresh GET and resets the budget only on validated binding', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    let failing = true;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups' && failing) throw new Error('synthetic-secret');
+      return inject(tab, func, params);
+    });
+    let state = beginAuthentication(seed(), 'start', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    // First failure: one counted retry scheduled, no mutation, fixed-code log.
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1, authentication: { phase: 'retry', pending: false } });
+    expect(h.diagnostics).toEqual([{ code: 'auth-retry-scheduled', detail: 'reply-malformed', purpose: 'start', mode: 'booking', phase: 'prepare', failures: 1 }]);
+    expect(JSON.stringify(h.diagnostics)).not.toContain('synthetic-secret');
+    // The retry wake runs the checkpointed fresh GET of the same trusted
+    // dashboard; barely navigating never resets the failure budget.
+    failing = false;
+    h.tick(60);
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1, authentication: { phase: 'prepare', pending: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledExactlyOnceWith(7, 'https://ais.usvisa-info.com/en-ca/niv/groups');
+    expect(h.saved.at(-1)?.authentication).toMatchObject({ pending: true });
+    // The next fully validated read binds and records recovery; prior entries survive.
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', authentication: null, consecutiveFailures: 0, cooldownUntil: null,
+      group: { scheduleId: '11111111', currentDate: '2027-01-01', applicantIds: ids } });
+    expect(h.diagnostics.map(event => event.code)).toEqual(['auth-retry-scheduled', 'auth-recovered']);
+    expect(h.diagnostics.at(-1)).toMatchObject({ code: 'auth-recovered', outcome: 'healthy', purpose: 'start', mode: 'booking', phase: 'prepare' });
+    // Every event carries the cycle phase context (fixed allowlisted value).
+    expect(h.diagnostics.every(event => event.phase === 'prepare')).toBe(true);
+    expect(h.actions).toEqual([]);
+    expect(vi.mocked(h.deps.inject).mock.calls.map(call => call[1].name)).not.toContain('performLoginAction');
+  });
+  it('cools down after ten deferred dashboard failures and auto-resumes into a fresh validated bind', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    let failing = true;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups' && failing) throw new Error('synthetic-secret');
+      return inject(tab, func, params);
+    });
+    let state = beginAuthentication(seed(), 'start', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    for (let count = 1; count <= 10; count++) {
+      if (count > 1) {
+        // The held retry wake consumes its durable deadline first.
+        h.tick(60);
+        state = validateEngineState(await runAuthentication(h.deps, state));
+        expect(state.authentication).toMatchObject({ phase: 'prepare', pending: false });
+      }
+      state = validateEngineState(await runAuthentication(h.deps, state));
+      expect(state.consecutiveFailures).toBe(count);
+      expect(state.authentication).toMatchObject({ phase: 'retry', pending: false });
+    }
+    expect(state).toMatchObject({ status: 'running', cooldownUntil: new Date(Date.parse(h.deps.nowIso()) + 1800_000).toISOString(),
+      nextPollAt: null, authentication: { phase: 'retry', pending: false } });
+    expect(h.diagnostics.filter(event => event.code === 'auth-retry-scheduled')).toHaveLength(9);
+    expect(h.diagnostics.filter(event => event.code === 'auth-cooldown-entered')).toHaveLength(1);
+    expect(h.diagnostics.every(event => event.phase === 'prepare')).toBe(true);
+    // Past the cooldown the worker auto-resumes; only validated progress resets.
+    failing = false;
+    h.tick(1800);
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ authentication: { phase: 'prepare', pending: false }, consecutiveFailures: 10 });
+    expect(h.deps.navigateTab).toHaveBeenCalledWith(7, 'https://ais.usvisa-info.com/en-ca/niv/groups');
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', authentication: null, consecutiveFailures: 0, cooldownUntil: null,
+      group: { scheduleId: '11111111', currentDate: '2027-01-01', applicantIds: ids } });
+    expect(h.diagnostics.at(-1)).toMatchObject({ code: 'auth-recovered', outcome: 'healthy' });
+    expect(vi.mocked(h.deps.inject).mock.calls.map(call => call[1].name)).not.toContain('performLoginAction');
+  });
+  it('keeps Stop and configuration changes terminal ahead of a deferred retry', async () => {
+    const deferToRetry = async (mutate: (h: ReturnType<typeof harness>) => void) => {
+      const h = harness();
+      h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+      const inject = h.deps.inject;
+      h.deps.inject = vi.fn(async (tab, func, params) => {
+        if (func.name === 'readDashboardGroups') throw new Error('synthetic-secret');
+        return inject(tab, func, params);
+      });
+      let state = beginAuthentication(seed(), 'start', NOW);
+      state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+      state = validateEngineState(await runAuthentication(h.deps, state));
+      expect(state).toMatchObject({ status: 'running', consecutiveFailures: 1, authentication: { phase: 'retry', pending: false } });
+      mutate(h);
+      h.tick(60);
+      return validateEngineState(await runAuthentication(h.deps, state));
+    };
+    // A Stop between the deferred failure and the retry is still honoured.
+    const cancelled = await deferToRetry(h => { h.deps.isCancelled = () => true; });
+    expect(cancelled).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true, authenticationFailureReason: 'cancelled' });
+    // A settings change between the deferred failure and the retry fails closed.
+    const changed = await deferToRetry(h => { h.deps.loadPrefs = async () => ({ ...prefs, interval: 600 }); });
+    expect(changed).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true, authenticationFailureReason: 'configuration-changed' });
   });
 });

@@ -5,6 +5,7 @@ import { appointmentApplicants, appointmentDate } from '../domain/appointment';
 import { sameApplicants } from '../domain/applicants';
 import { resolveGroup, validateDashboardSnapshot } from '../domain/groups';
 import { classifyRoute, SITE_ORIGIN } from '../domain/routes';
+import { isDiagnosticDetail, type DiagnosticCode, type DiagnosticDetail, type DiagnosticEvent } from '../domain/diagnostics';
 import {
   countFailure,
   cooldownUntilSeconds,
@@ -43,7 +44,7 @@ function trustedRenewalUrl(state: EngineState, value: string | undefined): boole
 export function deferAuthenticationForMaintenance(state: EngineState, now: string, random: () => number): EngineState {
   if (!state.authentication || state.authentication.pending || !['running', 'verifying'].includes(state.status)) return state;
   return { ...applyPollResult(state, { outcome: 'maintenance', now, random }),
-    authentication: { ...state.authentication, phase: 'retry', pending: false },
+    authentication: { ...state.authentication, phase: 'retry', pending: false, checkpoint: undefined },
     loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false };
 }
 
@@ -71,6 +72,23 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     auth = migrated;
   }
   const now = deps.nowIso();
+  // Bounded local developer diagnostics (fixed allowlisted codes only).
+  // Best effort by contract: recording is fire-and-forget and never awaited,
+  // never blocks, and never alters an engine or page action. Events carry the
+  // run purpose/mode and the observed failure budget only — never
+  // credentials, URLs, identifiers, page contents or raw errors.
+  const note = (code: DiagnosticCode, rest: Omit<DiagnosticEvent, 'code' | 'purpose' | 'mode' | 'phase'> = {}): void => {
+    // The cycle phase is always attached from the current cycle descriptor
+    // (prepare/submit/wait/retry/cycle-wait) so post-run analysis can place
+    // every validation branch, retry, cooldown and terminal transition in
+    // its stage; it is a fixed allowlisted value, never page/state content.
+    try { deps.recordDiagnostic?.({ code, purpose: auth!.purpose, mode: state.mode, phase: auth!.phase, ...rest }); } catch { /* Diagnostics never gate engine work. */ }
+  };
+  // The injected adapter returns fixed allowlisted validation-branch codes.
+  // Page replies are never trusted verbatim: unknown or malformed values are
+  // dropped instead of recorded.
+  const detailOf = (result: { detail?: unknown } | null | undefined): DiagnosticDetail | undefined =>
+    isDiagnosticDetail(result?.detail) ? result.detail : undefined;
   // A failed verification login (for example a closed authentication tab)
   // keeps the unresolved intent but would otherwise strand with no deadline
   // and no banner. Record the existing fixed unreadable reason so the panel
@@ -79,13 +97,52 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
   // identifier-free authentication failure reason records which check failed
   // for future diagnosis (developer state only, never product UI/copy, never
   // raw exceptions, URLs, credentials, identifiers or page contents).
-  const fail = (reason: AuthenticationFailureReason): EngineState => {
+  const fail = (reason: AuthenticationFailureReason, detail?: DiagnosticDetail): EngineState => {
     if (!isAuthenticationFailureReason(reason)) throw new Error('Invalid authentication diagnostic.');
+    if (detail !== undefined && !isDiagnosticDetail(detail)) throw new Error('Invalid authentication diagnostic.');
+    note('auth-terminal', { reason, failures: state.consecutiveFailures, ...(detail === undefined ? {} : { detail }) });
     return { ...state, status: state.intent ? 'verifying' : 'stopped', authentication: null,
       verification: null, nextPollAt: null, loginFailed: true, authenticationFailureReason: reason,
       ...(state.intent ? { verificationError: VERIFICATION_UNREADABLE } : {}), updatedAt: deps.nowIso() };
   };
   const pace = (): EngineState => ({ ...state, nextPollAt: new Date(Date.parse(deps.nowIso()) + 2_000).toISOString(), updatedAt: deps.nowIso() });
+  // Recoverable transient failure on the authentication entry (unrecognized
+  // reading, lost or malformed reply, script interruption, stalled load,
+  // transport): count exactly one failure on the durable shared budget and
+  // hold a retry at the configured checking interval plus jitter — or the
+  // existing 30-minute cooldown after ten consecutive failures. The page is
+  // never mutated here, the pending checkpoint is cleared so no interrupted
+  // navigation is retried, and the next wake revalidates trust, group,
+  // baseline/roster and the current configuration before any fill, click or
+  // submit. An uncertain submit is never replayed by this path.
+  const deferRecoverable = (detail: DiagnosticDetail): EngineState => {
+    if (!isDiagnosticDetail(detail)) throw new Error('Invalid authentication diagnostic.');
+    const next = applyPollResult(state, { outcome: 'retryable', now: deps.nowIso(), random: deps.random });
+    const enteredCooldown = next.cooldownUntil !== null && next.cooldownUntil !== state.cooldownUntil;
+    note(enteredCooldown ? 'auth-cooldown-entered' : 'auth-retry-scheduled', { detail, failures: next.consecutiveFailures });
+    return { ...next,
+      authentication: auth ? { ...auth, phase: 'retry' as const, pending: false, checkpoint: undefined } : null,
+      loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false };
+  };
+  // A maintenance read may fail transiently on a still-trusted authentication
+  // entry document (script interruption, overlay teardown mid-read, or a
+  // redirect that settled back before the reply). Independently revalidate
+  // configuration/cancellation and the live tab: the exact trusted entry
+  // route with a trusted/quiet pending navigation holds a counted read-only
+  // retry — nothing was mutated, the pending checkpoint is cleared, and the
+  // next pass reclassifies the route and fully revalidates trust, group,
+  // baseline/roster and configuration before any action. Offsite/unknown
+  // URLs and lost custody keep the existing terminal refusal (null).
+  const recoverableEntryRead = async (isTrustedEntry: (url: string | undefined) => boolean): Promise<EngineState | null> => {
+    if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+    const tabId = state.authentication?.tabId;
+    if (tabId === null || tabId === undefined) return fail('tab-unavailable');
+    let live: Awaited<ReturnType<ExecDeps['getTab']>>;
+    try { live = await deps.getTab(tabId); } catch { return fail('tab-unavailable'); }
+    if (!isTrustedEntry(live.url) || !isTrustedRacePending(live.pendingUrl)) return null;
+    note('auth-script-interrupted', { detail: 'script-interrupted' });
+    return deferRecoverable('script-interrupted');
+  };
   if (deps.isCancelled?.()) return fail('cancelled');
   if (auth.pending || Date.parse(now) < Date.parse(auth.startedAt) ||
       (state.intent && auth.purpose !== 'verify')) return fail('context-changed');
@@ -130,14 +187,24 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
         if (!trusted(owned)) return fail('untrusted-navigation');
         if (!deps.navigateTab) return fail('navigation-failed');
         if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-        state = { ...state, authentication: { ...auth, tabId: ownedTabId, pending: true }, updatedAt: deps.nowIso() };
+        state = { ...state, authentication: { ...auth, tabId: ownedTabId, pending: true, checkpoint: 'navigation' }, updatedAt: deps.nowIso() };
         await deps.saveState(state);
         const live = await deps.getTab(ownedTabId);
         if (!trusted(live)) return fail('untrusted-navigation');
-        if (live.url !== owned.url || live.pendingUrl !== owned.pendingUrl) return fail('context-changed');
+        if (live.url !== owned.url || live.pendingUrl !== owned.pendingUrl) {
+          // Trusted in-progress navigation on the owned renewal tab: the page
+          // redirected between the two live reads. Never act on the raced
+          // checkpoint; clear it durably and recover on the counted retry
+          // budget. The next pass re-resolves and fully revalidates the owned
+          // tab (trust, group, baseline/roster, current configuration) before
+          // any fill, click or submit.
+          const next = deferRecoverable('trusted-progress');
+          await deps.saveState(next);
+          return next;
+        }
         if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
         await deps.navigateTab(ownedTabId, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
-        state = { ...state, authentication: { ...state.authentication!, pending: false } };
+        state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
         return pace();
       } catch { return fail('tab-unavailable'); }
     }
@@ -271,16 +338,18 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     const failures = countFailure(cooled ? 0 : state.consecutiveFailures);
     if (shouldCooldown(failures, SETUP_FAILURE_COOLDOWN_AFTER)) {
       const cooldownUntil = new Date(cooldownUntilSeconds(Math.floor(Date.parse(now) / 1000)) * 1000).toISOString();
+      note('auth-cooldown-entered', { detail: 'stalled-load', failures });
       return { ...state, consecutiveFailures: failures, cooldownUntil, nextPollAt: null,
-        authentication: { ...auth, phase: 'retry', pending: false }, updatedAt: now };
+        authentication: { ...auth, phase: 'retry', pending: false, checkpoint: undefined }, updatedAt: now };
     }
+    note('auth-retry-scheduled', { detail: 'stalled-load', failures });
     // Durable mutation checkpoint: pending=true commits before any browser
     // navigation and clears only after the navigation succeeds. An interrupted
     // checkpoint keeps pending=true and parks on worker wake via the existing
     // startup reconciliation; a navigation error stays safe and never replays
     // a POST.
     const rolled = { ...state, consecutiveFailures: failures, cooldownUntil: null,
-      authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true }, now, deps.random, state.pollIntervalS),
+      authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true, checkpoint: 'navigation' }, now, deps.random, state.pollIntervalS),
       updatedAt: now };
     await deps.saveState(rolled);
     state = { ...rolled };
@@ -291,7 +360,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       if (!stalledUrlsTrusted(live.url, live.pendingUrl)) return fail('untrusted-navigation');
       if (deps.navigateTab) await deps.navigateTab(auth.tabId!, fixedTarget);
     } catch { return fail('tab-unavailable'); }
-    state = { ...state, authentication: { ...state.authentication!, pending: false } };
+    state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
     return pace();
   };
   // A due counted-retry or expired-cooldown wait resumes while the tab is
@@ -310,7 +379,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     } catch { return fail('tab-unavailable'); }
     const cooled = state.cooldownUntil !== null && Date.parse(state.cooldownUntil) <= Date.parse(now);
     const rolled = { ...state, consecutiveFailures: cooled ? 0 : state.consecutiveFailures, cooldownUntil: null,
-      authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true }, now, deps.random, state.pollIntervalS),
+      authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true, checkpoint: 'navigation' }, now, deps.random, state.pollIntervalS),
       updatedAt: now };
     await deps.saveState(rolled);
     state = { ...rolled };
@@ -321,7 +390,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       if (!stalledUrlsTrusted(live.url, live.pendingUrl)) return fail('untrusted-navigation');
       if (deps.navigateTab) await deps.navigateTab(auth.tabId!, fixedTarget);
     } catch { return fail('tab-unavailable'); }
-    state = { ...state, authentication: { ...state.authentication!, pending: false } };
+    state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
     return pace();
   };
   if (tab.status === 'loading') {
@@ -354,36 +423,94 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
   // executeScript delivers the reply, turning a successful GET into a false
   // login failure. Loaded-page retries use the browser API like stalled-load
   // recovery. Callers durably checkpoint pending=true before reaching here.
-  const freshGet = async (): Promise<boolean> => {
-    if (!deps.navigateTab || !await unchanged()) return false;
+  // The result separates benign races (the tab already moved to another
+  // trusted route or is still loading) from terminal custody/cancellation
+  // failures so an interrupted retry never stops the run or double-counts.
+  type FreshGetResult = 'ok' | 'retry' | 'cancelled' | 'configuration-changed' | 'navigation-failed' | 'untrusted-navigation';
+  // The live document must be a caller-validated fresh-GET target, or the
+  // snapshot route itself while its pending navigation stays trusted (an
+  // en-route appointment/payment page is held for the next cycle instead of
+  // being reloaded). Anything else is an untrusted navigation and stays
+  // terminal; a quiet pending URL is limited to the supported stalled paths.
+  const trustedLiveForFreshGet = (liveUrl: string | undefined, pendingUrl: string | undefined): boolean => {
+    if (stalledUrlsTrusted(liveUrl, pendingUrl)) return true;
+    const live = cleanUrl(liveUrl);
+    if (!live || liveUrl !== tab.url) return false;
+    const pending = pendingUrl ?? '';
+    if (pending === '' || pending === 'about:blank') return true;
+    const parsed = cleanUrl(pending);
+    return !!parsed && supportedStalledPath(parsed.pathname);
+  };
+  const freshGet = async (): Promise<FreshGetResult> => {
+    if (!deps.navigateTab) return 'navigation-failed';
+    if (!await unchanged()) return deps.isCancelled?.() ? 'cancelled' : 'configuration-changed';
     const live = await deps.getTab(auth.tabId!);
-    if (live.url !== tab.url || live.status === 'loading' || !stalledUrlsTrusted(live.url, live.pendingUrl)) return false;
+    if (!trustedLiveForFreshGet(live.url, live.pendingUrl)) return 'untrusted-navigation';
+    if (live.url !== tab.url || live.status === 'loading') return 'retry';
     const target = cleanUrl(live.url);
-    if (!target || !supportedStalledPath(target.pathname) || !await unchanged()) return false;
+    if (!target || !supportedStalledPath(target.pathname)) return 'retry';
+    if (!await unchanged()) return deps.isCancelled?.() ? 'cancelled' : 'configuration-changed';
     await deps.navigateTab(auth.tabId!, target.href);
-    return true;
+    return 'ok';
   };
   // An expired cycle counts exactly ONE failure and — unless the setup budget
   // is exhausted — starts the next fresh-GET cycle immediately with no
   // additional full interval. A trustworthy dashboard already had its chance
   // above, so only non-dashboard routes arrive here.
-  const expireCycle = async (): Promise<EngineState> => {
+  const expireCycle = async (detail: DiagnosticDetail = 'reply-malformed'): Promise<EngineState> => {
     const cooled = state.cooldownUntil !== null && Date.parse(state.cooldownUntil) <= Date.parse(now);
     const failures = countFailure(cooled ? 0 : state.consecutiveFailures);
     if (shouldCooldown(failures, SETUP_FAILURE_COOLDOWN_AFTER)) {
       const cooldownUntil = new Date(cooldownUntilSeconds(Math.floor(Date.parse(now) / 1000)) * 1000).toISOString();
+      note('auth-cooldown-entered', { detail, failures });
       return { ...state, consecutiveFailures: failures, cooldownUntil, nextPollAt: null,
-        authentication: { ...auth, phase: 'retry', pending: false }, updatedAt: now };
+        authentication: { ...auth, phase: 'retry', pending: false, checkpoint: undefined }, updatedAt: now };
     }
+    note('auth-cycle-expired', { detail, failures });
     const rolled = { ...state, consecutiveFailures: failures, cooldownUntil: null,
-      authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true }, now, deps.random, state.pollIntervalS),
+      authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true, checkpoint: 'navigation' }, now, deps.random, state.pollIntervalS),
       updatedAt: now };
     await deps.saveState(rolled);
+    state = rolled;
     try {
-      if (!await freshGet()) return fail('navigation-failed');
+      const result = await freshGet();
+      // A benign race (moved to another trusted route or still loading) holds
+      // the rolled cycle's durable deadline as a retry: the counted failure
+      // already committed and is never double-counted, and the next pass
+      // revalidates before any action. Cancellation/configuration, missing
+      // navigation and untrusted live URLs stay terminal.
+      if (result === 'retry') return holdRolledCycle();
+      if (result !== 'ok') return fail(result);
     } catch { return fail('tab-unavailable'); }
-    state = { ...rolled, authentication: { ...rolled.authentication!, pending: false } };
+    state = { ...rolled, authentication: { ...rolled.authentication!, pending: false, checkpoint: undefined } };
     return { ...state, nextPollAt: new Date(Date.parse(deps.nowIso()) + 2_000).toISOString(), updatedAt: deps.nowIso() };
+  };
+  // Holds an already-rolled cycle as a counted retry whose durable deadline is
+  // the rolled cycle's own deadline (never shortened by load events): the
+  // failure was counted when the cycle rolled, the pending browser-GET
+  // checkpoint is cleared, and the next wake revalidates trust, group,
+  // baseline/roster and configuration before any action.
+  const holdRolledCycle = async (): Promise<EngineState> => {
+    const held = { ...state,
+      authentication: { ...state.authentication!, phase: 'retry' as const, pending: false, checkpoint: undefined },
+      nextPollAt: state.authentication!.cycleDeadline ?? new Date(Date.parse(deps.nowIso()) + pollDelaySeconds(deps.random, state.pollIntervalS) * 1000).toISOString(),
+      updatedAt: deps.nowIso() };
+    await deps.saveState(held);
+    state = held;
+    return held;
+  };
+  // Retry-phase resume: roll a fresh cycle with the durable browser-side GET
+  // checkpoint, then run the fresh GET. Benign races hold the rolled cycle;
+  // terminal results keep their fixed reasons.
+  const resumeRetryCycle = async (): Promise<EngineState> => {
+    state = { ...state, authentication: rollAuthCycle({ ...state.authentication!, phase: 'prepare', pending: true, checkpoint: 'navigation', startedAt: now }, now, deps.random, state.pollIntervalS), updatedAt: now };
+    await deps.saveState(state);
+    let result: FreshGetResult;
+    try { result = await freshGet(); } catch { return fail('tab-unavailable'); }
+    if (result === 'retry') return holdRolledCycle();
+    if (result !== 'ok') return fail(result);
+    state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
+    return pace();
   };
   // Narrow login-to-dashboard navigation-race recovery: a snapshot exact
   // official login may auto-navigate toward the trusted dashboard before the
@@ -439,15 +566,20 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     // submitted and continues read-only so a bounce back to login cannot
     // replay the POST (or repeat the fill) within this cycle. Clearing never
     // authorizes a replay, and an interrupted clear keeps the saved pending
-    // checkpoint, which parks on worker wake. Null returns stop safely below
+    // checkpoint; worker-wake recovery consumes its submit allowance and
+    // continues read-only. Null returns stop safely below
     // with no further injection or navigation.
     const settlePending = async (): Promise<EngineState | null> => {
-      if (!state.authentication?.pending) return pace();
+      if (!state.authentication?.pending) {
+        note('auth-redirect-progress', { detail: 'trusted-progress' });
+        return pace();
+      }
       if (!await unchanged()) return null;
       const cleared = { ...state, authentication: { ...state.authentication!,
-        pending: false, submittedInCycle: true, phase: 'wait' as const }, updatedAt: deps.nowIso() };
+        pending: false, checkpoint: undefined, submittedInCycle: true, phase: 'wait' as const }, updatedAt: deps.nowIso() };
       await deps.saveState(cleared);
       state = cleared;
+      note('auth-redirect-progress', { detail: 'trusted-progress' });
       return pace();
     };
     // Expired races use fixed-sign-in stalled recovery for every purpose. A
@@ -505,15 +637,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
   if (['login', 'landing', 'dashboard'].includes(route)) {
     const url = new URL(tab.url!);
     if (url.search || url.hash) return fail('untrusted-navigation');
-    if (auth.phase === 'retry') {
-      state = { ...state, authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true, startedAt: now }, now, deps.random, state.pollIntervalS), updatedAt: now };
-      await deps.saveState(state);
-      try {
-        if (!await freshGet()) return fail('navigation-failed');
-      } catch { return fail('tab-unavailable'); }
-      state = { ...state, authentication: { ...state.authentication!, pending: false } };
-      return pace();
-    }
+    if (auth.phase === 'retry') return resumeRetryCycle();
     // Landing redirect race: a snapshot clean completed root may have
     // redirected to the trusted dashboard (or begun loading) before the
     // maintenance read. Never inject into a changed/untrusted document; pace
@@ -545,37 +669,55 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     }
     try {
       const result = await inject(readSiteMaintenance, [true]) as { maintenance?: unknown } | undefined;
-      if (result?.maintenance === true) return deferAuthenticationForMaintenance(state, now, deps.random);
+      if (result?.maintenance === true) {
+        note('auth-maintenance', { detail: 'maintenance' });
+        return deferAuthenticationForMaintenance(state, now, deps.random);
+      }
     } catch {
       // A trusted root-to-dashboard change before the injection throws via the
-      // snapshot-URL guard without injecting. Pace it instead of failing; all
-      // other injection failures stay fail-closed. The same narrow recovery
-      // applies to an exact-login-to-trusted-dashboard redirect race (the
-      // probable October 15 live pause): only independently validated exact
-      // login toward trusted dashboard (plus narrow same-login loading)
-      // paces; arbitrary errors never become retries.
+      // snapshot-URL guard without injecting. Pace it instead of failing. The
+      // same narrow recovery applies to an exact-login-to-trusted-dashboard
+      // redirect race (the probable October 15 live pause). A same-document
+      // transient failure on the still-loaded exact login or clean root is
+      // revalidated and held as a counted read-only retry; untrusted/unknown
+      // live documents and lost custody stay fail-closed.
       if (route === 'landing') {
-        try {
-          const live = await deps.getTab(auth.tabId!);
-          if (landingRedirectWait(live) === 'wait') {
-            if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-            if (expired) {
-              if (live.status === 'loading') return expireStalledLoad(live.url ?? '', live.pendingUrl);
-              if ((live.url ?? '') !== (tab.url ?? '')) return pace();
-              return expireCycle();
-            }
-            return pace();
+        let live: Awaited<ReturnType<ExecDeps['getTab']>>;
+        try { live = await deps.getTab(auth.tabId!); } catch { return fail('tab-unavailable'); }
+        if (landingRedirectWait(live) === 'wait') {
+          if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+          if (expired) {
+            if (live.status === 'loading') return expireStalledLoad(live.url ?? '', live.pendingUrl);
+            if ((live.url ?? '') !== (tab.url ?? '')) return pace();
+            return expireCycle();
           }
-        } catch { /* Fall through to refusal below. */ }
+          return pace();
+        }
+        // The exact clean root snapshot is still the live document (decision
+        // 'proceed'): a transient maintenance-read failure is recoverable on
+        // the counted read-only retry budget. Untrusted/unknown live documents
+        // keep the existing refusal below.
+        const recovered = await recoverableEntryRead(trustedRootUrl);
+        if (recovered) return recovered;
+        return fail('context-changed');
       }
       if (route === 'login') {
         try {
           const raced = await paceLoginToDashboardRace(tab.url);
           if (raced) return raced;
-        } catch { /* Fall through to refusal below. */ }
+        } catch { /* Fall through to the validated retry below. */ }
+        const recovered = await recoverableEntryRead(isExactLoginUrl);
+        if (recovered) return recovered;
         return failRaceClosed();
       }
-      return fail('context-changed');
+      // Dashboard maintenance-inject failure on an already-validated trusted
+      // dashboard: a transient injection interruption (overlay removal
+      // mid-read, session redirect, lost reply) recovers on the counted retry
+      // budget after re-confirming configuration/cancellation. The next pass
+      // reclassifies the live route and fully revalidates trust, group and
+      // baseline before any action; untrusted URLs never reach here.
+      if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+      return deferRecoverable('script-interrupted');
     }
   } else if (siteTab && auth.purpose === 'start') {
     // A reused same-origin page (for example /account serving a Doing
@@ -611,17 +753,14 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     if (auth.phase === 'retry') {
       const retrying = (() => { try { return new URL(tab.url!); } catch { return null; } })();
       if (!retrying || retrying.search || retrying.hash) return fail('untrusted-navigation');
-      state = { ...state, authentication: rollAuthCycle({ ...auth, phase: 'prepare', pending: true, startedAt: now }, now, deps.random, state.pollIntervalS), updatedAt: now };
-      await deps.saveState(state);
-      try {
-        if (!await freshGet()) return fail('navigation-failed');
-      } catch { return fail('tab-unavailable'); }
-      state = { ...state, authentication: { ...state.authentication!, pending: false } };
-      return pace();
+      return resumeRetryCycle();
     }
     try {
       const result = await inject(readSiteMaintenance, [true]) as { maintenance?: unknown } | undefined;
-      if (result?.maintenance === true) return deferAuthenticationForMaintenance(state, now, deps.random);
+      if (result?.maintenance === true) {
+        note('auth-maintenance', { detail: 'maintenance' });
+        return deferAuthenticationForMaintenance(state, now, deps.random);
+      }
     } catch {
       try {
         const raced = await paceLoginToDashboardRace(tab.url);
@@ -634,8 +773,26 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
   } else if (auth.phase === 'retry') return fail('untrusted-navigation');
   if (route === 'dashboard') {
     let readStep: PanelReadStep = 'groups';
-    const dashboardFailure = (error: unknown): EngineState => ({ ...fail('unrecognized-reading'), loginFailed: false,
-      authenticationFailureReason: null, authenticationError: panelCommandError(error, readStep) });
+    // Terminal classification for a fresh trusted dashboard reading: the
+    // selection itself cannot resolve (fixed resolveGroup refusal messages) or
+    // the bound identity changed (sentinel below). Those need a configured
+    // correction; every other error here is a transient malformed reading or an
+    // interrupted injection and recovers on the counted retry budget with a
+    // full revalidation pass before any action. No page is ever mutated by
+    // either path.
+    const GROUP_MISMATCHES = new Set([
+      'No dashboard group to bind.',
+      'Paid group not found on the dashboard.',
+      'No eligible paid group on the dashboard.',
+      'Unpaid group rejected for paid booking.',
+      'Unpaid group not found on the dashboard.',
+      'No eligible unpaid group on the dashboard.',
+      'Paid group rejected for unpaid tracking.',
+      'Invalid group binding.',
+      'Invalid dashboard path.',
+    ]);
+    const dashboardFailure = (error: unknown, detail: DiagnosticDetail): EngineState => ({ ...fail('unrecognized-reading', detail),
+      loginFailed: false, authenticationFailureReason: null, authenticationError: panelCommandError(error, readStep) });
     try {
       const dashboardPath = new URL(tab.url!).pathname;
       const raw = await inject(readDashboardGroups, []);
@@ -645,11 +802,12 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       // authenticate verification; later outcome classification is roster
       // relaxed while renewal and booking paths stay strict.
       if (auth.purpose === 'verify') {
-        if (!state.group) return dashboardFailure(new Error('Authenticated group changed.'));
+        if (!state.group) return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed');
         const snapshot = validateDashboardSnapshot(raw as never);
         const found = snapshot.groups.find(group => group.scheduleId === state.group!.scheduleId && group.ivr === state.group!.ivr);
-        if (!found) return dashboardFailure(new Error('Authenticated group changed.'));
+        if (!found) return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed');
         if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+        if (state.consecutiveFailures > 0) note('auth-recovered', { outcome: 'healthy', failures: 0 });
         return { ...state, authentication: null, authenticationFailureReason: null, verificationTabId: auth.tabId, verification: { reads: [], nextReadAt: deps.nowIso() },
           consecutiveFailures: 0, cooldownUntil: null, nextPollAt: null, updatedAt: deps.nowIso() };
       }
@@ -664,12 +822,18 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
         readStep = 'applicants';
         applicantIds = appointmentApplicants(baseline);
       }
-      if (state.group && (state.group.scheduleId !== match.scheduleId || state.group.ivr !== match.ivr ||
-          (state.group.applicantIds && !sameApplicants(state.group.applicantIds, applicantIds)) ||
-          state.group.currentDate !== currentDate)) return dashboardFailure(new Error('Authenticated group changed.'));
+      // The combined identity check is split into group / roster / baseline so
+      // the retained terminal diagnostic records exactly which identity moved.
+      if (state.group && (state.group.scheduleId !== match.scheduleId || state.group.ivr !== match.ivr))
+        return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed');
+      if (state.group?.applicantIds && !sameApplicants(state.group.applicantIds, applicantIds))
+        return dashboardFailure(new Error('Authenticated group changed.'), 'roster-changed');
+      if (state.group && state.group.currentDate !== currentDate)
+        return dashboardFailure(new Error('Authenticated group changed.'), 'baseline-changed');
       if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
       if (!state.group) state = bindGroup(state, { owner: state.owner!, runId: state.runId!, now: deps.nowIso(),
         binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath, ...(applicantIds ? { applicantIds } : {}) } });
+      if (state.consecutiveFailures > 0) note('auth-recovered', { outcome: 'healthy', failures: 0 });
       state = { ...state, authentication: null, authenticationFailureReason: null, executor: null, stage: null, lastCandidate: null, startedAt: deps.nowIso(),
         group: state.group ? { ...state.group, dashboardPath } : null,
         // Successful, fully revalidated renewals do not consume a lifetime
@@ -678,7 +842,16 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       if (state.mode === 'booking') state = { ...state, stage: 'actions',
         executor: { tabId: auth.tabId, applicantIds: applicantIds!, targetTime: null, skippedDates: [], actionPending: false } };
       return paceWithPolicy(state, prefs, deps.nowIso());
-    } catch (error) { return dashboardFailure(error); }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+      if (message === 'Applicant roster changed.') return dashboardFailure(error, 'roster-changed');
+      if (message === 'Appointment identity changed.') return dashboardFailure(error, 'group-changed');
+      if (message === 'Authenticated group changed.' || GROUP_MISMATCHES.has(message))
+        return dashboardFailure(error, 'group-changed');
+      if (message === 'Authentication context changed.') return deferRecoverable('script-interrupted');
+      return deferRecoverable('reply-malformed');
+    }
   }
   if (route === 'landing') {
     // The site root redirects to the dashboard when signed in. Every purpose
@@ -712,7 +885,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     // next wake does not park via checkpoint reconciliation; configuration,
     // cancellation, untrusted URLs and missing navigation support stay refusal.
     const clearPendingAndPace = async (): Promise<EngineState> => {
-      const cleared = { ...state, authentication: { ...state.authentication!, pending: false } };
+      const cleared = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
       await deps.saveState(cleared);
       state = cleared;
       return pace();
@@ -747,7 +920,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       // without counting an extra failure or replaying a POST; the
       // single-submit rule and budgets stay intact.
       if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-      state = { ...state, authentication: { ...auth, pending: true }, updatedAt: deps.nowIso() };
+      state = { ...state, authentication: { ...auth, pending: true, checkpoint: 'navigation' }, updatedAt: deps.nowIso() };
       await deps.saveState(state);
       if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
       try {
@@ -759,12 +932,12 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
           return fail('navigation-failed');
         }
       } catch { return fail('tab-unavailable'); }
-      state = { ...state, authentication: { ...auth, pending: false, cycleStartedAt: deps.nowIso(),
+      state = { ...state, authentication: { ...auth, pending: false, checkpoint: undefined, cycleStartedAt: deps.nowIso(),
         cycleDeadline: new Date(Date.parse(deps.nowIso()) + state.pollIntervalS * 1000).toISOString() } };
       return pace();
     }
     if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-    state = { ...state, authentication: { ...auth, pending: true }, updatedAt: deps.nowIso() };
+    state = { ...state, authentication: { ...auth, pending: true, checkpoint: 'navigation' }, updatedAt: deps.nowIso() };
     await deps.saveState(state);
     if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
     try {
@@ -776,7 +949,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
         return fail('navigation-failed');
       }
     } catch { return fail('tab-unavailable'); }
-    state = { ...state, authentication: { ...state.authentication!, pending: false } };
+    state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
     return pace();
   }
   if (route !== 'login') {
@@ -797,28 +970,39 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     if (expired) {
       try {
         const probe = await inject(probeLoginStatus, []) as LoginProbeResult | undefined;
-        if (probe?.ok === false && probe.reason === 'credential-rejected') return fail('credential-rejected');
-        if (probe?.ok === false && probe.reason === 'manual-authentication') return { ...state, status: state.intent ? 'verifying' : 'stopped',
-          authentication: null, authenticationFailureReason: null, verification: null, nextPollAt: null, loginFailed: false, manualAuthentication: true, updatedAt: deps.nowIso() };
+        if (probe?.ok === false && probe.reason === 'credential-rejected') return fail('credential-rejected', detailOf(probe));
+        if (probe?.ok === false && probe.reason === 'manual-authentication') {
+          note('auth-manual', { detail: detailOf(probe) });
+          return { ...state, status: state.intent ? 'verifying' : 'stopped',
+            authentication: null, authenticationFailureReason: null, verification: null, nextPollAt: null, loginFailed: false, manualAuthentication: true, updatedAt: deps.nowIso() };
+        }
         if (probe?.ok !== true && probe?.reason !== 'retryable') {
-          // Narrow lost-reply fallback: only an empty or reasonless reply may
-          // recover via validated dashboard progress. Explicit semantics above
-          // take precedence; same-document unknowns stay fail-closed inside.
+          // Unknown reading: explicit rejection/challenge above wins; a lost
+          // or unclassified reply first gets the validated
+          // login-to-dashboard progress check, then the counted fresh-GET
+          // expiry instead of a terminal stop. The probe is strictly
+          // read-only, so nothing is mutated and no POST is replayed.
           const reasonless = probe == null || (probe.ok === false && probe.reason == null);
           if (reasonless) {
             try {
               const raced = await paceLoginToDashboardRace(tab.url);
               if (raced) return raced;
-            } catch { /* Fall through to refusal below. */ }
+            } catch { /* Fall through to the counted expiry below. */ }
           }
-          return fail('unrecognized-reading');
+          if (probe == null) note('auth-reply-missing', { detail: 'reply-missing' });
+          else if (probe.ok === false) note('auth-validation-failed', { detail: detailOf(probe) });
+          else note('auth-reply-malformed', { detail: 'reply-malformed' });
+          return expireCycle();
         }
+        if (probe?.ok === false) note('auth-validation-failed', { detail: detailOf(probe) });
       } catch {
         try {
           const raced = await paceLoginToDashboardRace(tab.url);
           if (raced) return raced;
-        } catch { /* Fall through to refusal below. */ }
-        return failRaceClosed();
+        } catch { /* Fall through to the counted retry below. */ }
+        if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+        note('auth-script-interrupted', { detail: 'script-interrupted' });
+        return deferRecoverable('script-interrupted');
       }
       return expireCycle();
     }
@@ -835,31 +1019,45 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     // the expiry GET and resubmitted next cycle. Zero additional submits.
     try {
       const probe = await inject(probeLoginStatus, []) as LoginProbeResult | undefined;
-      if (probe?.ok === false && probe.reason === 'credential-rejected') return fail('credential-rejected');
-      if (probe?.ok === false && probe.reason === 'manual-authentication') return { ...state, status: state.intent ? 'verifying' : 'stopped',
-        authentication: null, authenticationFailureReason: null, verification: null, nextPollAt: null, loginFailed: false, manualAuthentication: true, updatedAt: deps.nowIso() };
+      if (probe?.ok === false && probe.reason === 'credential-rejected') return fail('credential-rejected', detailOf(probe));
+      if (probe?.ok === false && probe.reason === 'manual-authentication') {
+        note('auth-manual', { detail: detailOf(probe) });
+        return { ...state, status: state.intent ? 'verifying' : 'stopped',
+          authentication: null, authenticationFailureReason: null, verification: null, nextPollAt: null, loginFailed: false, manualAuthentication: true, updatedAt: deps.nowIso() };
+      }
       if (probe?.ok === false && probe.reason === 'retryable') {
+        note('auth-validation-failed', { detail: detailOf(probe) });
         if (expired) return expireCycle();
         return { ...state, authentication: { ...auth, phase: 'cycle-wait' }, nextPollAt: cycleDeadline, updatedAt: now };
       }
       if (probe?.ok !== true) {
         // Same narrow lost-reply fallback as expiry probes: empty or
-        // reasonless replies may recover via validated progress only.
+        // reasonless replies may recover via validated progress only. An
+        // unknown reading never stops the run: it holds the durable cycle
+        // deadline so the read-only expiry probe can classify it (or expires
+        // immediately when already overdue). Nothing is mutated; no POST is
+        // replayed.
         const reasonless = probe == null || (probe.ok === false && probe.reason == null);
         if (reasonless) {
           try {
             const raced = await paceLoginToDashboardRace(tab.url);
             if (raced) return raced;
-          } catch { /* Fall through to refusal below. */ }
+          } catch { /* Fall through to the paced hold below. */ }
         }
-        return fail('unrecognized-reading');
+        if (probe == null) note('auth-reply-missing', { detail: 'reply-missing' });
+        else if (probe.ok === false) note('auth-validation-failed', { detail: detailOf(probe) });
+        else note('auth-reply-malformed', { detail: 'reply-malformed' });
+        if (expired) return expireCycle();
+        return { ...state, authentication: { ...auth, phase: 'cycle-wait' }, nextPollAt: cycleDeadline, updatedAt: now };
       }
     } catch {
       try {
         const raced = await paceLoginToDashboardRace(tab.url);
         if (raced) return raced;
-      } catch { /* Fall through to refusal below. */ }
-      return failRaceClosed();
+      } catch { /* Fall through to the counted retry below. */ }
+      if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+      note('auth-script-interrupted', { detail: 'script-interrupted' });
+      return deferRecoverable('script-interrupted');
     }
     if (expired) return expireCycle();
     return pace();
@@ -871,55 +1069,84 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     return { ...state, authentication: { ...auth, phase: 'cycle-wait' }, nextPollAt: cycleDeadline, updatedAt: now };
   }
   if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-  state = { ...state, authentication: { ...auth, pending: true }, updatedAt: deps.nowIso() };
+  state = { ...state, authentication: { ...auth, pending: true, checkpoint: 'action' }, updatedAt: deps.nowIso() };
   await deps.saveState(state);
   if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
   try {
     // The adapter may report identifiable transient incompleteness as
     // 'retryable' and explicit credential rejection as 'credential-rejected'.
-    // Any other ok:false stays unsafe and fails immediately below — never
-    // reinterpret an unrecognized outcome as transient.
+    // Every other outcome — including a missing reply — settles the uncertain
+    // cycle instead of stopping: the pending checkpoint clears durably, the
+    // cycle is marked submitted, and the paced wait revalidates with a fresh
+    // GET before any further fill or submit. The POST is never replayed.
     const result = await inject(performLoginAction, [{ action: auth.phase, email: prefs.email.trim(), password: prefs.password }]) as (LoginResult & { reason?: string }) | undefined;
     if (result?.ok === false && result.reason === 'sign-in-notice-dismissed') {
-      state = { ...state, authentication: { ...auth, pending: false } };
+      note('auth-notice-dismissed');
+      state = { ...state, authentication: { ...auth, pending: false, checkpoint: undefined } };
       return pace();
     }
-    if (result?.ok === false && result.reason === 'manual-authentication') return { ...state, status: state.intent ? 'verifying' : 'stopped',
-      authentication: null, authenticationFailureReason: null, verification: null, nextPollAt: null, loginFailed: false, manualAuthentication: true, updatedAt: deps.nowIso() };
-    if (result?.ok === false && result.reason === 'credential-rejected') return fail('credential-rejected');
+    if (result?.ok === false && result.reason === 'manual-authentication') {
+      note('auth-manual', { detail: detailOf(result) });
+      return { ...state, status: state.intent ? 'verifying' : 'stopped',
+        authentication: null, authenticationFailureReason: null, verification: null, nextPollAt: null, loginFailed: false, manualAuthentication: true, updatedAt: deps.nowIso() };
+    }
+    if (result?.ok === false && result.reason === 'credential-rejected') return fail('credential-rejected', detailOf(result));
     if (result?.ok === false && result.reason === 'retryable') {
+      note('auth-validation-failed', { detail: detailOf(result) });
       if (expired) return expireCycle();
       return { ...state, authentication: { ...auth, phase: 'cycle-wait' }, nextPollAt: cycleDeadline, updatedAt: now };
     }
     if (result?.ok !== true) {
       // Lost submit-reply fallback: no explicit notice/challenge/rejection or
       // transient semantic took precedence above, so only an empty or
-      // reasonless reply may recover via validated dashboard progress. The
-      // pending checkpoint then clears with the cycle marked submitted, so a
-      // bounce back to login cannot replay the POST within this cycle.
+      // reasonless reply may recover via validated dashboard progress.
       const reasonless = result == null || (result.ok === false && result.reason == null);
       if (reasonless) {
         try {
           const raced = await paceLoginToDashboardRace(tab.url);
           if (raced) return raced;
-        } catch { /* Fall through to refusal below. */ }
+        } catch { /* Fall through to the settled wait below. */ }
       }
-      return fail('unrecognized-reading');
+      if (result == null) note('auth-reply-missing', { detail: 'reply-missing' });
+      else if (result.ok === false) note('auth-validation-failed', { detail: detailOf(result) });
+      else note('auth-reply-malformed', { detail: 'reply-malformed' });
+      // Settle the uncertain submission: clear the pending checkpoint and mark
+      // the cycle submitted (durably where possible) so a bounce back to login
+      // cannot replay the POST or repeat the fill within this cycle. The paced
+      // wait keeps the run alive; the read-only probe and the cycle deadline
+      // classify the outcome, and any later cycle revalidates with a fresh GET
+      // before another submit.
+      state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined, submittedInCycle: true, phase: 'wait' as const }, updatedAt: deps.nowIso() };
+      try { await deps.saveState(state); } catch { /* The caller retries persistence; wake recovery consumes the submit allowance without replay. */ }
+      return pace();
     }
+    note(auth.phase === 'prepare' ? 'auth-prepared' : 'auth-submitted');
   } catch {
     // A successful submit may redirect to the trusted dashboard before its
     // reply returns (lost submit reply), and a prepare fill may race the same
-    // automatic navigation. Only validated exact-login-to-trusted-dashboard
-    // progress (plus narrow same-login loading) paces without replaying the
-    // POST; the next pass freshly binds dashboard/roster/baseline. All other
-    // injection failures stay fail-closed with no re-fill/submit.
+    // automatic navigation. Validated exact-login-to-trusted-dashboard
+    // progress paces without replaying the POST; an unambiguously unchanged
+    // trusted login document settles the uncertain cycle the same way as a
+    // missing reply; every other live state stays fail-closed with no
+    // re-fill/submit.
     try {
       const raced = await paceLoginToDashboardRace(tab.url);
       if (raced) return raced;
-    } catch { /* Fall through to refusal below. */ }
-    return failRaceClosed();
+    } catch { /* Fall through to the settled wait below. */ }
+    let settled = false;
+    try {
+      const live = await deps.getTab(auth.tabId!);
+      settled = live.url === tab.url && live.status !== 'loading' && isExactLoginUrl(live.url) &&
+        ((live.pendingUrl ?? '') === '' || live.pendingUrl === 'about:blank');
+    } catch { settled = false; }
+    if (!settled) return failRaceClosed();
+    if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+    note('auth-script-interrupted', { detail: 'script-interrupted' });
+    state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined, submittedInCycle: true, phase: 'wait' as const }, updatedAt: deps.nowIso() };
+    try { await deps.saveState(state); } catch { /* The caller retries persistence; wake recovery consumes the submit allowance without replay. */ }
+    return pace();
   }
-  state = { ...state, authentication: { ...auth, pending: false, phase: auth.phase === 'prepare' ? 'submit' : 'wait',
+  state = { ...state, authentication: { ...auth, pending: false, checkpoint: undefined, phase: auth.phase === 'prepare' ? 'submit' : 'wait',
     submittedInCycle: auth.phase === 'submit' ? true : (auth.submittedInCycle ?? false) } };
   return pace();
 }

@@ -17,6 +17,18 @@ or the official scheduling provider.
   starting if you want a dry run.
 - Automatic sign-in and bounded session renewal, with manual handling of
   CAPTCHA and second-factor challenges.
+- Automatic recovery from transient failures: interrupted reads, lost replies,
+  stalled page loads, maintenance documents and transport errors inside a
+  still-trusted owned portal tab are retried on the configured checking interval
+  using the durable failure budget (30-minute cooldown after 10 consecutive
+  failures, then automatic resume). Recovery never replays an uncertain login
+  or booking submission and never acts before trust, group, roster and
+  settings are re-validated. Missing forms re-enter through fresh sign-in
+  validation in the owned tab. Active booking-verification transport failures
+  retry read-only while preserving the booking intent; deliberate pauses and
+  genuinely ambiguous booking outcomes remain parked. Successful renewals keep running hourly without
+  a lifetime cap; a real credential rejection, CAPTCHA/second-factor
+  challenge, Stop, edited settings or changed identity still stops for review.
 - A detached panel that can close while monitoring continues. Press **Stop** to
   stop a workflow. Browser restart parks existing work for review; interrupted
   booking attempts require fresh verification before another attempt.
@@ -51,6 +63,21 @@ Chrome Sync is not used. Local storage is **not an encrypted password vault**.
 Credentials are sent only to the official portal for sign-in, never to the
 publisher or analytics. Uninstalling removes the extension's local data.
 
+A bounded local developer diagnostics record (`engineDiagnosticsV1` in
+`chrome.storage.local`) keeps fixed recovery/failure event codes for
+unattended-reliability analysis: up to 7-day retention, at most 1500 entries,
+and identical repeats collapsed into a bounded count. Entries carry only
+allowlisted fields — event code, fixed validation-branch detail, run/cycle
+phase, purpose, mode, extension version and the observed failure count — never credentials,
+settings, URLs, portal content, appointment dates or applicant identifiers. It is never
+cleared by a successful run, Stop/Start or a browser restart; only retention
+removes entries.
+
+Diagnostics are best effort rather than a complete audit trail: the entry
+limit can evict older events before seven days, and failed storage writes or
+an overloaded recording queue can drop events. Recovery events remain
+available after a successful retry, so a run need not stall to be investigated.
+
 Configured production builds send four limited, pseudonymous PostHog usage
 events: installation, accepted workflow Start, terminal workflow failure, and
 validated unpaid-alert activation. Payloads exclude credentials, visa and
@@ -80,7 +107,26 @@ bookings, send external notifications, or deliver analytics to a real project.
 The development preview and probe are test tools; the production build omits
 the probe. Automated verification is synthetic. The owner also reports
 successful live initial-booking and rescheduling checks with Test Mode ON and
-OFF; this is user-reported evidence, not an independent live retest.
+OFF; this is user-reported evidence, not an independent live retest. Recovery,
+cooldown/resume and diagnostics behavior are covered by synthetic tests only;
+this document makes no live-verification claim for them. In the development
+probe, **Read/export developer diagnostics** shows the bounded local log
+(pruned, fixed codes only; see Privacy) for post-run analysis and issue
+reports.
+
+For a production build, open the detached scheduler panel's **DevTools →
+Console** and run this command to copy only the sanitized diagnostics snapshot:
+
+```js
+copy(JSON.stringify((await chrome.runtime.sendMessage({ type: 'ENGINE_DIAGNOSTICS' })).diagnostics, null, 2))
+```
+
+This reader is restricted to the bundled extension panel. It returns fixed
+event codes, timestamps, retry counts, build versions and retention metadata;
+it does not return preferences, credentials or the workflow's private state.
+Read events in timestamp order to follow failure → retry/cooldown → recovery.
+Installing an updated build is required before it can record new diagnostics;
+older runs cannot be reconstructed retroactively.
 
 ## Release packages
 
