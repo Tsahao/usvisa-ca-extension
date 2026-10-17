@@ -34,7 +34,7 @@ them), and carry no credentials, page text, or URLs.
 - `activeTab` + `scripting`: reads and guarded actions on the validated owned official-site tab only; arbitrary URLs are never followed.
 - `notifications`: unpaid availability alerts on the selected consulate.
 - Host `https://ais.usvisa-info.com/*`: the only always-present host permission.
-- Optional PostHog ingestion host (`https://us.i.posthog.com/*` or `https://eu.i.posthog.com/*`): appended at build time only when `.env.local` configures a valid project token and allowlisted host. Portal trust/action guards are unchanged.
+- Configured PostHog analytics uses ordinary CORS requests to its allowlisted ingestion endpoint and requests no additional host permission. Portal trust/action guards are unchanged.
 
 Production removes `web_accessible_resources`: the detached product UI does
 not need to be exposed to websites. Test/developer builds retain the legacy
@@ -48,7 +48,7 @@ npm run package:release  # release/…zip + .sha256 (smoke checks run first)
 ```
 
 - `scripts/release-smoke.mjs` asserts the exact product name/version, the
-  audited permission set, at most one analytics host, strict runtime file allowlist, no website-accessible developer resources, runtime asset presence, and
+  audited permission set, visa-site-only host access, strict runtime file allowlist, no website-accessible developer resources, runtime asset presence, and
   the absence of probe pages, source maps, private config, and test fixtures.
   It never prints bundle contents.
 - `scripts/package-release.mjs` zips an explicit runtime allowlist
