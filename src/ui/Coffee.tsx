@@ -1,3 +1,4 @@
+import { platform } from '../platform';
 import { useState, type UIEvent } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { isExtension } from './storage';
@@ -26,7 +27,7 @@ export function Coffee({ trackScroll, onError }: { trackScroll: (event: UIEvent<
     url.searchParams.set('prefilled_amount', String(value * 100));
     setOpening(true);
     try {
-      if (isExtension) await chrome.tabs.create({ url: url.href });
+      if (isExtension) await platform.tabs.create({ url: url.href });
       else window.open(url.href, '_blank', 'noopener,noreferrer');
     } catch {
       onError('Unable to open Stripe. Please try again.');

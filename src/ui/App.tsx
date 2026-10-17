@@ -1,3 +1,4 @@
+import { platform } from '../platform';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { ChevronLeft, Play, Square, RotateCw, CalendarCheck, TriangleAlert } from 'lucide-react';
 import { earliestCandidate } from '../domain/dates';
@@ -216,8 +217,8 @@ export function App() {
       }
       setReady(true);
     }).catch(() => { if (!disposed) setError('Unable to load local preferences. Reopen the extension to retry.'); });
-    if (engineEnabled) chrome.storage.onChanged.addListener(changed);
-    return () => { disposed = true; cancelRestartCommand(); if (engineEnabled) chrome.storage.onChanged.removeListener(changed); };
+    if (engineEnabled) platform.storage.onChanged.addListener(changed);
+    return () => { disposed = true; cancelRestartCommand(); if (engineEnabled) platform.storage.onChanged.removeListener(changed); };
   }, []);
   const active = activeStatuses.includes(run.status);
   const settingsLocked = active || (engineEnabled && engineData?.status === 'running');
