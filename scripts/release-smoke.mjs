@@ -5,9 +5,11 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { filesUnder } from './archive-utils.mjs';
+import { parseBrowserArgs } from './browser-target.mjs';
 
 const PRODUCT_NAME = 'US Visa Scheduler for Canada';
-const distDir = resolve(process.argv[2] ?? 'dist');
+const { target, args } = parseBrowserArgs(process.argv.slice(2));
+const distDir = resolve(args[0] ?? target.outDir);
 const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8'));
 
 const failures = [];

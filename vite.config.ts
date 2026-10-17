@@ -1,8 +1,10 @@
 import { defineConfig, loadEnv } from 'vite';
 import { readFileSync } from 'node:fs';
 import { resolveAnalyticsConfig } from './src/analytics/config';
+import { resolveBrowserTarget } from './scripts/browser-target.mjs';
 
 export default defineConfig(({ mode }) => {
+  const target = resolveBrowserTarget(process.env.BROWSER_TARGET);
   const env = { ...loadEnv(mode, process.cwd(), 'VITE_'), ...process.env };
   const analytics = resolveAnalyticsConfig({ token: env.VITE_POSTHOG_PROJECT_TOKEN, host: env.VITE_POSTHOG_HOST,
     enabledFlag: mode === 'test' ? 'false' : env.VITE_POSTHOG_ENABLED });
@@ -18,7 +20,7 @@ export default defineConfig(({ mode }) => {
     plugins: [{
       name: 'scoped-posthog-manifest',
       generateBundle() {
-        const manifest = JSON.parse(readFileSync(new URL('./public/manifest.json', import.meta.url), 'utf8'));
+        const manifest = JSON.parse(readFileSync(new URL(`./${target.manifestPath}`, import.meta.url), 'utf8'));
         // The legacy iframe is a developer fixture, not a public product surface.
         if (!includeProbe) delete manifest.web_accessible_resources;
         if (analytics.enabled) manifest.host_permissions.push(`${analytics.host}/*`);
@@ -26,6 +28,7 @@ export default defineConfig(({ mode }) => {
       },
     }],
     build: {
+      outDir: target.outDir,
       rollupOptions: {
         input,
         output: { entryFileNames: '[name].js' },
