@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "test:browser": "npm run build:test && playwright test",
-    "build:test": "tsc --noEmit && vite build --mode test --outDir dist-test",
-    "build": "tsc --noEmit && vite build",
+    "build:test": "node scripts/build.mjs --mode test --outDir dist-test",
+    "build": "node scripts/build.mjs",
     "test": "vitest run",
     "check": "npm test && npm run test:packaging && npm run build && npm run smoke:release",
     "test:packaging": "node --test scripts/packaging.test.mjs",
