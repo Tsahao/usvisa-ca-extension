@@ -1,6 +1,6 @@
 import { platform, type InjectionResult, type Tab } from './platform';
 import { classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
-import { resolveGroup, validateDashboardSnapshot } from './domain/groups';
+import { resolveGroup } from './domain/groups';
 import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
@@ -363,7 +363,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
         if (tab.id === undefined || classifyRoute(tab.url ?? '') !== 'dashboard' ||
             (group.dashboardPath && new URL(tab.url!).pathname !== group.dashboardPath)) throw new Error('Dashboard changed.');
         const snapshot = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
-        const selected = resolveGroup(validateDashboardSnapshot(snapshot[0]?.result), { mode: 'booking',
+        const selected = resolveGroup(snapshot[0]?.result, { mode: 'booking',
           paidIvr: currentPreferences.paidIvr, unpaidIvr: currentPreferences.unpaidIvr });
         selectionOk = selected.scheduleId === group.scheduleId && selected.ivr === group.ivr;
       } catch { selectionOk = false; }

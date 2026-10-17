@@ -18,7 +18,7 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
       !/^\/en-ca\/niv\/groups(?:\/[0-9]+)?$/.test(current.pathname)) throw new Error('Dashboard context changed.');
   const links = Array.from(
     document.querySelectorAll(
-      'p.consular-appt [href], .ready_to_schedule p.delivery [href], ul.actions a[href*="continue_actions"]',
+      '.application.card a[href], p.consular-appt [href], .ready_to_schedule p.delivery [href], ul.actions a[href*="continue_actions"]',
     ),
   );
   const groups: DashboardGroup[] = [];
@@ -54,7 +54,9 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
     const href = (link as HTMLAnchorElement).getAttribute('href') ?? '';
     let target: URL;
     try { target = new URL(href, 'https://ais.usvisa-info.com'); } catch { continue; }
-    const matched = target.pathname.match(/^\/en-ca\/niv\/schedule\/([0-9]{1,32})\/(?:appointment|continue_actions|payment|addresses\/delivery)$/);
+    // Archived applications may expose only applicant Details links. Those
+    // identify the enclosing card, but never authorize a booking by themselves.
+    const matched = target.pathname.match(/^\/en-ca\/niv\/schedule\/([0-9]{1,32})\/(?:appointment|continue_actions|payment|addresses\/(?:delivery|consulate)|applicants\/[0-9]{1,32}(?:\/edit)?)$/);
     if (target.origin !== 'https://ais.usvisa-info.com' || target.username || target.password || target.port || target.hash || target.search || !matched) continue;
     const digits = matched[1];
     // The portal's outer application card is the group boundary. Schedule,
@@ -149,13 +151,19 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
     owners.push(owner);
     if (outer && !boundOuters.includes(outer)) boundOuters.push(outer);
   }
-  // Fail closed on outer application cards with no readable trusted
-  // schedule/IVR instead of silently omitting them while other cards drive
-  // all-paid/no-unpaid claims. The invalid entry fails worker validation as
-  // an incomplete group rather than implying absence.
-  const hasUncovered = Array.from(document.querySelectorAll('.application.card')).some(candidate => !boundOuters.includes(candidate));
-  if (hasUncovered) groups.push({ scheduleId: '', ivr: null, paymentStatus: 'unknown' });
-  return { groups };
+  // Keep unreadable cards in their actual page positions. Selection validates
+  // the chosen card without requiring every sibling to be readable; dropping
+  // or appending an unreadable first card would select the wrong default.
+  const entries = groups.map((group, index) => ({ group, owner: owners[index] }));
+  for (const candidate of Array.from(document.querySelectorAll('.application.card'))) {
+    if (!boundOuters.includes(candidate)) entries.push({ group: { scheduleId: '', ivr: null, paymentStatus: 'unknown' }, owner: candidate });
+  }
+  entries.sort((a, b) => {
+    if (!a.owner || !b.owner || a.owner === b.owner) return 0;
+    const position = a.owner.compareDocumentPosition(b.owner);
+    return position & 4 ? -1 : position & 2 ? 1 : 0;
+  });
+  return { groups: entries.map(entry => entry.group) };
 }
 
 export type SummaryRaw = {
@@ -313,7 +321,7 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string, fr
   const identity = (link: Element): string | null => {
     try {
       const url = new URL(link.getAttribute('href') ?? '', 'https://ais.usvisa-info.com');
-      const matched = url.pathname.match(/^\/en-ca\/niv\/schedule\/([0-9]{1,32})\/(?:appointment|continue_actions|payment|addresses\/delivery|applicants\/[0-9]{1,32}(?:\/edit)?)$/);
+      const matched = url.pathname.match(/^\/en-ca\/niv\/schedule\/([0-9]{1,32})\/(?:appointment|continue_actions|payment|addresses\/(?:delivery|consulate)|applicants\/[0-9]{1,32}(?:\/edit)?)$/);
       return url.origin === 'https://ais.usvisa-info.com' && !url.username && !url.password && !url.port && !url.hash && matched ? matched[1] : null;
     } catch { return null; }
   };

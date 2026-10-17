@@ -37,6 +37,7 @@ for (const scenario of [
       const region = panel.getByRole('region', { name: 'US Visa Scheduler for Canada' });
       await region.getByRole('button', { name: 'Start', exact: true }).click();
       await expect(region.getByRole('heading', { name: scenario.title, exact: true })).toBeVisible();
+      if (scenario.kind === 'generic') await expect(region.getByText('The extension found no visa groups on this dashboard. Refresh the dashboard; if this repeats, report this message.', { exact: true })).toBeVisible();
       await expect(region.getByRole('button', { name: 'Check configurations', exact: true })).toBeVisible();
       await expect(region.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
       await expect(region).toContainText('Tap to retry');

@@ -9,6 +9,16 @@ const act: typeof performPaidAction = new Function(`return (${performPaidAction.
 afterEach(() => vi.unstubAllGlobals());
 
 describe('gateway mutations stay read-only navigation', () => {
+  it('still refuses a second GET entry to the appointment endpoint with different copy', async () => {
+    vi.stubGlobal('location', { href: `${base}/continue_actions` });
+    document.body.innerHTML = `<a class="accordion-title" aria-expanded="false">Reschedule Appointment</a>
+      <a href="${base}/appointment">Reschedule Appointment</a>
+      <a href="${base}/appointment">Cancel Appointment</a>`;
+    const clicked = vi.fn((event: Event) => event.preventDefault());
+    document.querySelectorAll('a').forEach(control => control.addEventListener('click', clicked));
+    expect((await act({ action: 'reschedule', scheduleId: '11111111' })).ok).toBe(false);
+    expect(clicked).not.toHaveBeenCalled();
+  });
   it.each(['post', 'override', 'data-method', 'new-window'])('rejects an unsafe reschedule entry before even expanding (%s)', async issue => {
     vi.stubGlobal('location', { href: `${base}/continue_actions` });
     const entry = issue === 'data-method' || issue === 'new-window'

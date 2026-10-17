@@ -377,6 +377,31 @@ describe('serialized paid adapters', () => {
     expect(clicked).toHaveBeenCalledOnce();
   });
 
+  it('reschedules when a separate Cancel DELETE control shares the appointment endpoint', async () => {
+    locate('continue_actions');
+    document.body.innerHTML = `<a class="accordion-title" aria-expanded="false" aria-controls="reschedule">Reschedule Appointment</a>
+      <div id="reschedule" hidden><a class="button small primary small-only-expanded" href="${base}/appointment">Reschedule Appointment</a></div>
+      <a class="accordion-title" aria-expanded="false" aria-controls="cancel">Cancel Appointment</a>
+      <div id="cancel" hidden><a class="button small primary small-only-expanded" data-method="delete" href="${base}/appointment">Cancel Appointment</a></div>`;
+    const toggles = document.querySelectorAll<HTMLAnchorElement>('.accordion-title');
+    const entered = vi.fn((event: Event) => event.preventDefault());
+    const cancelled = vi.fn((event: Event) => event.preventDefault());
+    document.querySelector('#reschedule a')!.addEventListener('click', entered);
+    document.querySelector('#cancel a')!.addEventListener('click', cancelled);
+    toggles[1].addEventListener('click', cancelled);
+    toggles[0].onclick = () => {
+      toggles[0].setAttribute('aria-expanded', 'true');
+      document.querySelector<HTMLElement>('#reschedule')!.hidden = false;
+    };
+    expect(await act({ ...request, action: 'reschedule' })).toEqual({ ok: true, advanced: false });
+    expect(entered).not.toHaveBeenCalled();
+    expect(await act({ ...request, action: 'reschedule' })).toEqual({ ok: true, advanced: true });
+    expect(entered).toHaveBeenCalledOnce();
+    expect(cancelled).not.toHaveBeenCalled();
+    expect(toggles[1].getAttribute('aria-expanded')).toBe('false');
+    expect(document.querySelector<HTMLElement>('#cancel')!.hidden).toBe(true);
+  });
+
   it('acknowledges the exact warning before a later Continue', async () => {
     locate('appointment');
     document.body.innerHTML = '<label><input type="checkbox">I understand</label><button>Continue</button>';

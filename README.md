@@ -54,6 +54,11 @@ Open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**,
 and choose `dist/`. Click the extension toolbar icon to open the panel and save
 your configuration before starting Book or Alerts.
 
+Both Visa Group IVR fields are optional. With a blank Paid IVR, Book uses the
+first dashboard group; with a blank Unpaid IVR, Alerts uses the first confirmed
+unpaid group. Enter an IVR to choose a specific group. Unreadable older cards
+do not block a readable selected group.
+
 ## Privacy
 
 Read the [published privacy policy](https://github.tsahaoyu.com/usvisa-ca-extension/privacy-policy.html)

@@ -13,7 +13,8 @@ describe('safe Start diagnostics and dashboard custody', () => {
   it('distinguishes multiple tabs, missing configured IVR and incomplete group discovery', () => {
     expect(panelCommandError(new Error('Open one trusted dashboard.'), 'dashboard')).toContain('Close the extra dashboard tabs');
     expect(panelCommandError(new Error('Paid group not found on the dashboard.'), 'selection')).toContain('No eligible paid group');
-    expect(panelCommandError(new Error('Invalid dashboard group.'), 'selection')).toContain('identify an IVR for every dashboard group');
+    expect(panelCommandError(new Error('Invalid dashboard group.'), 'selection')).toContain('schedule or IVR Account Number');
+    expect(panelCommandError(new Error('Selected dashboard group is incomplete.'), 'selection')).toContain('selected group’s schedule or IVR');
     expect(panelCommandError(new Error('Site under maintenance.'), 'groups')).toContain('under maintenance');
   });
   it('treats object prototype names as unknown errors', () => {
