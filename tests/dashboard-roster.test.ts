@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readCurrentAppointment, readDashboardGroups } from '../src/adapter/reads';
+import { resolveGroup } from '../src/domain/groups';
 
 const base = '/en-ca/niv/schedule/11111111';
 const ids = ['77777777', '88888888'];
@@ -16,6 +17,60 @@ const dashboard = (rows: string, booked = true) => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('independent dashboard applicant roster', () => {
+  it('discovers an archived applicant-only card without blocking default rescheduling', async () => {
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    document.body.innerHTML = `<div class="application attend_appointment card success">
+      <ul class="actions"><a href="${base}/continue_actions">Continue</a></ul>
+      <p class="consular-appt">January 1, 2027 <a href="${base}/addresses/consulate">view map</a></p>
+      <table><tbody>${ids.map(row).join('')}</tbody></table>
+      <div>IVR Account Number: <strong>22222222</strong></div>
+    </div><div class="alert application card needs_payment">
+      <h4 class="status"><small>Current Status</small><br>Pay Visa Fee</h4>
+      <ul class="actions"><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></ul>
+      <strong>44444444</strong>
+    </div><div class="application card needs_courier_in success">
+      <ul class="actions"><a href="/en-ca/niv/schedule/55555555/continue_actions">Continue</a></ul>
+      <strong>66666666</strong>
+    </div><div class="application archived card">
+      <table><tbody><tr><td><a href="/en-ca/niv/schedule/99999999/applicants/12345678">Details</a></td></tr></tbody></table>
+      <div>IVR Account Number: <strong>87654321</strong></div>
+    </div>`;
+    const readGroups: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
+    const snapshot = readGroups();
+    expect(snapshot.groups).toEqual([
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
+      { scheduleId: '55555555', ivr: '66666666', paymentStatus: 'unknown' },
+      { scheduleId: '99999999', ivr: '87654321', paymentStatus: 'unknown' },
+    ]);
+    expect(resolveGroup(snapshot, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: '11111111', ivr: '22222222' });
+    expect(resolveGroup(snapshot, { mode: 'alerts', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: '33333333', ivr: '44444444' });
+    expect(await serialized('11111111', '22222222', false, true))
+      .toMatchObject({ kind: 'booked', text: 'January 1, 2027 view map', applicantIds: ids });
+  });
+  it.each([false, true])('reads a booked card whose appointment link is a consulate map (%s)', async fresh => {
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    const html = `<div class="application appointment card">
+      <p class="consular-appt">January 1, 2027 <a href="${base}/addresses/consulate">view map</a></p>
+      <table><tbody>${ids.map(row).join('')}</tbody></table>
+      <div>IVR Account Number: <strong>22222222</strong></div>
+    </div><div class="application card needs_payment">
+      <h4 class="status"><small>Current Status</small><br>Pay Visa Fee</h4>
+      <ul class="actions"><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></ul>
+      <strong>44444444</strong>
+    </div>`;
+    document.body.innerHTML = html;
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, text: async () => html })));
+    const readGroups: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
+    expect(readGroups()).toEqual({ groups: [
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
+    ] });
+    expect(await serialized('11111111', '22222222', fresh, true, '/en-ca/niv/groups/55555555'))
+      .toEqual({ scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027 view map', applicantIds: ids });
+  });
   it.each([true, false])('retains all Details identities for booked or explicitly unbooked groups (%s)', async booked => {
     dashboard(ids.map(row).join(''), booked);
     const reading = await serialized('11111111', '22222222', false, true);

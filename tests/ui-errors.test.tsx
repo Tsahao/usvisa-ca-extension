@@ -93,7 +93,8 @@ describe('persisted worker failure screens', () => {
     expect(screen.getByRole('button', { name: 'Check configurations' })).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Retry' })).not.toBeNull();
     expect(screen.getByText('Tap to retry')).not.toBeNull();
-    // The screen already conveys the diagnostic: no duplicate banner.
+    if (kind === 'generic') expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();
+    // The safe detail belongs inside the result, without a duplicate banner.
     expect(screen.queryByRole('alert')).toBeNull();
     // Check configurations opens Settings without starting work.
     await user.click(screen.getByRole('button', { name: 'Check configurations' }));
@@ -252,18 +253,25 @@ describe('Start-command failure screens', () => {
   });
 
   it('catches other genuine workflow failures with the catch-all screen', async () => {
-    stubEngine({
-      snapshot: idleSnapshot('booking'),
+    let snapshot = idleSnapshot('booking');
+    const { refreshWorker } = stubEngine({
+      snapshot,
       onMessage: message => message.type === 'PANEL_START'
         ? { ok: false, error: GENERIC_SAFE, failureKind: 'generic' }
-        : { ok: true, snapshot: idleSnapshot('booking') },
+        : { ok: true, snapshot },
     });
     const { App } = await import('../src/ui/App');
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole('button', { name: 'Start' }));
     expect(await screen.findByRole('heading', { name: 'That didn’t work' })).not.toBeNull();
+    expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();
+    await refreshWorker(idleSnapshot('booking'));
+    expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Retry' })).not.toBeNull();
+    snapshot = { ...idleSnapshot('booking'), status: 'running' };
+    await refreshWorker(snapshot);
+    expect(screen.queryByText(GENERIC_SAFE)).toBeNull();
   });
 
   it.each(['missing-response', 'unknown-response', 'connection-rejection'])('uses the catch-all for %s Start failures', async issue => {

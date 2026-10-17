@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from '../src/adapter/reads';
-import { validateDashboardSnapshot } from '../src/domain/groups';
+import { resolveGroup, validateDashboardSnapshot } from '../src/domain/groups';
 
 describe('website adapter readers', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -352,14 +352,22 @@ describe('website adapter readers', () => {
         <div class="medium-6 columns text-right"><ul class="actions"><li><a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></li></ul></div></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>22222222</strong></div></div></div>
       <div class="alert application card"><div class="row"><div class="medium-6 columns"><h4 class="status">Unreadable</h4></div></div></div>`;
-    // The incomplete card is never silently omitted while the paid card
-    // would otherwise drive an all-paid claim.
+    // Strict whole-dashboard validation still cannot claim all groups were
+    // read, but optional-IVR selection may use the valid first booking card.
     const reading = serialized();
     expect(reading).toEqual({ groups: [
       { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
       { scheduleId: '', ivr: null, paymentStatus: 'unknown' },
     ] });
     expect(() => validateDashboardSnapshot(reading)).toThrow('Invalid dashboard group.');
+    expect(resolveGroup(reading, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: '11111111', ivr: '22222222' });
+    const first = document.querySelector('.application.card')!;
+    first.before(first.nextElementSibling!);
+    const reordered = serialized();
+    expect(reordered.groups[0]).toEqual({ scheduleId: '', ivr: null, paymentStatus: 'unknown' });
+    expect(() => resolveGroup(reordered, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
+      .toThrow('Selected dashboard group is incomplete.');
   });
 
   it('reads the heading-scoped summary rows as raw text', () => {

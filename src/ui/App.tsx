@@ -59,7 +59,7 @@ function isDuplicateFailureBanner(message: string, kind: PanelFailureKind | null
   return panelFailureKind(message) === kind;
 }
 
-function Workflow({ preferences, run, change, configure, openCoffee, data, failureKind, trackScroll }: { preferences: Preferences; run: Run; change: (status: RunStatus) => Promise<void>; configure: () => void; openCoffee: () => void; data?: PanelSnapshot | null; failureKind?: PanelFailureKind | null; trackScroll: (event: UIEvent<HTMLElement>) => void }) {
+function Workflow({ preferences, run, change, configure, openCoffee, data, failureKind, failureDetail, trackScroll }: { preferences: Preferences; run: Run; change: (status: RunStatus) => Promise<void>; configure: () => void; openCoffee: () => void; data?: PanelSnapshot | null; failureKind?: PanelFailureKind | null; failureDetail?: string; trackScroll: (event: UIEvent<HTMLElement>) => void }) {
   const active = activeStatuses.includes(run.status);
   const simulated = data === undefined;
   const hasData = simulated ? run.lastChecked !== null : data?.checkedAt !== null && data?.checkedAt !== undefined;
@@ -78,6 +78,7 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
     {special && message ? <div className={`${styles.result} ${!title && run.status === 'success' ? styles.success : styles.failure}`} role="status">
       {!title && run.status === 'success' ? <CalendarCheck size={42} /> : <span className={styles.failureIcon} aria-hidden><TriangleAlert size={42} /></span>}
       <h2>{message.title}</h2>
+      {title && failureDetail && <p className={styles.failureDetail}>{failureDetail}</p>}
       {title ? <button className={styles.secondary} onClick={configure}>{message.detail}</button> : <p className={styles.bookedDate}>{message.detail}</p>}
       {!title && run.status === 'success' && run.mode === 'booking' && <button className={`${styles.secondary} ${styles.coffeeLink}`} onClick={openCoffee}>Buy me a coffee?</button>}
     </div> : <>
@@ -108,7 +109,7 @@ export function App() {
   // Local Start-command failure for the selected workflow. A thrown START
   // leaves the previous stopped/idle snapshot behind, so this persists until
   // a healthy snapshot, Stop, settings save or workflow switch clears it.
-  const [panelFailure, setPanelFailure] = useState<{ kind: PanelFailureKind; mode: Mode } | null>(null);
+  const [panelFailure, setPanelFailure] = useState<{ kind: PanelFailureKind; mode: Mode; detail?: string } | null>(null);
   const [engineData, setEngineData] = useState<PanelSnapshot | null>(null);
   const [toolbarScrolled, setToolbarScrolled] = useState(false);
   const [focusingTab, setFocusingTab] = useState(false);
@@ -142,7 +143,8 @@ export function App() {
     // handoff keeps its existing banner and never takes a failure screen.
     if (snapshot.status === 'failure' && !snapshot.manualAuthentication) {
       const kind = isPanelFailureKind(snapshot.failureKind) ? snapshot.failureKind : 'generic';
-      setPanelFailure({ kind, mode: snapshot.mode });
+      setPanelFailure({ kind, mode: snapshot.mode,
+        ...(isPanelCommandErrorMessage(snapshot.reviewMessage) ? { detail: snapshot.reviewMessage } : {}) });
     } else if (snapshot.status === 'running' || snapshot.status === 'success' || snapshot.manualAuthentication || snapshot.reviewRequired) {
       // Healthy work and recovery guidance clear the local screen error for that
       // workflow. Plain idle/stopped snapshots retain it: a thrown START
@@ -294,6 +296,13 @@ export function App() {
       ? (isPanelFailureKind(engineData.failureKind) ? engineData.failureKind : 'generic')
       : (panelFailure && panelFailure.mode === run.mode ? panelFailure.kind : null))
     : null;
+  // Only fixed, identifier-free diagnostics may accompany the generic title.
+  // Keep command details with their workflow across stale idle refreshes.
+  const engineFailureDetail = engineFailure === 'generic'
+    ? (engineData?.mode === run.mode && engineData.status === 'failure'
+      ? (isPanelCommandErrorMessage(engineData.reviewMessage) ? engineData.reviewMessage : undefined)
+      : (panelFailure?.mode === run.mode ? panelFailure.detail : undefined))
+    : undefined;
   const activeTab = view === 'workflow' ? run.mode : view === 'config' ? 'settings' : view === 'coffee' ? 'coffee' : null;
   const keepConfigMounted = view === 'config' || view === 'history' || (view === 'terms' && termsOrigin === 'config') || (view === 'coffee' && coffeeFromConfig);
   const previewRows: HistoryRow[] = useMemo(() => previewHistory ? Array.from({ length: 14 }, (_, index) => ({
@@ -358,7 +367,7 @@ export function App() {
               setView('workflow');
             }} />
           </div>}
-          {view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} testMode={showTestMode} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
+          {view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} testMode={showTestMode} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} failureDetail={engineFailureDetail} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
             if (engineEnabled && status === 'idle') { cancelRestartCommand(); try { applySnapshot(await panelCommand('STOP')); setPanelFailure(null); setError(''); } catch (failure) { setError((failure as Error).message); } return; }
             if (preferencesError(preferences)) { setPendingMode(run.mode); setView('config'); return; }
             if (engineEnabled) {
@@ -412,7 +421,8 @@ export function App() {
                 // not just a banner. Unknown responses and connection errors
                 // use the catch-all; maintenance keeps its recovery guidance.
                 if (!(failure instanceof Error && failure.message === MAINTENANCE_MESSAGE)) {
-                  setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode: run.mode });
+                  setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode: run.mode,
+                    ...(failure instanceof Error && isPanelCommandErrorMessage(failure.message) ? { detail: failure.message } : {}) });
                   setError('');
                 } else setError((failure as Error).message);
               }

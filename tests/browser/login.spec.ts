@@ -53,19 +53,19 @@ test(dashboardMaintenance ? 'packaged login retries two dashboard 503s through b
         const roster = '<table><tbody><tr><td><a href="/en-ca/niv/schedule/11111111/applicants/77777777">Details</a></td></tr>' +
           (scheduled ? '<tr><td><a href="/en-ca/niv/schedule/11111111/applicants/88888888">Details</a></td></tr>' : '') + '</tbody></table>';
         const selected = scheduled
-          ? '<section><strong>22222222</strong><p class="consular-appt">January 1, 2027 <a href="/en-ca/niv/schedule/11111111/appointment">Appointment</a></p>' + roster + '</section>'
+          ? '<section class="application attend_appointment card success"><strong>22222222</strong><ul class="actions"><a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></ul><p class="consular-appt">January 1, 2027 <a href="/en-ca/niv/schedule/11111111/addresses/consulate">view map</a></p>' + roster + '</section>'
           : '<section class="alert application card ready_to_schedule"><strong>22222222</strong><ul class="actions"><li><a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></li></ul><p class="delivery"><a href="/en-ca/niv/schedule/11111111/addresses/delivery">Delivery</a></p>' + roster + '</section>';
-        const historical = scheduled ? '' : '<section><strong>44444444</strong><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul><p class="consular-appt">September 22, 2025</p><table><tbody><tr><td><a href="/en-ca/niv/schedule/33333333/applicants/99999999">Details</a></td></tr></tbody></table></section>';
+        const historical = scheduled ? '<section class="application archived card"><table><tr><td><a href="/en-ca/niv/schedule/33333333/applicants/99999999">Details</a></td></tr></table><strong>44444444</strong></section><section class="application card"><h4>Unreadable older application</h4></section>' : '<section><strong>44444444</strong><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul><p class="consular-appt">September 22, 2025</p><table><tbody><tr><td><a href="/en-ca/niv/schedule/33333333/applicants/99999999">Details</a></td></tr></tbody></table></section>';
         await route.fulfill({ contentType: 'text/html', body: '<div>' + selected + historical + '</div>' });
       } else await route.abort();
     });
     const panel = await context.newPage(); await panel.goto(`chrome-extension://${extensionId}/panel.html`);
     const login = await context.newPage(); await login.goto(`https://ais.usvisa-info.com/en-ca/niv/${signedIn ? 'groups' : 'users/sign_in'}`);
-    await panel.evaluate(async () => {
-      await chrome.storage.local.set({ uiPreferencesV1: { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '' } });
+    await panel.evaluate(async scheduled => {
+      await chrome.storage.local.set({ uiPreferencesV1: { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: true, interval: 60, paidIvr: scheduled ? '' : '22222222', unpaidIvr: '' } });
       const result = await chrome.runtime.sendMessage({ type: 'PANEL_START', mode: 'booking' });
       if (!result.ok) throw new Error(result.error);
-    });
+    }, scheduled);
     const read = () => panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);
     if (maintenance) {
       await expect.poll(async () => (await read()).authentication?.phase, { timeout: 10_000 }).toBe('retry');

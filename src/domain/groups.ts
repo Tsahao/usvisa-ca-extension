@@ -89,15 +89,35 @@ export function validateGroupBinding(value: unknown): GroupBinding {
 //   catch-all. Missing explicit IVR on a fully readable dashboard stays
 //   specific; otherwise it fails closed as generic.
 export function resolveGroup(
-  snapshot: DashboardSnapshot,
+  snapshot: unknown,
   args: { mode: EngineMode; paidIvr: string; unpaidIvr: string },
 ): GroupRef {
-  const groups = validateDashboardSnapshot(snapshot).groups;
+  // Selection needs the chosen card's identity, not complete identities for
+  // every sibling. Preserve incomplete placeholders and their page positions;
+  // filtering them could silently change what "first group" means.
+  if (!snapshot || typeof snapshot !== 'object' || !('groups' in snapshot) || !Array.isArray(snapshot.groups))
+    throw new Error('Invalid dashboard snapshot.');
+  const groups = snapshot.groups.map((item: unknown) => {
+    if (!item || typeof item !== 'object') throw new Error('Invalid dashboard group.');
+    const group = item as Record<string, unknown>;
+    if (group.scheduleId !== '' && !isDigitId(group.scheduleId, 32)) throw new Error('Invalid dashboard group.');
+    if (group.ivr !== null && !isDigitId(group.ivr, 32)) throw new Error('Invalid dashboard group.');
+    const paymentStatus: PaymentStatus = group.paymentStatus === 'paid' || group.paymentStatus === 'unpaid' ? group.paymentStatus : 'unknown';
+    return { scheduleId: group.scheduleId as string, ivr: group.ivr as string | null, paymentStatus };
+  });
+  const scheduleIds = groups.map(group => group.scheduleId).filter(id => id !== '');
+  const ivrs = groups.map(group => group.ivr).filter(id => id !== null);
+  if (new Set(scheduleIds).size !== scheduleIds.length || new Set(ivrs).size !== ivrs.length)
+    throw new Error('Ambiguous dashboard groups.');
+  const selectedRef = (group: typeof groups[number]): GroupRef => {
+    if (!group.scheduleId || group.ivr === null) throw new Error('Selected dashboard group is incomplete.');
+    return validateGroupRef(group);
+  };
   if (args.paidIvr !== '' && !isDigitId(args.paidIvr, 32)) throw new Error('Invalid paid IVR.');
   if (args.unpaidIvr !== '' && !isDigitId(args.unpaidIvr, 32)) throw new Error('Invalid unpaid IVR.');
   if (args.mode !== 'booking' && args.mode !== 'alerts') throw new Error('Invalid resolve mode.');
   if (groups.length === 0) throw new Error('No dashboard group to bind.');
-  const fullyReadable = groups.every(group => group.paymentStatus === 'paid' || group.paymentStatus === 'unpaid');
+  const fullyReadable = groups.every(group => group.scheduleId !== '' && group.ivr !== null && group.paymentStatus !== 'unknown');
   if (args.mode === 'booking') {
     if (args.paidIvr !== '') {
       const match = groups.find(group => group.ivr === args.paidIvr);
@@ -107,24 +127,21 @@ export function resolveGroup(
       }
       if (args.unpaidIvr !== '' && match.ivr === args.unpaidIvr) throw new Error('Unpaid group rejected for paid booking.');
       if (match.paymentStatus === 'unpaid') throw new Error('Unpaid group rejected for paid booking.');
-      const { paymentStatus: _ignored, ...ref } = match;
-      return ref;
+      return selectedRef(match);
     }
     if (args.unpaidIvr !== '' && groups[0].ivr === args.unpaidIvr) throw new Error('Unpaid group rejected for paid booking.');
     if (groups[0].paymentStatus === 'unpaid') throw new Error('Unpaid group rejected for paid booking.');
-    const { paymentStatus: _ignored, ...ref } = groups[0];
-    return ref;
+    return selectedRef(groups[0]);
   }
   if (args.unpaidIvr === '') {
     for (const group of groups) {
       if (args.paidIvr !== '' && group.ivr === args.paidIvr) continue;
       if (group.paymentStatus === 'paid') continue;
       if (group.paymentStatus === 'unpaid') {
-        const { paymentStatus: _ignored, ...ref } = group;
-        return ref;
+        return selectedRef(group);
       }
     }
-    if (groups.every(group => group.paymentStatus === 'paid')) throw new Error('Unpaid group not found on the dashboard.');
+    if (fullyReadable && groups.every(group => group.paymentStatus === 'paid')) throw new Error('Unpaid group not found on the dashboard.');
     throw new Error('No eligible unpaid group on the dashboard.');
   }
   const match = groups.find(group => group.ivr === args.unpaidIvr);
@@ -135,6 +152,5 @@ export function resolveGroup(
   if (args.paidIvr !== '' && match.ivr === args.paidIvr) throw new Error('Paid group rejected for unpaid tracking.');
   if (match.paymentStatus === 'paid') throw new Error('Paid group rejected for unpaid tracking.');
   if (match.paymentStatus !== 'unpaid') throw new Error('No eligible unpaid group on the dashboard.');
-  const { paymentStatus: _ignored, ...ref } = match;
-  return ref;
+  return selectedRef(match);
 }

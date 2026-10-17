@@ -16,6 +16,7 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
   const ids = single ? ['77777777'] : ['77777777', '88888888'];
   let dayReads = 0;
   let bookingPosts = 0;
+  let cancellationRequests = 0;
   let rosterChanged = false;
   let dashboardUnavailable = false;
   let warningCompleted = initial;
@@ -24,6 +25,7 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
     const extensionId = new URL(worker.url()).host;
     await context.route('https://ais.usvisa-info.com/**', async route => {
       const request = route.request(); const url = new URL(request.url());
+      if (request.method() === 'DELETE') { cancellationRequests++; await route.abort(); return; }
       if (request.method() === 'POST') { bookingPosts++; await route.abort(); return; }
       let body: string;
       if (url.pathname === dashboardPath) {
@@ -33,10 +35,15 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
         }
         const baseline = initial ? `<p class="delivery"><a href="${base}/addresses/delivery">Delivery</a></p>` : `<p class="consular-appt">6 November, 2026 <a href="${base}/appointment">Appointment</a></p>`;
         const dashboardIds = rosterChanged ? [...ids, '88888888'] : ids;
-        body = `<section${initial ? ' class="application card ready_to_schedule"' : ''}><ul class="actions"><li><a href="${base}/continue_actions">Continue</a></li></ul><strong>22222222</strong>${baseline}<table><tbody>${dashboardIds.map(id => `<tr><td><a href="${base}/applicants/${id}">Details</a></td></tr>`).join('')}</tbody></table></section>`;
+        const siblings = !initial && !single ? `<section class="alert application card needs_payment"><h4 class="status">Pay Visa Fee</h4><ul class="actions"><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></ul><strong>44444444</strong></section>
+          <section class="application card needs_courier_in success"><ul class="actions"><a href="/en-ca/niv/schedule/55555555/continue_actions">Continue</a></ul><strong>66666666</strong></section>
+          <section class="application archived card"><table><tr><td><a href="/en-ca/niv/schedule/99999999/applicants/12345678">Details</a></td></tr></table><strong>87654321</strong></section>
+          <section class="application card"><h4>Unreadable older application</h4></section>` : '';
+        body = `<section class="application card ${initial ? 'ready_to_schedule' : 'attend_appointment success'}"><ul class="actions"><li><a href="${base}/continue_actions">Continue</a></li></ul><strong>22222222</strong>${baseline}<table><tbody>${dashboardIds.map(id => `<tr><td><a href="${base}/applicants/${id}">Details</a></td></tr>`).join('')}</tbody></table></section>${siblings}`;
       } else if (url.pathname === `${base}/continue_actions`) {
         const label = initial ? 'Schedule Appointment' : 'Reschedule Appointment';
-        body = `<a class="accordion-title" role="tab" aria-expanded="false" aria-controls="entry"><h5>${label}</h5></a><div id="entry" hidden><a class="button small primary small-only-expanded" href="${base}/${initial ? 'continue' : 'appointment'}">${label}</a></div><script>document.querySelector('.accordion-title').onclick = () => { document.querySelector('.accordion-title').setAttribute('aria-expanded','true'); document.querySelector('#entry').hidden = false; };</script>`;
+        const cancellation = initial ? '' : `<a class="accordion-title" role="tab" aria-expanded="false" aria-controls="cancel">Cancel Appointment</a><div id="cancel" hidden><a class="button small primary small-only-expanded" data-method="delete" href="${base}/appointment">Cancel Appointment</a></div>`;
+        body = `<a class="accordion-title" role="tab" aria-expanded="false" aria-controls="entry"><h5>${label}</h5></a><div id="entry" hidden><a class="button small primary small-only-expanded" href="${base}/${initial ? 'continue' : 'appointment'}">${label}</a></div>${cancellation}<script>document.querySelector('.accordion-title').onclick = () => { document.querySelector('.accordion-title').setAttribute('aria-expanded','true'); document.querySelector('#entry').hidden = false; }; const cancel = document.querySelector('#cancel a'); if (cancel) cancel.onclick = event => { event.preventDefault(); fetch('${base}/appointment', { method: 'DELETE' }); };</script>`;
       } else if (url.pathname === `${base}/continue` && initial) {
         // Synthetic client redirect keeps both navigations intercepted under
         // DNS isolation; following a mocked HTTP 302 escapes that interception.
@@ -60,7 +67,7 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
     });
     const dashboard = await context.newPage(); await dashboard.goto(`https://ais.usvisa-info.com${dashboardPath}`);
     const panel = await context.newPage(); await panel.goto(`chrome-extension://${extensionId}/panel.html`);
-    await panel.evaluate(async initial => chrome.storage.local.set({ uiPreferencesV1: { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: initial ? '2027-01-01' : '2026-12-01', latest: initial ? '2027-01-31' : '2026-12-31', onlyEarlier: true, testMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '' } }), initial);
+    await panel.evaluate(async ({ initial, single }) => chrome.storage.local.set({ uiPreferencesV1: { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: initial ? '2027-01-01' : '2026-12-01', latest: initial ? '2027-01-31' : '2026-12-31', onlyEarlier: true, testMode: true, interval: 60, paidIvr: !initial && !single ? '' : '22222222', unpaidIvr: '' } }), { initial, single });
     await panel.reload();
     await panel.getByRole('button', { name: 'Booking', exact: true }).click();
     const ownedTabId = await panel.evaluate(async dashboardPath => (await chrome.tabs.query({})).find(tab => tab.url === `https://ais.usvisa-info.com${dashboardPath}`)!.id, dashboardPath);
@@ -77,6 +84,7 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
     await expect(panel.locator('h2', { hasText: 'Earliest Available' }).locator('..').locator('p')).toHaveText('Nov 19, 2026');
     await expect(panel.locator('[aria-label="2026-11-19, available"]')).toBeVisible();
     expect(bookingPosts).toBe(0);
+    expect(cancellationRequests).toBe(0);
     if (bare) {
       const pollAgain = () => panel.evaluate(async () => {
         const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;

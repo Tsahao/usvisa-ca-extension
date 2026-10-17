@@ -93,7 +93,10 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
       entries = all.filter(el => el !== toggle && labelOf(el) === 'reschedule appointment');
       if (entries.length !== 1 || !isGatewayEntryTarget(entries[0])) return refuse('control-missing');
       if (all.some(el => el !== toggle && el !== entries[0] && labelOf(el) === 'schedule appointment')) return refuse('control-missing');
-      const allAppointment = all.filter(el => el !== toggle && isGatewayEntryTarget(el));
+      // Cancellation uses the same appointment URL with data-method=delete.
+      // Only eligible GET navigation controls compete with the chosen entry;
+      // the selected entry itself must still pass safeNavigation below.
+      const allAppointment = all.filter(el => el !== toggle && isGatewayEntryTarget(el) && safeNavigation(el));
       if (allAppointment.length !== 1) return refuse('control-missing');
     } else {
       // First-time gateway only: exact Schedule Appointment copy for both
@@ -111,7 +114,7 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
       if (entries.length !== 1) return refuse('control-missing');
       if ((entries[0] as HTMLButtonElement).form && (entries[0] as HTMLButtonElement).form!.method.toLowerCase() !== 'get') return refuse('wrong-target');
       if (all.some(el => labelOf(el) === 'reschedule appointment')) return refuse('control-missing');
-      const allAppointment = all.filter(el => el !== toggle && isGatewayEntryTarget(el));
+      const allAppointment = all.filter(el => el !== toggle && isGatewayEntryTarget(el) && safeNavigation(el));
       if (allAppointment.length !== 1) return refuse('control-missing');
     }
     if (entries.length !== 1 || !safeNavigation(entries[0])) return refuse('wrong-target');

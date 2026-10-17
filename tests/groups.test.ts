@@ -10,6 +10,29 @@ const UNPAID_SECOND = { scheduleId: '77777777', ivr: '88888888', paymentStatus: 
 const UNKNOWN = { scheduleId: '99999991', ivr: '99999992', paymentStatus: 'unknown' as const };
 
 describe('IVR-bound group resolution with payment evidence', () => {
+  const INCOMPLETE = { scheduleId: '', ivr: null, paymentStatus: 'unknown' };
+  it('uses the first booking group with optional IVRs despite an unreadable later card', () => {
+    expect(resolveGroup({ groups: [PAID, INCOMPLETE] }, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: PAID.scheduleId, ivr: PAID.ivr });
+    expect(resolveGroup({ groups: [PAID, { ...UNPAID, ivr: null }] }, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: PAID.scheduleId, ivr: PAID.ivr });
+  });
+  it('keeps an unreadable first booking card in place rather than choosing a later group', () => {
+    expect(() => resolveGroup({ groups: [INCOMPLETE, PAID] }, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
+      .toThrow('Selected dashboard group is incomplete.');
+  });
+  it('matches an explicit IVR despite unrelated incomplete cards, without falling back on a miss', () => {
+    expect(resolveGroup({ groups: [INCOMPLETE, PAID] }, { mode: 'booking', paidIvr: PAID.ivr, unpaidIvr: '' }))
+      .toEqual({ scheduleId: PAID.scheduleId, ivr: PAID.ivr });
+    expect(() => resolveGroup({ groups: [INCOMPLETE, PAID] }, { mode: 'booking', paidIvr: '99999999', unpaidIvr: '' }))
+      .toThrow('No eligible paid group on the dashboard.');
+  });
+  it('uses the first unpaid alert group with optional IVRs despite an unreadable later card', () => {
+    expect(resolveGroup({ groups: [PAID, UNPAID, INCOMPLETE] }, { mode: 'alerts', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: UNPAID.scheduleId, ivr: UNPAID.ivr });
+    expect(() => resolveGroup({ groups: [PAID, INCOMPLETE] }, { mode: 'alerts', paidIvr: '', unpaidIvr: '' }))
+      .toThrow('No eligible unpaid group on the dashboard.');
+  });
   it('treats a missing paymentStatus as unknown, never implicitly unpaid', () => {
     const snapshot = validateDashboardSnapshot({ groups: [{ scheduleId: '11111111', ivr: '22222222' }] });
     expect(snapshot.groups).toEqual([{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown' }]);
