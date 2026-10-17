@@ -45,19 +45,27 @@ describe('browser target selection', () => {
         { name: 'default', mode: 'production', target: undefined, analytics: false },
         { name: 'explicit', mode: 'production', target: 'chrome', analytics: false },
         { name: 'analytics', mode: 'production', target: 'chrome', analytics: true },
+        { name: 'analytics-us', mode: 'production', target: 'chrome', analytics: true },
         { name: 'test', mode: 'test', target: 'chrome', analytics: true },
       ]) {
         const outDir = join(staging, scenario.name);
-        const env: NodeJS.ProcessEnv = { ...process.env, VITE_POSTHOG_PROJECT_TOKEN: 'phc_SYNTHETICTARGET123',
-          VITE_POSTHOG_HOST: 'https://eu.i.posthog.com', VITE_POSTHOG_ENABLED: String(scenario.analytics) };
+        const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production', VITE_POSTHOG_PROJECT_TOKEN: 'phc_SYNTHETICTARGET123',
+          VITE_POSTHOG_HOST: scenario.name === 'analytics-us' ? 'https://us.i.posthog.com' : 'https://eu.i.posthog.com',
+          VITE_POSTHOG_ENABLED: String(scenario.analytics) };
         delete env.BROWSER_TARGET;
         if (scenario.target) Object.assign(env, { BROWSER_TARGET: scenario.target });
         const result = spawnSync(process.execPath, [resolve('node_modules/vite/bin/vite.js'), 'build', '--mode', scenario.mode, '--outDir', outDir], { env, encoding: 'utf8' });
         expect(result.status, result.stderr).toBe(0);
         const expected = structuredClone(source);
         if (scenario.mode === 'production') delete expected.web_accessible_resources;
-        if (scenario.mode !== 'test' && scenario.analytics) expected.host_permissions.push('https://eu.i.posthog.com/*');
         expect(readFileSync(join(outDir, 'manifest.json'), 'utf8')).toBe(JSON.stringify(expected, null, 2) + '\n');
+        expect(expected.host_permissions).toEqual(['https://ais.usvisa-info.com/*']);
+        const background = readFileSync(join(outDir, 'background.js'), 'utf8');
+        if (scenario.analytics) expect(background.includes('phc_SYNTHETICTARGET123')).toBe(scenario.mode !== 'test');
+        if (scenario.mode === 'production') {
+          const smoke = spawnSync(process.execPath, [resolve('scripts/release-smoke.mjs'), outDir], { env, encoding: 'utf8' });
+          expect(smoke.status, smoke.stderr).toBe(0);
+        }
         expect(existsSync(join(outDir, 'probe.html'))).toBe(scenario.mode === 'test');
         expect(existsSync(join(outDir, 'probe.js'))).toBe(scenario.mode === 'test');
         if (scenario.name === 'default' || scenario.name === 'explicit') {
