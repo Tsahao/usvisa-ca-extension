@@ -92,6 +92,58 @@ describe('PostHog configuration and allowlisted delivery', () => {
 });
 
 describe('durable milestones and sessions', () => {
+  async function bookingFixture(testMode = false) {
+    const f = fixture();
+    const state: EngineState = { ...f.state, mode: 'booking', status: 'verifying',
+      intent: { runId, mode: 'booking', groupId: '11111111', targetDate: '2026-11-19',
+        consulate: 'Vancouver', testMode, createdAt: now, phase: 'submitted' } };
+    const id = f.tracker.start('booking', testMode);
+    f.tracker.link(id, state); await f.tracker.settled();
+    return { ...f, state };
+  }
+  it('queues one verified booking, retains deduplication across worker wakes and sends no appointment details', async () => {
+    const f = await bookingFixture();
+    f.tracker.booked(f.state); f.tracker.booked(f.state); await f.tracker.settled();
+    const worker = createAnalyticsTracker(f.deps);
+    worker.booked(f.state); await worker.settled();
+    expect(f.record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(1);
+    await worker.flush();
+    const event = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(event => event.event === 'appointment_booked');
+    expect(event.properties).toEqual({ analytics_session_id: f.record().session!.id, mode: 'booking', test_mode: false,
+      extension_version: '0.1.0', environment: 'production', $process_person_profile: false, $geoip_disable: true, $ip: null });
+    expect(JSON.stringify(event)).not.toMatch(/11111111|22222222|run-id|Vancouver|2026-11-19/);
+  });
+  it.each(['test-mode', 'foreign', 'wrong-run', 'no-intent', 'alerts', 'untracked'])('does not count an unqualified booking (%s)', async issue => {
+    const f = await bookingFixture(issue === 'test-mode');
+    if (issue === 'foreign') f.state.owner = 'probe-owner-dev';
+    if (issue === 'wrong-run') f.state.runId = 'another-run-01';
+    if (issue === 'no-intent') f.state.intent = null;
+    if (issue === 'alerts') f.state.mode = 'alerts';
+    if (issue === 'untracked') f.values[ANALYTICS_KEY] = { ...f.record(), session: null };
+    f.tracker.booked(f.state); await f.tracker.settled();
+    expect(f.record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(0);
+  });
+  it('counts a later verified booking even if Stop closed its session while verification was pending', async () => {
+    const f = await bookingFixture();
+    f.tracker.end(); f.tracker.booked(f.state); await f.tracker.settled();
+    expect(f.record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(1);
+  });
+  it('counts another booking after an explicit new workflow Start', async () => {
+    const f = await bookingFixture();
+    f.tracker.booked(f.state); await f.tracker.settled();
+    const next = { ...f.state, runId: 'run-id-0002' };
+    const id = f.tracker.start('booking', false); f.tracker.link(id, next);
+    f.tracker.booked(next); await f.tracker.settled();
+    expect(f.record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(2);
+  });
+  it('rejects malformed success events and appointment data in the allowlist validator', async () => {
+    const f = await bookingFixture(); f.tracker.booked(f.state); await f.tracker.settled();
+    const event = f.record().outbox.find(event => event.event === 'appointment_booked')!;
+    for (const properties of [{ test_mode: true }, { mode: 'alerts' }, { analytics_session_id: undefined },
+      { failure_reason: 'start-failed' }, { targetDate: '2026-11-19' }]) {
+      expect(() => validateQueuedEvent({ ...event, properties: { ...event.properties, ...properties } })).toThrow();
+    }
+  });
   it('commits installation and Start together, links locally, and activates only once', async () => {
     const f = fixture(); await f.start();
     f.tracker.activated(f.state, 7); f.tracker.activated(f.state, 7); await f.tracker.settled();

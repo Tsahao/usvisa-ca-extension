@@ -91,6 +91,10 @@ describe('persisted worker failure screens', () => {
     render(<App />);
     expect(await screen.findByRole('heading', { name: title })).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Check configurations' })).not.toBeNull();
+    const report = screen.getByRole('button', { name: 'Report a problem' });
+    const configure = screen.getByRole('button', { name: 'Check configurations' });
+    expect(configure.nextElementSibling).toBe(report);
+    expect(report.className).toContain(configure.className);
     expect(screen.getByRole('button', { name: 'Retry' })).not.toBeNull();
     expect(screen.getByText('Tap to retry')).not.toBeNull();
     if (kind === 'generic') expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();

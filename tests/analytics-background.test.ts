@@ -96,6 +96,19 @@ describe('product worker telemetry integration (mocked network only)', () => {
     expect(events().map(event => event.event)).toEqual(['installation_seen', 'workflow_started', 'workflow_failed']);
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
   });
+  it('provides read-only sanitized problem-report context only to the trusted product panel', async () => {
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: { groups: [snapshot.groups[0]] } }]);
+    await send({ type: 'PANEL_START', mode: 'alerts' });
+    const before = structuredClone(stored.engineStateV1);
+    const report = await send({ type: 'ENGINE_PROBLEM_REPORT' });
+    expect(report).toMatchObject({ ok: true, diagnostics: { version: 1 }, context: { status: expect.any(String), stage: expect.any(String) } });
+    expect(Object.keys(report.context).sort()).toEqual(['stage', 'status']);
+    expect(JSON.stringify(report)).not.toMatch(/fixture@example|private-synthetic|11111111|22222222|Vancouver|2026-11-01|schedule\//);
+    expect(stored.engineStateV1).toEqual(before);
+    const respond = vi.fn();
+    expect(message({ type: 'ENGINE_PROBLEM_REPORT' }, { id: sender.id, url: dashboard }, respond)).toBeUndefined();
+    expect(respond).not.toHaveBeenCalled();
+  });
   it('does not count invalid local configuration or developer/preview Starts', async () => {
     stored.uiPreferencesV1.password = '';
     await send({ type: 'PANEL_START', mode: 'alerts' });

@@ -1,0 +1,45 @@
+import { describe, expect, it } from 'vitest';
+import { buildProblemEmail, problemContext, REPORT_URL_LIMIT } from '../src/domain/problem-report';
+import { emptyEngineState } from '../src/engine/workflow';
+
+const now = '2026-10-17T12:00:00.000Z';
+const args = { now, version: '0.2.2', userAgent: 'Private device Chrome/140.0.0.0', mode: 'booking' as const,
+  testMode: false, status: 'failure', failureKind: 'generic' };
+const body = (url: string) => new URL(url).searchParams.get('body')!;
+
+describe('problem email draft', () => {
+  it('uses the approved recipient and format, without required user questions', () => {
+    const url = buildProblemEmail({ ...args, context: { status: 'stopped', stage: 'form' },
+      diagnostics: { version: 1, entries: [{ at: now, code: 'auth-terminal', reason: 'credential-rejected', count: 2 }] } });
+    expect(url).toMatch(/^mailto:browser\.latte\.1k@icloud\.com\?/);
+    expect(new URL(url).searchParams.get('subject')).toBe('[Visa Extension] Problem report — v0.2.2');
+    expect(body(url)).toBe(`Optionally, you can add anything you think is helpful to pinpoint the issue.\n\n\n--- Technical details ---\nReport generated: ${now}\nExtension version: 0.2.2\nBrowser version: Chrome/140.0.0.0\nWorkflow mode: Book\nTest Mode: Off\nWorkflow status: stopped\nWorkflow stage: form\nFailure reason: generic\n\n--- Recent diagnostics ---\n${now} auth-terminal reason=credential-rejected count=2`);
+  });
+  it('exports only allowlisted fields, never arbitrary replies, UA, or workflow data', () => {
+    const privateText = 'private@example.invalid';
+    const url = buildProblemEmail({ ...args, version: privateText, failureKind: privateText,
+      context: { status: privateText, stage: privateText, password: privateText },
+      diagnostics: { version: 1, entries: [{ at: now, code: 'poll-park', email: privateText }] } });
+    expect(body(url)).not.toContain(privateText);
+    expect(body(url)).not.toContain('Private device');
+    expect(body(url)).toContain('poll-park');
+    const state = { ...emptyEngineState(now), stage: privateText, runId: privateText };
+    expect(problemContext(state)).toEqual({ status: 'idle', stage: 'unknown' });
+  });
+  it('bounds encoded URL length, keeps newest diagnostics and marks omitted entries', () => {
+    const url = buildProblemEmail({ ...args, diagnostics: { version: 1,
+      entries: Array.from({ length: 1500 }, (_, index) => ({ at: new Date(Date.parse(now) - index * 1000).toISOString(),
+        code: index === 0 ? 'auth-terminal' : 'poll-retry', failures: index, count: 1 })) } });
+    expect(url.length).toBeLessThanOrEqual(REPORT_URL_LIMIT);
+    expect(body(url)).toContain('auth-terminal');
+    expect(body(url)).toContain('Older entries omitted');
+  });
+  it.each([undefined, { version: 1, entries: [{ at: now, code: 'private error text' }] }])('handles unavailable/corrupt diagnostics', diagnostics => {
+    expect(body(buildProblemEmail({ ...args, mode: 'alerts', testMode: true, diagnostics }))).toContain('Diagnostics unavailable.');
+    expect(body(buildProblemEmail({ ...args, mode: 'alerts', testMode: true, diagnostics }))).toContain('Workflow mode: Alerts\nTest Mode: On');
+  });
+  it('prunes stale diagnostics', () => {
+    expect(body(buildProblemEmail({ ...args, diagnostics: { version: 1,
+      entries: [{ at: '2026-01-01T00:00:00.000Z', code: 'auth-terminal' }] } }))).toContain('No recent diagnostic entries.');
+  });
+});

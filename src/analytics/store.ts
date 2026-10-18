@@ -11,6 +11,7 @@ export type AnalyticsSession = {
   testMode: boolean;
   failed: boolean;
   activated: boolean;
+  bookingSucceeded?: boolean;
   closed: boolean;
 };
 
@@ -44,6 +45,8 @@ export function validateAnalyticsRecord(value: unknown): AnalyticsRecord {
     if (!session || !isUuid(session.id) || (session.runId !== null && !validRunId(session.runId)) ||
         !['booking', 'alerts'].includes(session.mode) ||
         !['testMode', 'failed', 'activated', 'closed'].every(key => typeof session[key as keyof AnalyticsSession] === 'boolean'))
+      throw new Error('Invalid analytics session.');
+    if (session.bookingSucceeded !== undefined && typeof session.bookingSucceeded !== 'boolean')
       throw new Error('Invalid analytics session.');
   }
   if (record.queued !== null && (!record.queued || !validRunId(record.queued.runId) ||

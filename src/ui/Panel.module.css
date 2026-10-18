@@ -91,6 +91,8 @@
 .failureIcon { height: 50px; display: flex; align-items: center; justify-content: center; }
 .failure h2 { font-family: 'Arial Narrow', 'Helvetica Neue', sans-serif; letter-spacing: -1.2px; margin: 0; text-transform: none; font-size: 39px; font-weight: 400; max-width: 249px; }
 .failureDetail { color: #5c636e; font-size: 12px; line-height: 18px; margin: -20px 0; }
+.failureActions { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+.failureActions .secondary { height: 24px; padding: 4px 16px; line-height: 16px; border-radius: 6px; }
 .failureFooter { color: #0003; font-size: 12px; }
 .bookedDate { font-size: 39px; font-weight: 400; color: #161616; margin: 0; letter-spacing: -1.5px; }
 .coffeeLink { margin-top: 40px; padding: 3px 16px; line-height: 18px; }

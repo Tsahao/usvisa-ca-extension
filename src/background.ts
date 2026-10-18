@@ -51,6 +51,7 @@ import { HISTORY_ALARM } from './domain/history';
 import { createDateHistory } from './engine/history';
 import { DIAGNOSTICS_ALARM, type DiagnosticCode, type DiagnosticDetail, type DiagnosticEvent } from './domain/diagnostics';
 import { createEngineDiagnostics } from './engine/diagnostics';
+import { problemContext } from './domain/problem-report';
 
 const dateHistory = createDateHistory({
   area: { get: keys => platform.storage.local.get(keys), set: values => platform.storage.local.set(values) },
@@ -332,6 +333,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   if (verifiedSuccess) {
     await platform.storage.local.set({ engineSuccessV1: { runId: state.runId, date: prevIntent!.targetDate } });
     void dateHistory.confirmed(state);
+    analytics?.booked(state);
   }
   if (prevIntent && !prevIntent.testMode && prevQueued && next.intent === null) {
     const now = new Date().toISOString();
@@ -1003,7 +1005,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
   // Developer diagnostics read/export from the trusted bundled report page:
   // pruned, newest-first, allowlisted fields only (never preferences, engine
   // state, credentials, URLs or page content).
-  if (message?.type === 'PROBE_DIAGNOSTICS' || message?.type === 'ENGINE_DIAGNOSTICS') {
+  if (message?.type === 'PROBE_DIAGNOSTICS' || message?.type === 'ENGINE_DIAGNOSTICS' || message?.type === 'ENGINE_PROBLEM_REPORT') {
     if (message.type === 'PROBE_DIAGNOSTICS') {
       if (sender.url !== platform.runtime.getURL('probe.html')) return;
     } else {
@@ -1012,8 +1014,13 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
       // read diagnostics or use this to export any other storage keys.
       if (!isProductPanelSender(sender.url) || new URL(sender.url!).host !== platform.runtime.id) return;
     }
-    void ready.then(() => engineDiagnostics.read())
-      .then(diagnostics => respond({ ok: true, diagnostics }))
+    void ready.then(async () => {
+      const diagnostics = await engineDiagnostics.read();
+      if (message.type !== 'ENGINE_PROBLEM_REPORT') return { ok: true, diagnostics };
+      const state = await loadEngineState({ get: keys => platform.storage.local.get(keys), set: values => platform.storage.local.set(values) });
+      return { ok: true, diagnostics, context: problemContext(state) };
+    })
+      .then(respond)
       .catch(() => respond({ ok: false }));
     return true;
   }
