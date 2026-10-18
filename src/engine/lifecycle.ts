@@ -1,9 +1,14 @@
 import { SESSION_AGE_MINUTES } from '../domain/timing';
 import { parkForReview, type EngineState } from './workflow';
+import { readAutoMode } from '../domain/auto-mode';
 
 export function policyKey(preferences: Record<string, unknown> | undefined): string {
   const keys = ['consulate', 'earliest', 'latest', 'onlyEarlier', 'testMode', 'interval', 'paidIvr', 'unpaidIvr'];
-  return JSON.stringify(keys.map(key => preferences?.[key] ?? null));
+  const autoMode = readAutoMode(preferences);
+  // Preserve the serialized policy's inverse bit for in-flight legacy runs.
+  return JSON.stringify(keys.map(key => key === 'testMode'
+    ? (autoMode === null ? null : !autoMode)
+    : preferences?.[key] ?? null));
 }
 
 export function reviewLifecycle(state: EngineState, preferences: Record<string, unknown> | undefined, now: string): EngineState {

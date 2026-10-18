@@ -170,28 +170,31 @@ describe('Figma interface behavior', () => {
     expect(screen.getByRole('button', { name: 'Start preview' })).toBeDefined();
   });
 
-  it('discards cancelled edits and defaults Test Mode off', async () => {    const user = await preview();
+  it('discards cancelled edits and shows Auto Mode on without expanding Advanced', async () => {    const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     await user.clear(screen.getByRole('textbox', { name: 'Email' }));
-    await user.click(screen.getByRole('button', { name: 'Advanced' }));
-    expect((screen.getByRole('switch', { name: 'Test Mode' }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded')).toBe('false');
+    await user.click(screen.getByRole('switch', { name: 'Auto Mode' }));
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     expect((screen.getByRole('textbox', { name: 'Email' }) as HTMLInputElement).value).toBe('preview@example.invalid');
+    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(true);
   });
 
-  it('reflects a saved Test Mode on position when reopening configuration', async () => {
+  it('reflects saved Auto Mode off and never shows the old amber warning', async () => {
     const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
-    await user.click(screen.getByRole('button', { name: 'Advanced' }));
-    await user.click(screen.getByRole('switch', { name: 'Test Mode' }));
-    expect((screen.getByRole('switch', { name: 'Test Mode' }) as HTMLInputElement).checked).toBe(true);
+    await user.click(screen.getByRole('switch', { name: 'Auto Mode' }));
+    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(false);
     await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.queryByText(/Test Mode/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Alerts' }));
+    expect(screen.queryByText(/Test Mode/)).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
-    await user.click(screen.getByRole('button', { name: 'Advanced' }));
-    expect((screen.getByRole('switch', { name: 'Test Mode' }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(false);
   });
 
   it('keeps Advanced limited to documented settings and resets them', async () => {
@@ -199,11 +202,11 @@ describe('Figma interface behavior', () => {
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     await user.click(screen.getByRole('button', { name: 'Advanced' }));
-    await user.click(screen.getByRole('switch', { name: 'Test Mode' }));
+    await user.click(screen.getByRole('switch', { name: 'Auto Mode' }));
     await user.clear(screen.getByLabelText('Checking interval (s)'));
     await user.type(screen.getByLabelText('Checking interval (s)'), '120');
     await user.click(screen.getByRole('button', { name: 'Reset Advanced' }));
-    expect((screen.getByRole('switch', { name: 'Test Mode' }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(false);
     expect((screen.getByLabelText('Checking interval (s)') as HTMLInputElement).value).toBe('60');
     expect(screen.getByLabelText('Paid IVR Group')).toBeDefined();
     expect(screen.getByLabelText('Unpaid IVR Group')).toBeDefined();
@@ -227,6 +230,7 @@ describe('Figma interface behavior', () => {
     await user.selectOptions(screen.getByLabelText('Preview scenario'), 'running');
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByLabelText('Email').matches(':disabled')).toBe(true);
+    expect(screen.getByRole('switch', { name: 'Auto Mode' }).matches(':disabled')).toBe(true);
     expect(screen.getByRole('note').textContent).toMatch(/stop monitoring to modify settings/i);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     await user.click(screen.getByRole('button', { name: 'Stop preview' }));

@@ -68,7 +68,7 @@ describe('synthetic paid flow with serialized page adapters', () => {
       nowIso: () => NOW, random: () => 0,
       queryTabs: async () => [{ id: 7, url: location.href }], getTab: async () => ({ id: 7, url: location.href }),
       createTab: async () => { throw new Error('Unexpected navigation'); },
-      loadPrefs: async () => ({ consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: true }),
+      loadPrefs: async () => ({ consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, autoMode: true }),
       saveState: async checkpoint => { state = validateEngineState(JSON.parse(JSON.stringify(checkpoint))); },
       inject: async (_tab, func, parameters) => {
         if (func.name === 'performPaidAction') expect(state.executor?.actionPending).toBe(true);
@@ -90,10 +90,10 @@ describe('synthetic paid flow with serialized page adapters', () => {
     expect(cycles).toBeLessThan(12);
     expect(state.status).toBe('verifying');
     expect(state.executor?.applicantIds).toEqual(roster);
-    expect(submit).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledTimes(bare && !changedRoster && !changedDate ? 1 : 0);
     expect(applicantChanged).not.toHaveBeenCalled();
-    // Test Mode never clicks the final submit and never opens a dialog, with
-    // or without a data-confirm gate, so no booking intent is recorded.
+    // Only the bare fixture has a validated final portal form. Auto Mode
+    // submits it once; missing final form metadata still refuses the click.
     expect(document.querySelectorAll('.reveal-overlay [data-reveal]')).toHaveLength(0);
     if (drop || changedRoster || changedDate) {
       expect(state.intent).toBeNull();
@@ -102,8 +102,8 @@ describe('synthetic paid flow with serialized page adapters', () => {
       expect((document.querySelector('select') as HTMLSelectElement).value).toBe('94');
     } else {
       expect(state.stage).toBe('done');
-      expect(state.intent).toBeNull();
-      expect(state.verification).toBeNull();
+      expect(state.intent).toMatchObject({ testMode: false, phase: bare ? 'submitted' : 'prepared' });
+      expect(state.verification?.nextReadAt).toBeDefined();
       expect(state.executor?.targetTime).toBe('09:15');
       if (bare) expect(fetch.mock.calls.filter(([url]) => url.includes('/times/'))).toHaveLength(1);
       else expect(fetch).toHaveBeenCalledTimes(2);

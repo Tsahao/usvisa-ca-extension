@@ -16,7 +16,7 @@ export function problemContext(state: EngineState | null) {
 
 export function buildProblemEmail(args: {
   now: string; version: unknown; userAgent: string; mode: 'booking' | 'alerts';
-  testMode: boolean; status: string; failureKind: unknown; diagnostics?: unknown; context?: unknown;
+  autoMode: boolean; status: string; failureKind: unknown; diagnostics?: unknown; context?: unknown;
 }): string {
   const version = isExtensionVersion(args.version) ? args.version : 'unknown';
   // Never include raw user-agent, error messages, or worker replies.
@@ -39,7 +39,7 @@ export function buildProblemEmail(args: {
     'Optionally, you can add anything you think is helpful to pinpoint the issue.', '', '',
     '--- Technical details ---', `Report generated: ${args.now}`, `Extension version: ${version}`,
     `Browser version: ${browser}`, `Workflow mode: ${args.mode === 'booking' ? 'Book' : 'Alerts'}`,
-    `Test Mode: ${args.testMode ? 'On' : 'Off'}`, `Workflow status: ${status}`,
+    `Auto Mode: ${args.autoMode ? 'On' : 'Off'}`, `Workflow status: ${status}`,
     `Workflow stage: ${stage}`, `Failure reason: ${failure}`, '', '--- Recent diagnostics ---',
   ].join('\n') + '\n';
   const prefix = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(`[Visa Extension] Problem report — v${version}`)}&body=`;

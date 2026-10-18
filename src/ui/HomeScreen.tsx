@@ -2,7 +2,7 @@ import type { MouseEvent } from 'react';
 import type { Mode } from './model';
 import styles from './HomeScreen.module.css';
 
-export function HomeScreen({ choose, openTerms, testMode }: { choose: (mode: Mode) => void; openTerms: () => void; testMode?: boolean }) {
+export function HomeScreen({ choose, openTerms }: { choose: (mode: Mode) => void; openTerms: () => void }) {
   const terms = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     openTerms();
@@ -36,7 +36,7 @@ export function HomeScreen({ choose, openTerms, testMode }: { choose: (mode: Mod
           <span className={styles.text}><strong>Get date alerts</strong><small>For Unpaid Visa Group</small></span>
         </button>
       </div>
-      <a href="#terms" className={styles.termsLink} style={testMode ? { bottom: 40 } : undefined} onClick={terms}>Terms & Conditions</a>
+      <a href="#terms" className={styles.termsLink} onClick={terms}>Terms & Conditions</a>
     </div>
   );
 }

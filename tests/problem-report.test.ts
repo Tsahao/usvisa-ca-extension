@@ -4,7 +4,7 @@ import { emptyEngineState } from '../src/engine/workflow';
 
 const now = '2026-10-17T12:00:00.000Z';
 const args = { now, version: '0.2.2', userAgent: 'Private device Chrome/140.0.0.0', mode: 'booking' as const,
-  testMode: false, status: 'failure', failureKind: 'generic' };
+  autoMode: true, status: 'failure', failureKind: 'generic' };
 const body = (url: string) => new URL(url).searchParams.get('body')!;
 
 describe('problem email draft', () => {
@@ -13,7 +13,7 @@ describe('problem email draft', () => {
       diagnostics: { version: 1, entries: [{ at: now, code: 'auth-terminal', reason: 'credential-rejected', count: 2 }] } });
     expect(url).toMatch(/^mailto:browser\.latte\.1k@icloud\.com\?/);
     expect(new URL(url).searchParams.get('subject')).toBe('[Visa Extension] Problem report — v0.2.2');
-    expect(body(url)).toBe(`Optionally, you can add anything you think is helpful to pinpoint the issue.\n\n\n--- Technical details ---\nReport generated: ${now}\nExtension version: 0.2.2\nBrowser version: Chrome/140.0.0.0\nWorkflow mode: Book\nTest Mode: Off\nWorkflow status: stopped\nWorkflow stage: form\nFailure reason: generic\n\n--- Recent diagnostics ---\n${now} auth-terminal reason=credential-rejected count=2`);
+    expect(body(url)).toBe(`Optionally, you can add anything you think is helpful to pinpoint the issue.\n\n\n--- Technical details ---\nReport generated: ${now}\nExtension version: 0.2.2\nBrowser version: Chrome/140.0.0.0\nWorkflow mode: Book\nAuto Mode: On\nWorkflow status: stopped\nWorkflow stage: form\nFailure reason: generic\n\n--- Recent diagnostics ---\n${now} auth-terminal reason=credential-rejected count=2`);
   });
   it('exports only allowlisted fields, never arbitrary replies, UA, or workflow data', () => {
     const privateText = 'private@example.invalid';
@@ -35,8 +35,8 @@ describe('problem email draft', () => {
     expect(body(url)).toContain('Older entries omitted');
   });
   it.each([undefined, { version: 1, entries: [{ at: now, code: 'private error text' }] }])('handles unavailable/corrupt diagnostics', diagnostics => {
-    expect(body(buildProblemEmail({ ...args, mode: 'alerts', testMode: true, diagnostics }))).toContain('Diagnostics unavailable.');
-    expect(body(buildProblemEmail({ ...args, mode: 'alerts', testMode: true, diagnostics }))).toContain('Workflow mode: Alerts\nTest Mode: On');
+    expect(body(buildProblemEmail({ ...args, mode: 'alerts', autoMode: false, diagnostics }))).toContain('Diagnostics unavailable.');
+    expect(body(buildProblemEmail({ ...args, mode: 'alerts', autoMode: false, diagnostics }))).toContain('Workflow mode: Alerts\nAuto Mode: Off');
   });
   it('prunes stale diagnostics', () => {
     expect(body(buildProblemEmail({ ...args, diagnostics: { version: 1,

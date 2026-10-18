@@ -1,4 +1,5 @@
 import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
+import { readAutoMode } from '../domain/auto-mode';
 
 export const TERMS_VERSION = 'ui-preview-1';
 export const CITIES = Object.keys(CONSULATES) as Consulate[];
@@ -6,14 +7,14 @@ export type Mode = 'booking' | 'alerts';
 export type RunStatus = 'idle' | 'running' | 'success' | 'failure';
 export type Preferences = {
   email: string; password: string; consulate: Consulate | ''; earliest: string; latest: string;
-  testMode: boolean; onlyEarlier: boolean; interval: number;
+  autoMode: boolean; onlyEarlier: boolean; interval: number;
   paidIvr: string; unpaidIvr: string;
 };
 export type Run = { mode: Mode; status: RunStatus; lastChecked: string | null };
 export const DEFAULT_ADVANCED = {
-  testMode: false, onlyEarlier: true, interval: 60, paidIvr: '', unpaidIvr: '',
+  onlyEarlier: true, interval: 60, paidIvr: '', unpaidIvr: '',
 };
-export const EMPTY_PREFERENCES: Preferences = { email: '', password: '', consulate: '', earliest: '', latest: '', ...DEFAULT_ADVANCED };
+export const EMPTY_PREFERENCES: Preferences = { email: '', password: '', consulate: '', earliest: '', latest: '', autoMode: true, ...DEFAULT_ADVANCED };
 export const DEMO_PREFERENCES: Preferences = {
   ...EMPTY_PREFERENCES, email: 'preview@example.invalid', password: 'synthetic-preview-password',
   consulate: 'Vancouver', earliest: '2026-11-01', latest: '2027-12-31',
@@ -30,6 +31,7 @@ export type PreferenceIssue = { fields: (keyof Preferences)[]; message: string }
 
 export function preferenceIssues(prefs: Preferences): PreferenceIssue[] {
   const issues: PreferenceIssue[] = [];
+  if (readAutoMode(prefs) === null) issues.push({ fields: ['autoMode'], message: 'Choose whether to book appointments automatically.' });
   // No email-format gate by user decision: owners enter their own account
   // email, and a wrong address fails at sign-in instead of blocking setup.
   if (!prefs.password) issues.push({ fields: ['password'], message: 'Enter your visa account password.' });

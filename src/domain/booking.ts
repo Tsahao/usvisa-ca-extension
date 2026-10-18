@@ -17,7 +17,7 @@ export type BookingExpectation = {
   consulate: Consulate;
   currentDate: string | null;
   prefs: DatePreferences;
-  testMode: boolean;
+  testMode: boolean; // Legacy inverse bit: true means Auto Mode OFF.
 };
 
 export type GuardDenial =
@@ -33,8 +33,8 @@ function isDigitId(value: unknown): value is string {
 }
 
 // Pre-submit guard. Denials use fixed tokens so group identifiers, applicant
-// lists, and dates never leak into diagnostics. Test Mode denies even a
-// fully eligible form: a dry run never reaches final confirmation.
+// lists, and dates never leak into diagnostics. The legacy inverse mode bit
+// denies even a fully eligible form when Auto Mode is OFF.
 export function guardBooking(
   form: BookingForm,
   expected: BookingExpectation,

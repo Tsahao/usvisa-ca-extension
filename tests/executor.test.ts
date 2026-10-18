@@ -11,7 +11,7 @@ const OWNER = 'owner-token-01';
 const RUN = 'run-id-0001';
 const BASE = 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111';
 const IDS = ['77777777', '88888888'];
-const PREFS = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: true };
+const PREFS = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, autoMode: true };
 function seeded(stage: BookingStage): EngineState {
   const bound = bindGroup(startRun(emptyEngineState(NOW), { mode: 'booking', owner: OWNER, runId: RUN, now: NOW }), {
     owner: OWNER, runId: RUN, binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: '2027-01-01', applicantIds: IDS }, now: NOW,
@@ -268,11 +268,17 @@ describe('paid executor', () => {
     expect((await runBookingStage(h.d, next)).status).toBe('verifying');
     expect(h.d.createTab).toHaveBeenCalledTimes(1);
   });
-  it.each([false, undefined])('prepares gateways in both modes; a missing toggle defaults to Test Mode (%s)', async testMode => {
+  it.each([false, true])('prepares the monitoring gateway with Auto Mode %s', async autoMode => {
     const h = harness('actions');
-    h.d.loadPrefs = async () => ({ ...PREFS, testMode });
-    expect((await runBookingStage(h.d, seeded('actions'))).status).toBe('running');
+    h.d.loadPrefs = async () => ({ ...PREFS, autoMode });
+    expect((await runBookingStage(h.d, { ...seeded('actions'), lastCandidate: null })).status).toBe('running');
     expect(h.mutations.map(value => value.action)).toEqual(['reschedule']);
+  });
+  it('fails closed when the booking permission is missing', async () => {
+    const h = harness('actions');
+    h.d.loadPrefs = async () => ({ ...PREFS, autoMode: undefined });
+    expect((await runBookingStage(h.d, seeded('actions'))).status).toBe('verifying');
+    expect(h.d.inject).not.toHaveBeenCalled();
   });
   it('does no paid work for an unpaid run', async () => {
     const h = harness('actions');
@@ -319,13 +325,15 @@ describe('paid executor', () => {
     expect(h.mutations[0].action).toBe(action);
     if (action === 'time') expect(next.executor?.targetTime).toBe('09:15');
   });
-  it('rereads the populated form, passes policy, then parks at the Test Mode dry-run boundary without clicking submit', async () => {
+  it('keeps monitoring with Auto Mode OFF without reading or filling a matched form', async () => {
     const h = harness('form');
+    h.d.loadPrefs = async () => ({ ...PREFS, autoMode: false });
     const next = await runBookingStage(h.d, seeded('form'));
-    expect(next).toMatchObject({ stage: 'done', status: 'verifying', intent: null, verification: null });
+    expect(next).toMatchObject({ stage: null, status: 'running', intent: null, verification: null });
+    expect(next.nextPollAt).toBe('2026-10-12T00:01:00.000Z');
     expect(h.mutations).toEqual([]);
-    expect(vi.mocked(h.d.inject).mock.calls.filter(call => call[1].name === 'readPaidPage')).toHaveLength(2);
-    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+    expect(h.d.inject).not.toHaveBeenCalled();
+    expect(h.checkpoints).toEqual([]);
   });
   it('rejects actual form changes on the last reread', async () => {
     const h = harness('form');
@@ -359,7 +367,7 @@ describe('paid executor', () => {
     const h = harness('form');
     h.page.time = '';
     let calls = 0;
-    h.d.loadPrefs = async () => ({ ...PREFS, testMode: ++calls === 1 });
+    h.d.loadPrefs = async () => ({ ...PREFS, autoMode: ++calls === 1 });
     expect((await runBookingStage(h.d, seeded('form'))).status).toBe('verifying');
     expect(h.mutations).toEqual([]);
   });

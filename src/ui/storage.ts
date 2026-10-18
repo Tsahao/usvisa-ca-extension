@@ -1,5 +1,6 @@
 import { platform } from '../platform';
 import { EMPTY_PREFERENCES, EMPTY_RUN, type Mode, type Preferences, type Run } from './model';
+import { readAutoMode } from '../domain/auto-mode';
 
 const KEY = 'uiPreferencesV1';
 const TERMS_KEY = 'uiTermsVersion';
@@ -13,10 +14,11 @@ export async function loadUiState(includeSimulatedRun = true): Promise<{ prefere
   if (!isExtension) return { preferences: structuredClone(EMPTY_PREFERENCES), terms: '', run: { ...EMPTY_RUN }, lastMode: null };
   await platform.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
   const [local, session] = await Promise.all([platform.storage.local.get([KEY, TERMS_KEY, LAST_MODE_KEY]), platform.storage.session.get(RUN_KEY)]);
-  const saved = local[KEY] as Preferences | undefined;
+  const raw = local[KEY];
+  const saved = raw && typeof raw === 'object' ? { ...raw, autoMode: readAutoMode(raw) } as Preferences : undefined;
   const terms = local[TERMS_KEY];
   const run = includeSimulatedRun ? session[RUN_KEY] as Run | undefined : undefined;
-  if (saved && (typeof saved !== 'object' || Object.keys(EMPTY_PREFERENCES).some(key => typeof saved[key as keyof Preferences] !== typeof EMPTY_PREFERENCES[key as keyof Preferences]))) throw new Error('Invalid saved preferences.');
+  if (raw !== undefined && (!saved || typeof saved !== 'object' || Object.keys(EMPTY_PREFERENCES).some(key => typeof saved[key as keyof Preferences] !== typeof EMPTY_PREFERENCES[key as keyof Preferences]))) throw new Error('Invalid saved preferences.');
   if (run && (typeof run !== 'object' || !['booking', 'alerts'].includes(run.mode) || !['idle', 'running', 'success', 'failure', 'recovering', 'cooldown', 'expired', 'review'].includes(run.status) || (run.lastChecked !== null && typeof run.lastChecked !== 'string'))) throw new Error('Invalid preview state.');
   const preferences = saved ? Object.fromEntries(Object.keys(EMPTY_PREFERENCES).map(key => [key, saved[key as keyof Preferences]])) as Preferences : structuredClone(EMPTY_PREFERENCES);
   const restoredRun: Run = run ? { mode: run.mode, status: ['idle', 'running', 'success', 'failure'].includes(run.status) ? run.status : 'idle', lastChecked: run.lastChecked } : { ...EMPTY_RUN };

@@ -32,7 +32,7 @@ test('packaged worker refreshes stale calendar state in MAIN before choosing a t
           <select id="appointments_consulate_appointment_facility_id"><option value="95">Vancouver</option></select>
           <input id="appointments_consulate_appointment_date" value="2026-11-19" readonly>
           <select id="appointments_consulate_appointment_time"><option value=""></option><option value="10:45">10:45</option></select>
-          <input id="appointments_submit" type="submit" value="Reschedule">
+          <input id="appointments_submit" type="submit" value="Reschedule" data-confirm="malformed-fixture-gate">
           <span id="non-consulate-business-time-message" hidden>Non-business time</span></form>` });
       } else await route.abort();
     });
@@ -44,7 +44,9 @@ test('packaged worker refreshes stale calendar state in MAIN before choosing a t
     await host.selectOption('#appointments_consulate_appointment_time', '10:45');
     await expect(host.locator('#non-consulate-business-time-message')).toBeVisible();
     const tabId = await panel.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)!.id!, host.url());
-    const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '' };
+    // Candidate preparation belongs to Auto Mode ON. The intentionally
+    // malformed final gate keeps this calendar-only fixture from submitting.
+    const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, autoMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '' };
     // Let the configuration-change handler finish before installing a run;
     // changing preferences on an active run correctly parks it for review.
     await panel.evaluate(async prefs => {
@@ -69,7 +71,7 @@ test('packaged worker refreshes stale calendar state in MAIN before choosing a t
     expect(timesReads).toBe(0);
     await expect(host.locator('#appointments_consulate_appointment_date')).not.toHaveAttribute('data-usvisa-calendar-slot');
     await expect.poll(async () => (await read()).status, { timeout: 15_000 }).toBe('verifying');
-    expect(await read()).toMatchObject({ intent: null, stage: 'done', executor: { actionPending: false, targetTime: '10:45' } });
+    expect(await read()).toMatchObject({ intent: { phase: 'prepared', testMode: false }, stage: 'done', executor: { actionPending: true, targetTime: '10:45' } });
     await expect(host.locator('#appointments_consulate_appointment_date')).toHaveAttribute('data-usvisa-calendar-slot', '95|2026-11-19');
     await expect(host.locator('#appointments_consulate_appointment_time')).toHaveValue('10:45');
     await expect(host.locator('#non-consulate-business-time-message')).toBeHidden();

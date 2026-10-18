@@ -5,8 +5,8 @@ import type { Mode } from './model';
 import type { PanelFailureKind } from '../engine/panel-errors';
 import styles from './Panel.module.css';
 
-export function ReportProblem({ live, mode, status, testMode, failureKind }: {
-  live: boolean; mode: Mode; status: string; testMode: boolean; failureKind: PanelFailureKind;
+export function ReportProblem({ live, mode, status, autoMode, failureKind }: {
+  live: boolean; mode: Mode; status: string; autoMode: boolean; failureKind: PanelFailureKind;
 }) {
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState('');
@@ -28,7 +28,7 @@ export function ReportProblem({ live, mode, status, testMode, failureKind }: {
       let version: unknown;
       try { if (live) version = platform.runtime.getManifest().version; } catch { /* Unknown version. */ }
       const url = buildProblemEmail({ now: new Date().toISOString(), version, userAgent: navigator.userAgent,
-        mode, status, testMode, failureKind, diagnostics: response?.ok ? response.diagnostics : undefined,
+        mode, status, autoMode, failureKind, diagnostics: response?.ok ? response.diagnostics : undefined,
         context: response?.ok ? response.context : undefined });
       if (live) await platform.tabs.create({ url });
       else window.location.assign(url);
