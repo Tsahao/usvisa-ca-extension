@@ -38,15 +38,15 @@ describe('independent dashboard applicant roster', () => {
     const readGroups: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
     const snapshot = readGroups();
     expect(snapshot.groups).toEqual([
-      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
-      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
-      { scheduleId: '55555555', ivr: '66666666', paymentStatus: 'unknown' },
-      { scheduleId: '99999999', ivr: '87654321', paymentStatus: 'unknown' },
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid', continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentConflict: false },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid', continuePath: '/en-ca/niv/schedule/33333333/continue_actions', paymentConflict: false },
+      { scheduleId: '55555555', ivr: '66666666', paymentStatus: 'unknown', continuePath: '/en-ca/niv/schedule/55555555/continue_actions', paymentConflict: false },
+      { scheduleId: '99999999', ivr: '87654321', paymentStatus: 'unknown', continuePath: null, paymentConflict: false },
     ]);
     expect(resolveGroup(snapshot, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
-      .toEqual({ scheduleId: '11111111', ivr: '22222222' });
+      .toEqual({ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid', inspectionRequired: false });
     expect(resolveGroup(snapshot, { mode: 'alerts', paidIvr: '', unpaidIvr: '' }))
-      .toEqual({ scheduleId: '33333333', ivr: '44444444' });
+      .toEqual({ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid', inspectionRequired: false });
     expect(await serialized('11111111', '22222222', false, true))
       .toMatchObject({ kind: 'booked', text: 'January 1, 2027 view map', applicantIds: ids });
   });
@@ -65,8 +65,8 @@ describe('independent dashboard applicant roster', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, text: async () => html })));
     const readGroups: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
     expect(readGroups()).toEqual({ groups: [
-      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
-      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid', continuePath: null, paymentConflict: false },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid', continuePath: '/en-ca/niv/schedule/33333333/continue_actions', paymentConflict: false },
     ] });
     expect(await serialized('11111111', '22222222', fresh, true, '/en-ca/niv/groups/55555555'))
       .toEqual({ scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027 view map', applicantIds: ids });
@@ -76,7 +76,7 @@ describe('independent dashboard applicant roster', () => {
     const reading = await serialized('11111111', '22222222', false, true);
     expect(reading).toMatchObject({ applicantIds: ids, kind: booked ? 'booked' : 'unbooked' });
     expect(reading.text === null).toBe(!booked);
-    expect(readDashboardGroups()).toEqual({ groups: [{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown' }] });
+    expect(readDashboardGroups()).toEqual({ groups: [{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown', continuePath: null, paymentConflict: false }] });
   });
   it('recognizes the selected card itself as explicitly unscheduled beside a historical appointment', async () => {
     vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
@@ -94,8 +94,8 @@ describe('independent dashboard applicant roster', () => {
       </div></div></div>`;
     expect(await serialized('11111111', '22222222', false, true)).toEqual({ scheduleId: '11111111', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: [ids[0]] });
     expect(readDashboardGroups()).toEqual({ groups: [
-      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
-      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'paid' },
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid', continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentConflict: false },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'paid', continuePath: '/en-ca/niv/schedule/33333333/continue_actions', paymentConflict: false },
     ] });
     document.querySelector('.ready_to_schedule')!.classList.remove('ready_to_schedule');
     document.querySelector('.secondary')!.classList.add('ready_to_schedule');

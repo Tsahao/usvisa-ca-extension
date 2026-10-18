@@ -97,8 +97,8 @@ describe('persisted worker failure screens', () => {
     expect(report.className).toContain(configure.className);
     expect(screen.getByRole('button', { name: 'Retry' })).not.toBeNull();
     expect(screen.getByText('Tap to retry')).not.toBeNull();
-    if (kind === 'generic') expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();
-    // The safe detail belongs inside the result, without a duplicate banner.
+    for (const detail of [GENERIC_SAFE, PAID_SAFE, UNPAID_SAFE]) expect(screen.queryByText(detail)).toBeNull();
+    // Failure categories never expose technical details or duplicate banners.
     expect(screen.queryByRole('alert')).toBeNull();
     // Check configurations opens Settings without starting work.
     await user.click(screen.getByRole('button', { name: 'Check configurations' }));
@@ -269,9 +269,10 @@ describe('Start-command failure screens', () => {
     render(<App />);
     await user.click(await screen.findByRole('button', { name: 'Start' }));
     expect(await screen.findByRole('heading', { name: 'That didn’t work' })).not.toBeNull();
-    expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();
+    expect(screen.queryByText(GENERIC_SAFE)).toBeNull();
     await refreshWorker(idleSnapshot('booking'));
-    expect(screen.getByText(GENERIC_SAFE)).not.toBeNull();
+    expect(screen.queryByText(GENERIC_SAFE)).toBeNull();
+    expect(screen.getByRole('heading', { name: 'That didn’t work' })).not.toBeNull();
     expect(screen.getByRole('button', { name: 'Retry' })).not.toBeNull();
     snapshot = { ...idleSnapshot('booking'), status: 'running' };
     await refreshWorker(snapshot);
@@ -335,7 +336,7 @@ describe('Start-command failure screens', () => {
     expect(screen.queryByRole('heading', { name: 'Couldn’t find paid group' })).toBeNull();
   });
 
-  it('keeps maintenance as a banner-only running panel', async () => {
+  it('does not display obsolete maintenance instructions from a failed command', async () => {
     stubEngine({
       snapshot: idleSnapshot('booking'),
       onMessage: message => message.type === 'PANEL_START'
@@ -346,10 +347,18 @@ describe('Start-command failure screens', () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole('button', { name: 'Start' }));
-    expect(await screen.findByRole('alert')).not.toBeNull();
-    expect(screen.getByRole('alert').textContent).toContain('under maintenance');
+    expect(await screen.findByRole('heading', { name: 'That didn’t work' })).not.toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(MAINTENANCE_SAFE)).toBeNull();
+  });
+
+  it('keeps automatic maintenance retries running without a banner or failure screen', async () => {
+    stubEngine({ snapshot: { ...idleSnapshot('booking'), status: 'running' } });
+    const { App } = await import('../src/ui/App');
+    render(<App />);
+    await screen.findByRole('button', { name: 'Stop' });
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'That didn’t work' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Start' })).not.toBeNull();
   });
 });
 
@@ -386,7 +395,8 @@ describe('manual and verification recovery preserved', () => {
     const { App } = await import('../src/ui/App');
     const user = userEvent.setup(); render(<App />);
     await screen.findByRole('heading', { name: 'That didn’t work' });
-    expect(screen.getByRole('alert').textContent).toContain(recovery);
+    expect(screen.getByRole('alert').textContent).toBe(recovery);
+    expect(screen.queryByText(GENERIC_SAFE, { exact: false })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     expect(sendMessage).toHaveBeenCalledWith({ type: 'PANEL_START', mode: 'booking' });
   });

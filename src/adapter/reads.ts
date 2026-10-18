@@ -10,6 +10,13 @@ export type DashboardGroup = {
   scheduleId: string;
   ivr: string | null;
   paymentStatus: DashboardPaymentStatus;
+  // Exact same-card trusted Continue path
+  // (`/en-ca/niv/schedule/<id>/continue_actions`) when the card exposes one;
+  // null otherwise. Never a parsed or derived href.
+  continuePath: string | null;
+  // Contradictory paid/unpaid markers on the same card: the card stays
+  // unclassified and is never selectable.
+  paymentConflict: boolean;
 };
 
 export function readDashboardGroups(): { groups: DashboardGroup[] } {
@@ -100,6 +107,9 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
         ivr = identifiers[0] ?? null;
       }
     }
+    // Contradictory paid/unpaid markers (including two different status
+    // labels) classify as conflicting, never as a selectable unknown.
+    let paymentConflict = false;
     const paymentStatus: DashboardPaymentStatus = (() => {
       // Dependency-free inline payment classification: this function is
       // serialized into the page, so no outside helpers or closures.
@@ -114,7 +124,7 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
         clone.querySelectorAll('small').forEach(node => node.remove());
         return ((clone.textContent ?? '').trim().replace(/\s+/g, ' '));
       }))];
-      if (normalized.length > 1) return 'unknown' as const;
+      if (normalized.length > 1) { paymentConflict = true; return 'unknown' as const; }
       const payFee = (normalized[0] ?? '') === 'Pay Visa Fee';
       const needsPayment = outer.classList.contains('needs_payment');
       // A booked summary may sit inside a nested .card. Recognize its outer
@@ -130,14 +140,24 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
       // Consistency: contradictory markers stay unknown even when the status
       // is missing or malformed, and a bare Pay Visa Fee status against paid
       // markers is contradictory even without the needs_payment class.
-      if (needsPayment && paidMarker) return 'unknown' as const;
-      if (payFee && paidMarker) return 'unknown' as const;
+      if (needsPayment && paidMarker) { paymentConflict = true; return 'unknown' as const; }
+      if (payFee && paidMarker) { paymentConflict = true; return 'unknown' as const; }
       const unpaidEvidence = needsPayment && payFee;
-      if (unpaidEvidence && paidMarker) return 'unknown' as const;
+      if (unpaidEvidence && paidMarker) { paymentConflict = true; return 'unknown' as const; }
       if (unpaidEvidence) return 'unpaid' as const;
       if (paidMarker) return 'paid' as const;
       return 'unknown' as const;
     })();
+    // The card's own trusted Continue entry, exact fixed literal only. A
+    // continue-shaped href for another schedule, another origin, or with a
+    // query/fragment is never entry evidence.
+    let continuePath: string | null = null;
+    if (outer && !paymentConflict) {
+      const expectedContinue = `/en-ca/niv/schedule/${digits}/continue_actions`;
+      const trustedContinue = Array.from(outer.querySelectorAll('a[href]')).some(element =>
+        trustedPath(element.getAttribute('href')) === expectedContinue && inScope(outer, element));
+      continuePath = trustedContinue ? expectedContinue : null;
+    }
     const owner: Element | null = outer ?? (link as Element).closest('section') ?? (link as Element).parentElement;
     const existingIndex = groups.findIndex(group => group.scheduleId === digits);
     if (existingIndex >= 0) {
@@ -145,13 +165,14 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
       // distinct card rejects even with identical IVR/status.
       if (owners[existingIndex] !== owner) throw new Error('Ambiguous dashboard group.');
       const existing = groups[existingIndex];
-      if (existing.ivr !== ivr) throw new Error('Ambiguous dashboard group.');
+      if (existing.ivr !== ivr || existing.continuePath !== continuePath) throw new Error('Ambiguous dashboard group.');
       // Contradictory paid/unpaid evidence across links degrades to unknown;
       // conflicting identities already reject above.
-      if (existing.paymentStatus !== paymentStatus) existing.paymentStatus = 'unknown';
+      if (existing.paymentStatus !== paymentStatus) { existing.paymentStatus = 'unknown'; existing.paymentConflict = true; }
+      existing.paymentConflict ||= paymentConflict;
       continue;
     }
-    groups.push({ scheduleId: digits, ivr, paymentStatus });
+    groups.push({ scheduleId: digits, ivr, paymentStatus, continuePath, paymentConflict });
     owners.push(owner);
     if (outer && !boundOuters.includes(outer)) boundOuters.push(outer);
   }
@@ -160,7 +181,7 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
   // or appending an unreadable first card would select the wrong default.
   const entries = groups.map((group, index) => ({ group, owner: owners[index] }));
   for (const candidate of Array.from(document.querySelectorAll('.application.card'))) {
-    if (!boundOuters.includes(candidate)) entries.push({ group: { scheduleId: '', ivr: null, paymentStatus: 'unknown' }, owner: candidate });
+    if (!boundOuters.includes(candidate)) entries.push({ group: { scheduleId: '', ivr: null, paymentStatus: 'unknown', continuePath: null, paymentConflict: false }, owner: candidate });
   }
   entries.sort((a, b) => {
     if (!a.owner || !b.owner || a.owner === b.owner) return 0;
@@ -253,12 +274,14 @@ export function readAppointmentForm(): AppointmentFormRaw {  const path = locati
 
 // Selected-group dashboard baseline and optional independent Details roster.
 // Missing prose is uncertain; only an explicit unbooked marker yields null.
+// The IVR echo is nullable: a null request (unreadable card) matches by
+// schedule alone and never fabricates an identity.
 export type CurrentAppointmentRaw =
-  | { scheduleId: string; ivr: string; kind: 'booked' | 'unbooked'; text: string | null; applicantIds?: string[] }
-  | { scheduleId: string; ivr: string; kind: 'read-failure'; text: null; status: number; redirected?: boolean; applicantIds?: never };
+  | { scheduleId: string; ivr: string | null; kind: 'booked' | 'unbooked'; text: string | null; applicantIds?: string[] }
+  | { scheduleId: string; ivr: string | null; kind: 'read-failure'; text: null; status: number; redirected?: boolean; applicantIds?: never };
 
-export async function readCurrentAppointment(scheduleId: string, ivr: string, fresh = false, includeApplicants = false, dashboardPath?: string, reportReadFailure = false): Promise<CurrentAppointmentRaw> {
-  if (!/^[0-9]{1,32}$/.test(scheduleId) || !/^[0-9]{1,32}$/.test(ivr)) throw new Error('Invalid appointment identity.');
+export async function readCurrentAppointment(scheduleId: string, ivr: string | null, fresh = false, includeApplicants = false, dashboardPath?: string, reportReadFailure = false): Promise<CurrentAppointmentRaw> {
+  if (!/^[0-9]{1,32}$/.test(scheduleId) || (ivr !== null && !/^[0-9]{1,32}$/.test(ivr))) throw new Error('Invalid appointment identity.');
   if (dashboardPath !== undefined && !/^\/en-ca\/niv\/groups(?:\/[0-9]{1,32})?$/.test(dashboardPath)) throw new Error('Invalid dashboard path.');
   const trusted = (value: string) => {
     const url = new URL(value);
@@ -342,7 +365,10 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string, fr
       const groups = new Set(Array.from(scope.querySelectorAll('a[href]')).map(identity).filter(value => value !== null));
       const identifiers = new Set(Array.from(scope.querySelectorAll('strong')).map(element => (element.textContent ?? '').trim()).filter(value => /^[0-9]{5,32}$/.test(value)));
       if (groups.size > 1 || identifiers.size > 1) break;
-      if (groups.size === 1 && groups.has(scheduleId) && identifiers.has(ivr)) matchedScope = scope;
+      // A null-IVR request matches the unique schedule scope; the card
+      // boundary still applies, and any readable identifier in scope is
+      // never borrowed as identity for a readable request.
+      if (groups.size === 1 && groups.has(scheduleId) && (ivr === null || identifiers.has(ivr))) matchedScope = scope;
       if (card) break;
     }
     if (matchedScope) scopes.add(matchedScope);

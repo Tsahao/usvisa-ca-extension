@@ -1881,6 +1881,193 @@ describe('durable automatic authentication', () => {
     const changed = await deferToRetry(h => { h.deps.loadPrefs = async () => ({ ...prefs, interval: 600 }); });
     expect(changed).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true, authenticationFailureReason: 'configuration-changed' });
   });
+  it('binds a blank-preference Start on an unreadable-IVR card through its trusted Continue link without fabricating an IVR', async () => {
+    const h = harness();
+    const settings = { ...prefs, paidIvr: '', unpaidIvr: '', interval: 60 };
+    h.deps.loadPrefs = async () => settings;
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: null, continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'paid' },
+      ] };
+      return inject(tab, func, params);
+    });
+    const initial = beginAuthentication({ ...seed(), mode: 'booking', policyKey: policyKey(settings) }, 'start', NOW);
+    const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
+    expect(state).toMatchObject({ status: 'running', authentication: null, loginFailed: false, authenticationError: null,
+      stage: 'actions', executor: { tabId: 7, applicantIds: ids },
+      group: { scheduleId: '11111111', ivr: null, kind: 'paid', currentDate: '2027-01-01', applicantIds: ids } });
+    // The fallback binds the stable schedule with a null IVR; it never invents
+    // an IVR value, and the null survives the durable save round trip.
+    expect(state.group!.ivr).toBeNull();
+    expect(validateEngineState(JSON.parse(JSON.stringify(state))).group!.ivr).toBeNull();
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'ivr-unreadable-proceeded', purpose: 'start', mode: 'booking' }));
+    expect(h.diagnostics.map(event => event.code)).not.toContain('payment-unknown-proceeded');
+    expect(h.actions).toEqual([]);
+  });
+  it('binds a blank-preference Start on an unknown-payment card as a pending inspection', async () => {
+    const h = harness();
+    const settings = { ...prefs, paidIvr: '', unpaidIvr: '', interval: 60 };
+    h.deps.loadPrefs = async () => settings;
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: '22222222', continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'unknown' },
+      ] };
+      return inject(tab, func, params);
+    });
+    const initial = beginAuthentication({ ...seed(), mode: 'booking', policyKey: policyKey(settings) }, 'start', NOW);
+    const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
+    expect(state).toMatchObject({ status: 'running', authentication: null, loginFailed: false, authenticationError: null,
+      group: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', pendingInspection: true } });
+    // Unknown payment classification proceeds provisionally with the durable
+    // inspection flag; it is never silently treated as eligible-or-not.
+    expect(validateEngineState(JSON.parse(JSON.stringify(state))).group!.pendingInspection).toBe(true);
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'payment-unknown-proceeded', purpose: 'start', mode: 'booking' }));
+    expect(h.diagnostics.map(event => event.code)).not.toContain('ivr-unreadable-proceeded');
+    expect(h.actions).toEqual([]);
+  });
+  it.each(['booking', 'alerts'] as const)('renews a null-IVR fallback binding from blank settings while recording the degraded read (%s)', async mode => {
+    const h = harness();
+    const settings = { ...prefs, paidIvr: '', unpaidIvr: '', interval: 60 };
+    h.deps.loadPrefs = async () => settings;
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: null, continuePath: '/en-ca/niv/schedule/11111111/continue_actions',
+          paymentStatus: mode === 'booking' ? 'paid' : 'unpaid' },
+      ] };
+      if (func.name === 'readCurrentAppointment') return { scheduleId: '11111111', ivr: null, kind: 'booked', text: 'January 1, 2027', applicantIds: ids };
+      return inject(tab, func, params);
+    });
+    const boundState = bindGroup({ ...seed(), mode, policyKey: policyKey(settings) }, { ...args, binding: {
+      scheduleId: '11111111', ivr: null, kind: mode === 'booking' ? 'paid' : 'unpaid',
+      currentDate: mode === 'booking' ? '2027-01-01' : null,
+      ...(mode === 'booking' ? { applicantIds: ids } : {}) } });
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    let state = beginAuthentication(boundState, 'renew', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', authentication: null, loginFailed: false, authenticationError: null,
+      authenticationFailureReason: null, group: { scheduleId: '11111111', ivr: null } });
+    expect(state.group!.ivr).toBeNull();
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'ivr-unreadable-proceeded', purpose: 'renew', mode }));
+    expect(h.diagnostics.map(event => event.code)).not.toContain('auth-terminal');
+    expect(h.actions).toEqual([]);
+    if (mode === 'alerts') expect(state.executor).toBeNull();
+  });
+  it('refuses a null-IVR-only dashboard when an explicit paid IVR is configured instead of silently binding', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: null, continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'paid' },
+      ] };
+      return inject(tab, func, params);
+    });
+    const initial = beginAuthentication(seed(), 'start', NOW);
+    const state = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
+    expect(state).toMatchObject({ status: 'stopped', loginFailed: false, authentication: null, nextPollAt: null,
+      authenticationFailureReason: 'paid-group-unavailable' });
+    expect(state.group).toBeNull();
+    expect(state.authenticationError).toBe('The extension could not match the selected IVR to a dashboard group. Check the IVR in Settings; if it matches, report this message.');
+    expect(panelSnapshot(state, null, null)).toMatchObject({ status: 'failure', reviewRequired: true, failureKind: 'generic' });
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'auth-terminal', reason: 'paid-group-unavailable', detail: 'paid-group-unavailable' }));
+    expect(h.diagnostics.map(event => event.code)).not.toContain('ivr-unreadable-proceeded');
+    expect(h.actions).toEqual([]);
+  });
+  it.each(['booking', 'alerts'] as const)('blocks a pending-inspection renewal on a confirmed incompatible payment status (%s)', async mode => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: '22222222', continuePath: '/en-ca/niv/schedule/11111111/continue_actions',
+          paymentStatus: mode === 'booking' ? 'unpaid' : 'paid' },
+      ] };
+      return inject(tab, func, params);
+    });
+    const provisional = bindGroup({ ...seed(), mode }, { ...args, binding: { scheduleId: '11111111', ivr: '22222222',
+      kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate: mode === 'booking' ? '2027-01-01' : null, applicantIds: ids, pendingInspection: true } });
+    let state = beginAuthentication(provisional, 'renew', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'stopped', loginFailed: false, authentication: null, nextPollAt: null,
+      authenticationFailureReason: 'payment-ineligible', group: { scheduleId: '11111111', pendingInspection: true } });
+    expect(state.authenticationError).toBe('The selected visa group is not eligible for this workflow. Check the group IVR Account Number and payment status in Settings.');
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'auth-terminal', reason: 'payment-ineligible', detail: 'payment-ineligible' }));
+    expect(vi.mocked(h.deps.inject).mock.calls.map(call => call[1].name)).not.toContain('readCurrentAppointment');
+    expect(h.actions).toEqual([]);
+  });
+  it('blocks a pending-inspection renewal on contradictory dashboard payment markers', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: '22222222', continuePath: '/en-ca/niv/schedule/11111111/continue_actions',
+          paymentStatus: 'paid', paymentConflict: true },
+      ] };
+      return inject(tab, func, params);
+    });
+    const provisional = bindGroup(seed(), { ...args, binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid',
+      currentDate: '2027-01-01', applicantIds: ids, pendingInspection: true } });
+    let state = beginAuthentication(provisional, 'renew', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'stopped', loginFailed: false, authentication: null,
+      authenticationFailureReason: 'payment-markers-conflict', group: { scheduleId: '11111111', pendingInspection: true } });
+    // The panel stays on the simple fixed eligibility copy; the precise
+    // contradictory-marker cause is retained for the problem report.
+    expect(state.authenticationError).toBe('The selected visa group is not eligible for this workflow. Check the group IVR Account Number and payment status in Settings.');
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'auth-terminal', reason: 'payment-markers-conflict', detail: 'payment-markers-conflict' }));
+    expect(h.actions).toEqual([]);
+  });
+  it('clears the pending-inspection flag after a confirmed compatible renewal reading', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: '22222222', continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'paid' },
+      ] };
+      return inject(tab, func, params);
+    });
+    const provisional = bindGroup(seed(), { ...args, binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid',
+      currentDate: '2027-01-01', applicantIds: ids, pendingInspection: true } });
+    let state = beginAuthentication(provisional, 'renew', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', authentication: null, loginFailed: false, authenticationError: null,
+      group: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: '2027-01-01' } });
+    expect(state.group!.pendingInspection).toBeUndefined();
+    expect(validateEngineState(JSON.parse(JSON.stringify(state))).group!.pendingInspection).toBeUndefined();
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'payment-inspection-resolved', purpose: 'renew', mode: 'booking' }));
+    expect(h.diagnostics.map(event => event.code)).not.toContain('payment-unknown-proceeded');
+  });
+  it('keeps a pending-inspection renewal provisional while the payment classification stays unknown', async () => {
+    const h = harness();
+    h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        { scheduleId: '11111111', ivr: '22222222', continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'unknown' },
+      ] };
+      return inject(tab, func, params);
+    });
+    const provisional = bindGroup(seed(), { ...args, binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid',
+      currentDate: '2027-01-01', applicantIds: ids, pendingInspection: true } });
+    let state = beginAuthentication(provisional, 'renew', NOW);
+    state = { ...state, authentication: { ...state.authentication!, tabId: 7 } };
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', authentication: null, authenticationError: null,
+      group: { scheduleId: '11111111', pendingInspection: true } });
+    expect(h.diagnostics).toContainEqual(expect.objectContaining({ code: 'payment-unknown-proceeded', purpose: 'renew', mode: 'booking' }));
+    expect(h.diagnostics.map(event => event.code)).not.toContain('payment-inspection-resolved');
+  });
 });
 
 describe('first sign-in dashboard discovery', () => {

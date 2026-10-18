@@ -15,6 +15,30 @@ export const DIAGNOSTICS_LIMIT = 1500;
 export const DIAGNOSTICS_REPEAT_LIMIT = 999;
 export const DIAGNOSTICS_COALESCE_MS = 5 * 60 * 1000;
 
+// Stable identifier-free terminal codes for dashboard group selection
+// refusals and post-inspection incompatibility. Fixed literals shared by the
+// authentication failure-reason allowlist and the diagnostic-detail allowlist
+// so a Report a problem draft can carry the exact selection cause (never a
+// generic UI category, never an overloaded single code). No identifiers, IVRs,
+// schedule IDs or page content can appear in these values.
+export const SELECTION_FAILURE_CODES = [
+  'no-dashboard-group',
+  'paid-group-not-found',
+  'paid-group-unavailable',
+  'unpaid-group-rejected',
+  'unpaid-group-not-found',
+  'unpaid-group-unavailable',
+  'paid-group-rejected',
+  'payment-markers-conflict',
+  'payment-ineligible',
+  'group-binding-invalid',
+  'dashboard-snapshot-invalid',
+  'dashboard-group-invalid',
+  'dashboard-groups-ambiguous',
+  'selection-incomplete',
+] as const;
+export type SelectionFailureCode = (typeof SELECTION_FAILURE_CODES)[number];
+
 // Fixed identifier-free authentication failure reasons (developer state only,
 // never shown in product UI/copy). Optional in saves; old saves migrate to
 // null and malformed values fail closed. Defined here so diagnostics and the
@@ -28,6 +52,15 @@ export const AUTHENTICATION_FAILURE_REASONS = [
   'navigation-failed',
   'unrecognized-reading',
   'credential-rejected',
+  // Exact dashboard selection causes (proposal 7): each fixed resolveGroup
+  // refusal records its own stable code instead of the overloaded
+  // group-changed detail.
+  ...SELECTION_FAILURE_CODES,
+  // Identity moved after fresh re-resolution: the bound group, appointment
+  // baseline or applicant roster no longer matches the saved binding.
+  'group-identity-changed',
+  'applicant-roster-changed',
+  'appointment-date-changed',
 ] as const;
 export type AuthenticationFailureReason = (typeof AUTHENTICATION_FAILURE_REASONS)[number];
 export function isAuthenticationFailureReason(value: unknown): value is AuthenticationFailureReason {
@@ -76,6 +109,15 @@ export const DIAGNOSTIC_CODES = [
   'verification-resolved',
   'auth-checkpoint-recovered',
   'engine-exception-recovered',
+  // Degraded success: work continued although one identity/status signal was
+  // unreadable. Non-terminal by design; the fixed code records exactly which
+  // signal was missing. Repeated occurrences coalesce.
+  'ivr-unreadable-proceeded',
+  'payment-unknown-proceeded',
+  // Attempted recovery: a provisional (pending-inspection) binding was
+  // re-resolved and its payment classification confirmed compatible.
+  'payment-inspection-resolved',
+  'payment-inspection-attempted',
 ] as const;
 export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[number];
 
@@ -140,6 +182,10 @@ export const DIAGNOSTIC_DETAILS = [
   'read-interrupted',
   'page-mismatch',
   'selection-invalid',
+  // Exact terminal selection causes share the failure-reason literals so the
+  // retained diagnostic detail is never the overloaded group-changed code.
+  // Some (e.g. selection-incomplete) also describe retryable DOM readings.
+  ...SELECTION_FAILURE_CODES,
   'mutation-unconfirmed',
   'navigation-unconfirmed',
   'test-mode-boundary',

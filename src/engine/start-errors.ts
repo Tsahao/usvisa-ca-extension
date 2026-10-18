@@ -9,6 +9,8 @@ const known: Record<string, string> = {
   'Several groups need explicit selection.': 'Several visa groups are on this dashboard. Enter the correct group IVR Account Number in Settings, then press Start.',
   'Unpaid group rejected for paid booking.': 'The selected booking group is not eligible for paid booking. Check both Visa Group IVRs and payment status in Settings.',
   'Paid group rejected for unpaid tracking.': 'The selected alert group is not eligible for date alerts. Check both Visa Group IVRs and payment status in Settings.',
+  'Conflicting dashboard payment markers.': 'The dashboard shows conflicting payment information for the selected visa group. Refresh the dashboard; if this repeats, check the payment status on the website.',
+  'Selected group is not eligible for this workflow.': 'The selected visa group is not eligible for this workflow. Check the group IVR Account Number and payment status in Settings.',
   'No dashboard group to bind.': 'The extension found no visa groups on this dashboard. Refresh the dashboard; if this repeats, report this message.',
   'Invalid dashboard group.': 'The extension could not read a dashboard group’s schedule or IVR Account Number. Refresh the dashboard; if this repeats, report this message.',
   'Selected dashboard group is incomplete.': 'The extension could not read the selected group’s schedule or IVR Account Number. Refresh the dashboard; if this repeats, report this message.',
@@ -16,7 +18,6 @@ const known: Record<string, string> = {
   'Ambiguous dashboard group.': 'The extension found conflicting dashboard group identities. Refresh the dashboard; if this repeats, report this message.',
   'Unreadable appointment date.': 'The extension could not read the selected group’s appointment date. If the date is visible on the dashboard, report this message.',
   'Authenticated group changed.': 'The signed-in group, appointment or applicant list changed. Check the dashboard and Settings before pressing Start.',
-  'Site under maintenance.': 'The visa website is under maintenance. Wait for it to recover, then press Start.',
 };
 const fallback: Record<PanelReadStep, string> = {
   state: 'Unable to read the extension’s saved state. Reopen the extension; if this repeats, report this message.',
@@ -29,7 +30,11 @@ const fallback: Record<PanelReadStep, string> = {
 };
 
 export function isPanelCommandErrorMessage(value: unknown): value is string {
-  return typeof value === 'string' && [...Object.values(known), ...Object.values(fallback)].includes(value);
+  // Accept old saved diagnostics without regenerating their obsolete manual
+  // maintenance instructions. Maintenance now stays active and retries quietly.
+  return typeof value === 'string' && [...Object.values(known), ...Object.values(fallback),
+    'The visa website is under maintenance. Wait for it to recover, then press Start.',
+  ].includes(value);
 }
 
 export function panelCommandError(error: unknown, step: PanelReadStep): string {

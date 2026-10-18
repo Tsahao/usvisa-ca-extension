@@ -3,7 +3,7 @@ import { performLoginAction, probeLoginStatus, type LoginProbeResult, type Login
 import { readCurrentAppointment, readDashboardGroups, readSiteMaintenance } from '../adapter/reads';
 import { appointmentApplicants, appointmentDate } from '../domain/appointment';
 import { sameApplicants } from '../domain/applicants';
-import { resolveGroup, validateDashboardSnapshot } from '../domain/groups';
+import { inspectBoundGroup, isRetryableSelectionFailure, normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, validateDashboardSnapshot } from '../domain/groups';
 import { classifyRoute, SITE_ORIGIN } from '../domain/routes';
 import { isDiagnosticDetail, type DiagnosticCode, type DiagnosticDetail, type DiagnosticEvent } from '../domain/diagnostics';
 import {
@@ -776,24 +776,18 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     let readStep: PanelReadStep = 'groups';
     // Terminal classification for a fresh trusted dashboard reading: the
     // selection itself cannot resolve (fixed resolveGroup refusal messages) or
-    // the bound identity changed (sentinel below). Those need a configured
-    // correction; every other error here is a transient malformed reading or an
-    // interrupted injection and recovers on the counted retry budget with a
-    // full revalidation pass before any action. No page is ever mutated by
-    // either path.
-    const GROUP_MISMATCHES = new Set([
-      'No dashboard group to bind.',
-      'Paid group not found on the dashboard.',
-      'No eligible paid group on the dashboard.',
-      'Unpaid group rejected for paid booking.',
-      'Unpaid group not found on the dashboard.',
-      'No eligible unpaid group on the dashboard.',
-      'Paid group rejected for unpaid tracking.',
-      'Invalid group binding.',
-      'Invalid dashboard path.',
-    ]);
-    const dashboardFailure = (error: unknown, detail: DiagnosticDetail): EngineState => ({ ...fail('unrecognized-reading', detail),
-      loginFailed: false, authenticationFailureReason: null, authenticationError: panelCommandError(error, readStep) });
+    // the bound identity changed (sentinels below). Every refusal keeps its
+    // exact fixed selection code as the retained diagnostic reason instead of
+    // one overloaded group-changed detail. Malformed page readings and
+    // interrupted injections recover on the counted retry budget with a full
+    // revalidation pass before any action. No page is ever mutated by either
+    // path.
+    const dashboardFailure = (error: unknown, detail: DiagnosticDetail,
+        fallbackReason: AuthenticationFailureReason = 'unrecognized-reading'): EngineState => {
+      const message = error instanceof Error ? error.message : '';
+      const reason = selectionFailureCode(message) ?? fallbackReason;
+      return { ...fail(reason, detail), loginFailed: false, authenticationError: panelCommandError(error, readStep) };
+    };
     try {
       const dashboardPath = new URL(tab.url!).pathname;
       const raw = await inject(readDashboardGroups, []);
@@ -803,10 +797,12 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       // authenticate verification; later outcome classification is roster
       // relaxed while renewal and booking paths stay strict.
       if (auth.purpose === 'verify') {
-        if (!state.group) return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed');
+        if (!state.group) return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed', 'group-identity-changed');
         const snapshot = validateDashboardSnapshot(raw as never);
-        const found = snapshot.groups.find(group => group.scheduleId === state.group!.scheduleId && group.ivr === state.group!.ivr);
-        if (!found) return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed');
+        // Same-group identity: schedule primary, null/asymmetric IVR never a
+        // fabricated mismatch, readable IVRs must agree.
+        const found = snapshot.groups.find(group => sameGroupRef(group, state.group!));
+        if (!found) return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed', 'group-identity-changed');
         if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
         if (state.consecutiveFailures > 0) note('auth-recovered', { outcome: 'healthy', failures: 0 });
         return { ...state, authentication: null, authenticationFailureReason: null, verificationTabId: auth.tabId, verification: { reads: [], nextReadAt: deps.nowIso() },
@@ -821,6 +817,19 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       state = assessDashboard(state, raw);
       if (state.discovery?.choosing) return { ...state, updatedAt: deps.nowIso() };
       readStep = 'selection';
+      // A provisional (pendingInspection) binding is inspected against the
+      // fresh card first: a confirmed incompatible status or contradictory
+      // markers blocks with the precise fixed code, a compatible
+      // classification clears the flag after the full revalidation below,
+      // and an absent bound card falls through to the ordinary identity
+      // comparison instead of guessing.
+      let inspectionResolved = false;
+      if (state.group?.pendingInspection) {
+        const verdict = inspectBoundGroup(raw as never, state.group);
+        if (verdict?.verdict === 'blocked')
+          return dashboardFailure(new Error('Selected group is not eligible for this workflow.'), verdict.code, verdict.code);
+        if (verdict?.verdict === 'resolved') inspectionResolved = true;
+      }
       const match = resolveGroup(raw as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr, preferPaid: !!state.discovery });
       let currentDate: string | null = null;
       let applicantIds: string[] | undefined;
@@ -833,16 +842,29 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
       }
       // The combined identity check is split into group / roster / baseline so
       // the retained terminal diagnostic records exactly which identity moved.
-      if (state.group && (state.group.scheduleId !== match.scheduleId || state.group.ivr !== match.ivr))
-        return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed');
+      if (state.group && !sameGroupRef(match, state.group))
+        return dashboardFailure(new Error('Authenticated group changed.'), 'group-changed', 'group-identity-changed');
       if (state.group?.applicantIds && !sameApplicants(state.group.applicantIds, applicantIds))
-        return dashboardFailure(new Error('Authenticated group changed.'), 'roster-changed');
+        return dashboardFailure(new Error('Authenticated group changed.'), 'roster-changed', 'applicant-roster-changed');
       if (state.group && state.group.currentDate !== currentDate)
-        return dashboardFailure(new Error('Authenticated group changed.'), 'baseline-changed');
+        return dashboardFailure(new Error('Authenticated group changed.'), 'baseline-changed', 'appointment-date-changed');
       if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
       if (!state.group) state = bindGroup(state, { owner: state.owner!, runId: state.runId!, now: deps.nowIso(),
-        binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath, ...(applicantIds ? { applicantIds } : {}) } });
+        binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
+          ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) } });
       if (state.consecutiveFailures > 0) note('auth-recovered', { outcome: 'healthy', failures: 0 });
+      // A confirmed-compatible provisional binding clears its durable flag on
+      // the revalidated success path only.
+      if (inspectionResolved && state.group?.pendingInspection) {
+        const { pendingInspection: _resolved, ...group } = state.group;
+        state = { ...state, group };
+        note('payment-inspection-resolved');
+      }
+      // Degraded success: the run was authorized although the card's IVR
+      // stayed unreadable and/or its payment classification stayed unknown.
+      // Fixed allowlisted codes; repeated occurrences coalesce in the log.
+      if (match.ivr === null) note('ivr-unreadable-proceeded');
+      if (match.inspectionRequired) note('payment-unknown-proceeded');
       state = { ...state, authentication: null, authenticationFailureReason: null, executor: null, stage: null, lastCandidate: null, startedAt: deps.nowIso(),
         group: state.group ? { ...state.group, dashboardPath } : null,
         // Successful, fully revalidated renewals do not consume a lifetime
@@ -854,10 +876,17 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     } catch (error) {
       const message = error instanceof Error ? error.message : '';
       if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-      if (message === 'Applicant roster changed.') return dashboardFailure(error, 'roster-changed');
-      if (message === 'Appointment identity changed.') return dashboardFailure(error, 'group-changed');
-      if (message === 'Authenticated group changed.' || GROUP_MISMATCHES.has(message))
-        return dashboardFailure(error, 'group-changed');
+      if (message === 'Applicant roster changed.') return dashboardFailure(error, 'roster-changed', 'applicant-roster-changed');
+      if (message === 'Appointment identity changed.') return dashboardFailure(error, 'group-changed', 'group-identity-changed');
+      if (message === 'Authenticated group changed.') return dashboardFailure(error, 'group-changed', 'group-identity-changed');
+      // Selected-by-schedule card without entry evidence: retryable, re-read
+      // after the counted budget instead of demanding a configuration change.
+      if (message === 'Selected dashboard group is incomplete.') return deferRecoverable('selection-incomplete');
+      // Exact fixed selection refusal: retains its own stable code as the
+      // terminal reason AND detail instead of the overloaded group-changed.
+      const selectionCode = selectionFailureCode(message);
+      if (selectionCode && isRetryableSelectionFailure(selectionCode)) return deferRecoverable(selectionCode);
+      if (selectionCode) return dashboardFailure(error, selectionCode, selectionCode);
       if (message === 'Authentication context changed.') return deferRecoverable('script-interrupted');
       return deferRecoverable('reply-malformed');
     }

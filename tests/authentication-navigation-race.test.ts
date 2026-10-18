@@ -539,7 +539,7 @@ describe('login-to-dashboard navigation race', () => {
     expect(state).toMatchObject({ status: 'stopped', authentication: null, loginFailed: false });
     expect(state.authenticationError).toBe(
       'The signed-in group, appointment or applicant list changed. Check the dashboard and Settings before pressing Start.');
-    expect(state.authenticationFailureReason).toBeNull();
+    expect(state.authenticationFailureReason).toBe('group-identity-changed');
     expect(h.actions).toEqual([]);
   });
   it('records fixed identifier-free failure reasons, migrates old saves and clears on healthy auth', async () => {
@@ -549,7 +549,10 @@ describe('login-to-dashboard navigation race', () => {
     expect(() => validateEngineState({ ...boundSingle(), authenticationFailureReason: 'https://example.invalid/' }))
       .toThrow('Invalid authentication diagnostic.');
     for (const reason of ['configuration-changed', 'cancelled', 'tab-unavailable', 'untrusted-navigation',
-      'context-changed', 'navigation-failed', 'unrecognized-reading', 'credential-rejected'] as const) {
+      'context-changed', 'navigation-failed', 'unrecognized-reading', 'credential-rejected',
+      'group-identity-changed', 'applicant-roster-changed', 'appointment-date-changed',
+      'no-dashboard-group', 'paid-group-not-found', 'unpaid-group-not-found', 'payment-markers-conflict',
+      'payment-ineligible', 'group-binding-invalid'] as const) {
       expect(isAuthenticationFailureReason(reason)).toBe(true);
     }
     expect(isAuthenticationFailureReason('synthetic-secret')).toBe(false);

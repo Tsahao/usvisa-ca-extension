@@ -7,10 +7,10 @@ import { engineAlarmAt } from '../src/engine/poll';
 const NOW = '2026-10-12T00:00:00.000Z';
 const identity = { scheduleId: '11111111', ivr: '22222222' };
 const roster = ['77777777', '88888888'];
-function seeded(testMode = false) {
+function seeded(testMode = false, ivr: string | null = identity.ivr) {
   const args = { owner: 'owner-token-01', runId: 'run-id-0001', now: NOW };
   const bound = bindGroup(startRun(emptyEngineState(NOW), { ...args, mode: 'booking' }), {
-    ...args, binding: { ...identity, kind: 'paid', currentDate: '2027-06-21', applicantIds: roster },
+    ...args, binding: { ...identity, ivr, kind: 'paid', currentDate: '2027-06-21', applicantIds: roster },
   });
   return parkForReview(recordIntent(bound, { ...args, intent: {
     runId: args.runId, groupId: identity.scheduleId, mode: 'booking', targetDate: '2026-11-19', consulate: 'Vancouver', testMode, createdAt: NOW,
@@ -109,5 +109,28 @@ describe('fresh dashboard verification', () => {
     expect(next).toMatchObject({ status: 'verifying', verification: null });
     expect(events).toEqual([{ code: 'verification-unreadable', detail: 'reply-missing', mode: 'booking', phase: 'verify' }]);
     expect(JSON.stringify(events)).not.toContain('synthetic page failure');
+  });
+  it('treats a null IVR on either side as identity-compatible and keeps readable disagreements terminal', async () => {
+    const events: DiagnosticEvent[] = [];
+    // A fallback-bound null-IVR group is proven by its stable schedule: a
+    // readable fresh IVR never fabricates a mismatch, so the read progresses.
+    const read = vi.fn(async () => ({ scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'June 21, 2027', applicantIds: roster }));
+    const progressed = await runVerificationRead({ ...seeded(false, null), verification: { reads: [], nextReadAt: NOW } },
+      { now: () => NOW, read, recordDiagnostic: event => { events.push(event); } });
+    expect(progressed).toMatchObject({ status: 'verifying', consecutiveFailures: 0, verification: { reads: ['2027-06-21'] } });
+    // A readable binding accepts a missing (null) IVR reply the same way.
+    const missing = await runVerificationRead({ ...seeded(), verification: { reads: [], nextReadAt: NOW } }, { now: () => NOW,
+      read: async () => ({ scheduleId: '11111111', kind: 'booked', text: 'June 21, 2027', applicantIds: roster }) });
+    expect(missing).toMatchObject({ status: 'verifying', verification: { reads: ['2027-06-21'] } });
+    // Two readable IVRs must agree...
+    const mismatch = await runVerificationRead({ ...seeded(), verification: { reads: ['2027-06-21'], nextReadAt: NOW } }, { now: () => NOW,
+      recordDiagnostic: event => { events.push(event); },
+      read: async () => ({ scheduleId: '11111111', ivr: '99999999', kind: 'booked', text: 'June 21, 2027', applicantIds: roster }) });
+    expect(mismatch).toMatchObject({ status: 'verifying', verification: null });
+    expect(events).toContainEqual(expect.objectContaining({ code: 'verification-unreadable', detail: 'group-changed' }));
+    // ...while a malformed non-string IVR stays a recoverable unreadable reply.
+    const malformed = await runVerificationRead({ ...seeded(), verification: { reads: [], nextReadAt: NOW } }, { now: () => NOW,
+      read: async () => ({ scheduleId: '11111111', ivr: 12345, kind: 'booked', text: 'June 21, 2027', applicantIds: roster }) });
+    expect(malformed).toMatchObject({ status: 'verifying', consecutiveFailures: 1, verification: { reads: [] } });
   });
 });

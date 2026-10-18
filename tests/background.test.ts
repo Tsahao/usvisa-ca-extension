@@ -497,7 +497,9 @@ describe('read-only probe boundaries', () => {
     const respond = vi.fn();
     message({ type: 'PANEL_START', mode: 'booking' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, respond);
     await vi.waitFor(() => expect(respond).toHaveBeenCalledWith({ ok: false, error: 'The extension found no visa groups on this dashboard. Refresh the dashboard; if this repeats, report this message.', failureKind: 'generic' }));
-    expect(stored.engineStateV1).toEqual(paused);
+    // The paused save is otherwise untouched; only the exact fixed selection
+    // cause is retained for a Report a problem draft (no freshness bump).
+    expect(stored.engineStateV1).toEqual({ ...paused, authenticationFailureReason: 'no-dashboard-group' });
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
   });
 
@@ -692,7 +694,7 @@ describe('read-only probe boundaries', () => {
     const respond = vi.fn();
     message({ type: 'PANEL_START', mode: 'alerts' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, respond);
     await vi.waitFor(() => expect(respond).toHaveBeenCalledWith({ ok: false,
-      error: 'The extension could not match the selected IVR to a dashboard group. Check the IVR in Settings; if it matches, report this message.',
+      error: 'The extension could not read the selected group’s schedule or IVR Account Number. Refresh the dashboard; if this repeats, report this message.',
       failureKind: 'generic' }));
     expect(stored.engineStateV1).toBeUndefined();
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
@@ -713,6 +715,11 @@ describe('read-only probe boundaries', () => {
       failureKind: 'generic' }));
     expect(stored.engineStateV1).toBeUndefined();
     expect(JSON.stringify(respond.mock.calls)).not.toContain('99999999');
+    const report = vi.fn();
+    message({ type: 'ENGINE_PROBLEM_REPORT' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, report);
+    await vi.waitFor(() => expect(report).toHaveBeenCalledWith(expect.objectContaining({
+      ok: true, context: expect.objectContaining({ failureCode: 'dashboard-groups-ambiguous' }),
+    })));
   });
 
   it('uses a fast wake for same-tab Continue and cancels the next stage on Stop', async () => {
@@ -742,6 +749,65 @@ describe('read-only probe boundaries', () => {
     expect(actions).toHaveLength(1);
     expect(stored.engineStateV1).toMatchObject({ status: 'stopped', nextPollAt: null });
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it('binds and continues a blank-setting null-IVR dashboard card end to end', async () => {
+    const dashboard = 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555';
+    let ownedUrl = dashboard;
+    stored.uiPreferencesV1 = { email: 'synthetic@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31',
+      onlyEarlier: true, testMode: true, interval: 60, paidIvr: '', unpaidIvr: '' };
+    chromeMock.tabs.query.mockResolvedValue([{ id: 7, url: dashboard }]);
+    chromeMock.tabs.get.mockImplementation(async () => ({ id: 7, url: ownedUrl, status: 'complete' }));
+    const continues: unknown[] = [];
+    chromeMock.scripting.executeScript.mockImplementation(async (input: { func: { name: string }, args?: unknown[] }) => {
+      if (input.func.name === 'readDashboardGroups') return [{ result: { groups: [
+        { scheduleId: '11111111', ivr: null, continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'paid' },
+      ] } }];
+      if (input.func.name === 'readCurrentAppointment') return [{ result: { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: '6 November, 2026', applicantIds: ['77777777'] } }];
+      if (input.func.name === 'performDashboardContinue') {
+        continues.push(input.args?.[0]);
+        ownedUrl = 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/continue_actions';
+        return [{ result: { ok: true } }];
+      }
+      throw new Error('Unexpected stage after binding');
+    });
+    const sender = { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' };
+    const started = vi.fn(); message({ type: 'PANEL_START', mode: 'booking' }, sender, started);
+    await vi.waitFor(() => expect(started).toHaveBeenCalled());
+    expect(stored.engineStateV1).toMatchObject({ group: { scheduleId: '11111111', ivr: null, kind: 'paid', currentDate: '2026-11-06', applicantIds: ['77777777'] },
+      stage: 'actions', executor: { tabId: 7, actionPending: false } });
+    // The stable schedule is bound with a null IVR; the value is never invented.
+    expect((stored.engineStateV1 as { group: { ivr: unknown } }).group.ivr).toBeNull();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.waitFor(() => expect(continues).toEqual([{ scheduleId: '11111111', ivr: null, dashboardPath: '/en-ca/niv/groups/55555555', applicantIds: ['77777777'] }]));
+    await vi.waitFor(() => {
+      const entries = (stored.engineDiagnosticsV1 as { entries?: Array<{ code: string }> } | undefined)?.entries ?? [];
+      expect(entries.map(entry => entry.code)).toContain('ivr-unreadable-proceeded');
+    });
+    expect(stored.engineStateV1).toMatchObject({ stage: 'actions', executor: { tabId: 7, actionPending: false } });
+  });
+
+  it('binds a blank-setting unknown-payment dashboard card as a pending inspection', async () => {
+    stored.uiPreferencesV1 = { email: 'synthetic@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31',
+      onlyEarlier: true, testMode: true, interval: 60, paidIvr: '', unpaidIvr: '' };
+    chromeMock.tabs.query.mockResolvedValue([{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups' }]);
+    chromeMock.scripting.executeScript.mockImplementation(async (input: { func: { name: string } }) => {
+      if (input.func.name === 'readDashboardGroups') return [{ result: { groups: [
+        { scheduleId: '11111111', ivr: '22222222', continuePath: '/en-ca/niv/schedule/11111111/continue_actions', paymentStatus: 'unknown' },
+      ] } }];
+      if (input.func.name === 'readCurrentAppointment') return [{ result: { scheduleId: '11111111', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: ['77777777'] } }];
+      throw new Error('Unexpected stage after binding');
+    });
+    const respond = vi.fn();
+    message({ type: 'PANEL_START', mode: 'booking' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, respond);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith(expect.objectContaining({ ok: true })));
+    expect(stored.engineStateV1).toMatchObject({ group: { scheduleId: '11111111', ivr: '22222222', kind: 'paid',
+      currentDate: null, pendingInspection: true, applicantIds: ['77777777'] }, stage: 'actions' });
+    expect((stored.engineStateV1 as { group: { pendingInspection: unknown } }).group.pendingInspection).toBe(true);
+    await vi.waitFor(() => {
+      const entries = (stored.engineDiagnosticsV1 as { entries?: Array<{ code: string }> } | undefined)?.entries ?? [];
+      expect(entries.map(entry => entry.code)).toContain('payment-unknown-proceeded');
+    });
   });
 
   it('refuses website commands and starts trusted signed-out runs with automatic login in live mode', async () => {
@@ -1162,6 +1228,37 @@ describe('read-only probe boundaries', () => {
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect((stored.engineStateV1 as { status: string }).status).toBe('verifying'));
   });
+
+  it.each(['supported', 'missing-heading', 'missing-city', 'redirected'])(
+    'inspects provisional Alerts capability without accepting an unsupported summary (%s)', async issue => {
+      const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
+      const now = new Date().toISOString();
+      stored.engineStateV1 = bindGroup(startRun(emptyEngineState(now), {
+        mode: 'alerts', owner: 'owner-token-01', runId: 'run-id-0001', now,
+      }), { owner: 'owner-token-01', runId: 'run-id-0001', now,
+        binding: { scheduleId: '33333333', ivr: null, kind: 'unpaid', currentDate: null, pendingInspection: true } });
+      stored.uiPreferencesV1 = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31' };
+      const url = 'https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment';
+      chromeMock.tabs.query.mockResolvedValue([{ id: 5, url }]);
+      chromeMock.tabs.get.mockResolvedValue({ id: 5, url: issue === 'redirected' ? 'https://example.invalid/' : url });
+      const cities = ['Calgary', 'Halifax', 'Montreal', 'Ottawa', 'Quebec City', 'Toronto', 'Vancouver'];
+      chromeMock.scripting.executeScript.mockResolvedValue([{ result: {
+        headingFound: issue !== 'missing-heading',
+        rows: (issue === 'missing-city' ? cities.slice(1) : cities).map(city => ({ city, text: 'No Appointments Available' })),
+      } }]);
+      alarmed({ name: 'enginePoll' });
+      if (issue === 'supported') {
+        await vi.waitFor(() => expect(stored.engineObservationV1).toBeDefined());
+        expect(stored.engineStateV1).toMatchObject({ group: { scheduleId: '33333333' }, consecutiveFailures: 0 });
+        expect((stored.engineStateV1 as any).group.pendingInspection).toBeUndefined();
+      } else {
+        await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ consecutiveFailures: 1 }));
+        expect((stored.engineStateV1 as any).group.pendingInspection).toBe(true);
+        expect(stored.engineObservationV1).toBeUndefined();
+      }
+      expect(chromeMock.notifications.create).not.toHaveBeenCalled();
+      expect(chromeMock.scripting.executeScript.mock.calls[0][0]).toMatchObject({ target: { tabId: 5 }, args: ['33333333'] });
+    });
 
   it('notifies selected-consulate changes from the payment summary loop', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');

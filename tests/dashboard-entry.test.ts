@@ -45,4 +45,29 @@ describe('same-tab paid dashboard entry', () => {
     expect(act(request)).toEqual({ ok: false });
     expect(clicked).not.toHaveBeenCalled();
   });
+  it('accepts a null-IVR request by exact schedule scope and clicks only its Continue link', () => {
+    const request = { scheduleId: '11111111', ivr: null, dashboardPath: '/en-ca/niv/groups/55555555', applicantIds: ['77777777', '88888888'] };
+    vi.stubGlobal('location', { href: `https://ais.usvisa-info.com${request.dashboardPath}` });
+    document.body.innerHTML = '<section><ul class="actions"><li><a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></li></ul><strong>99999999</strong><table><tbody><tr><td><a href="/en-ca/niv/schedule/11111111/applicants/77777777">Details</a></td></tr><tr><td><a href="/en-ca/niv/schedule/11111111/applicants/88888888">Details</a></td></tr></tbody></table></section><section><strong>44444444</strong><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul></section>';
+    const clickedSelected = vi.fn((event: Event) => event.preventDefault());
+    const clickedSibling = vi.fn((event: Event) => event.preventDefault());
+    const links = document.querySelectorAll('a');
+    links[0].addEventListener('click', clickedSelected);
+    links[3].addEventListener('click', clickedSibling);
+    // A null binding proves the group by the unique schedule scope: the card's
+    // own IVR reading is not required (the schedule is primary), and only the
+    // exact-schedule Continue link is clicked — never the sibling's.
+    expect(act(request)).toEqual({ ok: true });
+    expect(clickedSelected).toHaveBeenCalledOnce();
+    expect(clickedSibling).not.toHaveBeenCalled();
+  });
+  it('fails a null-IVR request closed when the schedule scope is ambiguous', () => {
+    const request = { scheduleId: '11111111', ivr: null, dashboardPath: '/en-ca/niv/groups/55555555', applicantIds: ['77777777', '88888888'] };
+    vi.stubGlobal('location', { href: `https://ais.usvisa-info.com${request.dashboardPath}` });
+    document.body.innerHTML = '<section><ul class="actions"><li><a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></li></ul><strong>22222222</strong><strong>99999999</strong><table><tbody><tr><td><a href="/en-ca/niv/schedule/11111111/applicants/77777777">Details</a></td></tr><tr><td><a href="/en-ca/niv/schedule/11111111/applicants/88888888">Details</a></td></tr></tbody></table></section>';
+    const clicked = vi.fn((event: Event) => event.preventDefault());
+    document.querySelector('a')!.addEventListener('click', clicked);
+    expect(act(request)).toEqual({ ok: false });
+    expect(clicked).not.toHaveBeenCalled();
+  });
 });

@@ -1,11 +1,16 @@
 import { parseLongDateUs } from './dates';
-import type { GroupRef } from './groups';
+import { normalizeReadingIvr, sameGroupRef, type GroupRef } from './groups';
 import { sameApplicants, validateApplicantIds } from './applicants';
 
 export function appointmentDate(raw: unknown, expected: GroupRef & { applicantIds?: string[] }): string | null {
   if (!raw || typeof raw !== 'object') throw new Error('Missing appointment reading.');
   const reading = raw as Record<string, unknown>;
-  if (reading.scheduleId !== expected.scheduleId || reading.ivr !== expected.ivr) throw new Error('Appointment identity changed.');
+  // Schedule is the primary identity. A null (unreadable) IVR on either side
+  // never fabricates a mismatch, while two readable IVRs must agree; missing
+  // or malformed identity fields still fail closed.
+  const scheduleId = typeof reading.scheduleId === 'string' ? reading.scheduleId : '';
+  const ivr = normalizeReadingIvr(reading.ivr);
+  if (ivr === undefined || !sameGroupRef({ scheduleId, ivr }, expected)) throw new Error('Appointment identity changed.');
   if (expected.applicantIds && !sameApplicants(reading.applicantIds, expected.applicantIds)) throw new Error('Applicant roster changed.');
   if (reading.kind === 'unbooked' && reading.text === null) return null;
   if (reading.kind !== 'booked' || typeof reading.text !== 'string') throw new Error('Unknown appointment state.');

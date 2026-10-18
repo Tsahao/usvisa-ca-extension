@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from '../src/adapter/reads';
-import { resolveGroup, validateDashboardSnapshot } from '../src/domain/groups';
+import { continuePathFor, resolveGroup, validateDashboardSnapshot } from '../src/domain/groups';
 import { dashboardFeatures } from '../src/domain/features';
 
 describe('website adapter readers', () => {
@@ -57,8 +57,8 @@ describe('website adapter readers', () => {
     // markers authorize unpaid.
     expect(readDashboardGroups()).toEqual({
       groups: [
-        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown' },
-        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' },
+        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown', continuePath: null, paymentConflict: false },
+        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown', continuePath: null, paymentConflict: false },
       ],
     });
   });
@@ -77,7 +77,8 @@ describe('website adapter readers', () => {
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div>
       </div>`;
     expect(readDashboardGroups()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
@@ -93,8 +94,10 @@ describe('website adapter readers', () => {
         <p class="consular-appt">September 22, 2025</p></div>`;
     expect(readDashboardGroups()).toEqual({
       groups: [
-        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
-        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'paid' },
+        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid',
+          continuePath: continuePathFor('11111111'), paymentConflict: false },
+        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'paid',
+          continuePath: continuePathFor('33333333'), paymentConflict: false },
       ],
     });
   });
@@ -118,8 +121,12 @@ describe('website adapter readers', () => {
       document.body.innerHTML = `<div class="${classes}"><div class="row"><div class="medium-6 columns">${malformed}</div>
         <div class="medium-6 columns text-right"><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul></div></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
+      // Contradictory markers additionally suppress the card's Continue
+      // evidence: a conflicted card is never selectable.
+      const conflict = scenario === 'contradictory';
       expect(readDashboardGroups()).toEqual({
-        groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' }],
+        groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown',
+          continuePath: conflict ? null : continuePathFor('33333333'), paymentConflict: conflict }],
       });
     });
 
@@ -138,8 +145,10 @@ describe('website adapter readers', () => {
     // The second card's inner delivery bold text must not confer unpaid status.
     expect(readDashboardGroups()).toEqual({
       groups: [
-        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
-        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown' },
+        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+          continuePath: continuePathFor('33333333'), paymentConflict: false },
+        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'unknown',
+          continuePath: continuePathFor('11111111'), paymentConflict: false },
       ],
     });
   });
@@ -163,7 +172,8 @@ describe('website adapter readers', () => {
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     const serialized: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
@@ -180,8 +190,10 @@ describe('website adapter readers', () => {
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>22222222</strong></div></div></div>`;
     expect(readDashboardGroups()).toEqual({
       groups: [
-        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
-        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
+        { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+          continuePath: continuePathFor('33333333'), paymentConflict: false },
+        { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid',
+          continuePath: continuePathFor('11111111'), paymentConflict: false },
       ],
     });
   });
@@ -219,7 +231,7 @@ describe('website adapter readers', () => {
       // The tainted link authorizes nothing; the uncovered card fails closed
       // as an incomplete group rather than implying absence.
       const reading = serialized();
-      expect(reading).toEqual({ groups: [{ scheduleId: '', ivr: null, paymentStatus: 'unknown' }] });
+      expect(reading).toEqual({ groups: [{ scheduleId: '', ivr: null, paymentStatus: 'unknown', continuePath: null, paymentConflict: false }] });
       expect(() => validateDashboardSnapshot(reading)).toThrow('Invalid dashboard group.');
     }
   });
@@ -234,7 +246,8 @@ describe('website adapter readers', () => {
         <div class="card"><p class="delivery"><a href="/en-ca/niv/schedule/99999999/addresses/delivery?account=1">view map</a></p></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
@@ -250,7 +263,8 @@ describe('website adapter readers', () => {
         </ul></div></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
@@ -280,7 +294,8 @@ describe('website adapter readers', () => {
         <div class="card"><h4 class="status">Pay Visa Fee</h4></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
@@ -294,7 +309,8 @@ describe('website adapter readers', () => {
         <table><tbody><tr><td><p class="consular-appt">January 1, 2027</p></td></tr></tbody></table>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
@@ -310,8 +326,9 @@ describe('website adapter readers', () => {
     // link-less nested card fails closed as an incomplete group.
     const reading = serialized();
     expect(reading).toEqual({ groups: [
-      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' },
-      { scheduleId: '', ivr: null, paymentStatus: 'unknown' },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown',
+        continuePath: continuePathFor('33333333'), paymentConflict: false },
+      { scheduleId: '', ivr: null, paymentStatus: 'unknown', continuePath: null, paymentConflict: false },
     ] });
     expect(() => validateDashboardSnapshot(reading)).toThrow('Invalid dashboard group.');
   });
@@ -327,11 +344,12 @@ describe('website adapter readers', () => {
         <table><tbody><tr><td>Synthetic applicant <strong>88888888</strong></td></tr></tbody></table>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
   });
 
-  it('returns a null IVR when only decoys exist, failing worker validation', () => {
+  it('keeps a null IVR on a card whose only identity evidence is its trusted Continue link', () => {
     const serialized: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
     vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups' });
     document.body.innerHTML = `
@@ -341,10 +359,22 @@ describe('website adapter readers', () => {
         <div class="card"><p class="delivery"><strong>99999999</strong></p></div>
         <table><tbody><tr><td>Synthetic applicant <strong>88888888</strong></td></tr></tbody></table></div>`;
     const reading = serialized();
+    // Decoy STRONGs inside the delivery card and applicant table are never
+    // IVR evidence; the IVR stays null and is never fabricated.
     expect(reading).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: null, paymentStatus: 'unpaid' }],
+      groups: [{ scheduleId: '33333333', ivr: null, paymentStatus: 'unpaid',
+        continuePath: continuePathFor('33333333'), paymentConflict: false }],
     });
-    expect(() => validateDashboardSnapshot(reading)).toThrow('Invalid dashboard group.');
+    // The null IVR is only selectable through the blank-preference fallback;
+    // the card's own trusted Continue link is the entry evidence and the
+    // schedule stays the validated primary identity.
+    expect(validateDashboardSnapshot(reading).groups).toHaveLength(1);
+    expect(resolveGroup(reading, { mode: 'alerts', paidIvr: '', unpaidIvr: '' }))
+      .toEqual({ scheduleId: '33333333', ivr: null, paymentStatus: 'unpaid', inspectionRequired: false });
+    // An explicit IVR preference still cannot be satisfied by an unreadable
+    // card: no silent fallback.
+    expect(() => resolveGroup(reading, { mode: 'alerts', paidIvr: '', unpaidIvr: '44444444' }))
+      .toThrow('No eligible unpaid group on the dashboard.');
   });
 
   it.each([
@@ -360,7 +390,8 @@ describe('website adapter readers', () => {
         <div class="medium-6 columns text-right"><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul></div></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown',
+        continuePath: null, paymentConflict: true }],
     });
   });
 
@@ -376,7 +407,8 @@ describe('website adapter readers', () => {
         <div class="medium-6 columns text-right"><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul></div></div>
         <div class="row"><div class="medium-12 columns text-right">IVR Account Number:<strong>44444444</strong></div></div></div>`;
     expect(serialized()).toEqual({
-      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown' }],
+      groups: [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unknown',
+        continuePath: null, paymentConflict: true }],
     });
   });
 
@@ -393,16 +425,17 @@ describe('website adapter readers', () => {
     // read, but optional-IVR selection may use the valid first booking card.
     const reading = serialized();
     expect(reading).toEqual({ groups: [
-      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
-      { scheduleId: '', ivr: null, paymentStatus: 'unknown' },
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid',
+        continuePath: continuePathFor('11111111'), paymentConflict: false },
+      { scheduleId: '', ivr: null, paymentStatus: 'unknown', continuePath: null, paymentConflict: false },
     ] });
     expect(() => validateDashboardSnapshot(reading)).toThrow('Invalid dashboard group.');
     expect(resolveGroup(reading, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
-      .toEqual({ scheduleId: '11111111', ivr: '22222222' });
+      .toEqual({ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid', inspectionRequired: false });
     const first = document.querySelector('.application.card')!;
     first.before(first.nextElementSibling!);
     const reordered = serialized();
-    expect(reordered.groups[0]).toEqual({ scheduleId: '', ivr: null, paymentStatus: 'unknown' });
+    expect(reordered.groups[0]).toEqual({ scheduleId: '', ivr: null, paymentStatus: 'unknown', continuePath: null, paymentConflict: false });
     expect(() => resolveGroup(reordered, { mode: 'booking', paidIvr: '', unpaidIvr: '' }))
       .toThrow('Selected dashboard group is incomplete.');
   });

@@ -7,8 +7,8 @@ import { isExtension, loadUiState, saveLastMode, savePreferences, saveRun } from
 import { focusVisaTab, PanelCommandError, panelCommand, retryRestartCommand } from './engine';
 import { fitCurrentPanelWindow } from '../panel-window';
 import type { PanelSnapshot } from '../engine/panel';
-import { isPanelFailureKind, panelFailureKind, type PanelFailureKind } from '../engine/panel-errors';
-import { isPanelCommandErrorMessage } from '../engine/start-errors';
+import { isPanelFailureKind, type PanelFailureKind } from '../engine/panel-errors';
+import { recoveryMessage } from './recovery-messages';
 import { HomeScreen } from './HomeScreen';
 import { ModeChoice } from './ModeChoice';
 import { isDashboardFeatures, type DashboardFeatures } from '../domain/features';
@@ -45,24 +45,13 @@ const FAILURE_TITLES: Record<PanelFailureKind, string> = {
   'paid-ivr-not-found': 'Couldn’t find paid group',
   'unpaid-ivr-not-found': 'Couldn’t find unpaid group',
 };
-// Site maintenance stays on its existing retry/recovery panel; it never takes one
-// of the failure screens even though it shares the safe-message channel.
-const MAINTENANCE_MESSAGE = 'The visa website is under maintenance. Wait for it to recover, then press Start.';
 
 function failureTitle(kind: PanelFailureKind | null | undefined): string | null {
   if (!kind) return null;
   return FAILURE_TITLES[isPanelFailureKind(kind) ? kind : 'generic'];
 }
 
-// The failure screen already conveys its diagnostic, so the banner would
-// duplicate it. Unrelated safety/recovery messages still show beside it.
-function isDuplicateFailureBanner(message: string, kind: PanelFailureKind | null): boolean {
-  if (!message || !kind) return false;
-  if (!isPanelCommandErrorMessage(message)) return false;
-  return panelFailureKind(message) === kind;
-}
-
-function Workflow({ preferences, run, change, configure, openCoffee, data, failureKind, failureDetail, trackScroll }: { preferences: Preferences; run: Run; change: (status: RunStatus) => Promise<void>; configure: () => void; openCoffee: () => void; data?: PanelSnapshot | null; failureKind?: PanelFailureKind | null; failureDetail?: string; trackScroll: (event: UIEvent<HTMLElement>) => void }) {
+function Workflow({ preferences, run, change, configure, openCoffee, data, failureKind, trackScroll }: { preferences: Preferences; run: Run; change: (status: RunStatus) => Promise<void>; configure: () => void; openCoffee: () => void; data?: PanelSnapshot | null; failureKind?: PanelFailureKind | null; trackScroll: (event: UIEvent<HTMLElement>) => void }) {
   const active = activeStatuses.includes(run.status);
   const simulated = data === undefined;
   const hasData = simulated ? run.lastChecked !== null : data?.checkedAt !== null && data?.checkedAt !== undefined;
@@ -81,7 +70,6 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
     {special && message ? <div className={`${styles.result} ${!title && run.status === 'success' ? styles.success : styles.failure}`} role="status">
       {!title && run.status === 'success' ? <CalendarCheck size={42} /> : <span className={styles.failureIcon} aria-hidden><TriangleAlert size={42} /></span>}
       <h2>{message.title}</h2>
-      {title && failureDetail && <p className={styles.failureDetail}>{failureDetail}</p>}
       {title ? <div className={styles.failureActions}>
         <button className={styles.secondary} onClick={configure}>{message.detail}</button>
         <ReportProblem live={!simulated} mode={run.mode} status={run.status} autoMode={preferences.autoMode} failureKind={failureKind ?? 'generic'} />
@@ -122,7 +110,7 @@ export function App() {
   // Local Start-command failure for the selected workflow. A thrown START
   // leaves the previous stopped/idle snapshot behind, so this persists until
   // a healthy snapshot, Stop, settings save or workflow switch clears it.
-  const [panelFailure, setPanelFailure] = useState<{ kind: PanelFailureKind; mode: Mode; detail?: string } | null>(null);
+  const [panelFailure, setPanelFailure] = useState<{ kind: PanelFailureKind; mode: Mode } | null>(null);
   const [engineData, setEngineData] = useState<PanelSnapshot | null>(null);
   const [toolbarScrolled, setToolbarScrolled] = useState(false);
   const [focusingTab, setFocusingTab] = useState(false);
@@ -143,6 +131,7 @@ export function App() {
   useEffect(() => { setToolbarScrolled(false); }, [view, run.mode]);
   const trackScroll = (event: UIEvent<HTMLElement>) => { setToolbarScrolled(event.currentTarget.scrollTop > 2); };
   const applySnapshot = (snapshot: PanelSnapshot) => {
+    snapshot = { ...snapshot, reviewMessage: recoveryMessage(snapshot.reviewMessage) };
     // An unchanged previous success is not a successful new Start. During a
     // lost-response retry, or after its exhaustion, do not erase the new state.
     if (snapshot.status === 'success' && (restartTransportPending.current || failedRestartMode.current === snapshot.mode)) return;
@@ -175,8 +164,7 @@ export function App() {
     // handoff keeps its existing banner and never takes a failure screen.
     if (snapshot.status === 'failure' && !snapshot.manualAuthentication) {
       const kind = isPanelFailureKind(snapshot.failureKind) ? snapshot.failureKind : 'generic';
-      setPanelFailure({ kind, mode: snapshot.mode,
-        ...(isPanelCommandErrorMessage(snapshot.reviewMessage) ? { detail: snapshot.reviewMessage } : {}) });
+      setPanelFailure({ kind, mode: snapshot.mode });
     } else if (snapshot.status === 'running' || snapshot.status === 'success' || snapshot.manualAuthentication || snapshot.reviewRequired) {
       // Healthy work and recovery guidance clear the local screen error for that
       // workflow. Plain idle/stopped snapshots retain it: a thrown START
@@ -195,7 +183,7 @@ export function App() {
       setRun(current => ({ mode: snapshotActive ? snapshot.mode : current.mode,
         status: 'failure', lastChecked: snapshot.checkedAt ? new Date(snapshot.checkedAt).toLocaleTimeString() : null }));
       // The screen already conveys the diagnostic; a banner would duplicate it.
-      setError(snapshot.reviewMessage && !isPanelCommandErrorMessage(snapshot.reviewMessage) ? snapshot.reviewMessage : '');
+      setError(snapshot.reviewMessage ?? '');
       if (snapshotActive && !selected) {
         void saveLastMode(snapshot.mode).catch(() => {});
       }
@@ -278,11 +266,9 @@ export function App() {
     setView(preferencesError(preferences) ? 'config' : 'workflow');
   };
   const startFailure = (failure: unknown, mode: Mode) => {
-    if (failure instanceof Error && failure.message === MAINTENANCE_MESSAGE) { setError(failure.message); return; }
     setDiscovering(false); discoveryAwaited.current = false;
     setRun(current => ({ ...current, mode, status: 'failure' }));
-    setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode,
-      ...(failure instanceof Error && isPanelCommandErrorMessage(failure.message) ? { detail: failure.message } : {}) });
+    setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode });
     setError('');
   };
   const signIn = async (value: Preferences) => {
@@ -364,19 +350,12 @@ export function App() {
   ];
   // Engine failure screen for the selected workflow: a persisted worker
   // failure wins; otherwise the local Start-command error applies. Manual
-  // handoff and maintenance stay on their running panel and banner.
+  // handoff keeps its recovery banner; maintenance retries quietly.
   const engineFailure: PanelFailureKind | null = engineEnabled && view === 'workflow' && engineData?.status !== 'running' && !engineData?.manualAuthentication
     ? (engineData && engineData.mode === run.mode && engineData.status === 'failure'
       ? (isPanelFailureKind(engineData.failureKind) ? engineData.failureKind : 'generic')
       : (panelFailure && panelFailure.mode === run.mode ? panelFailure.kind : null))
     : null;
-  // Only fixed, identifier-free diagnostics may accompany the generic title.
-  // Keep command details with their workflow across stale idle refreshes.
-  const engineFailureDetail = engineFailure === 'generic'
-    ? (engineData?.mode === run.mode && engineData.status === 'failure'
-      ? (isPanelCommandErrorMessage(engineData.reviewMessage) ? engineData.reviewMessage : undefined)
-      : (panelFailure?.mode === run.mode ? panelFailure.detail : undefined))
-    : undefined;
   const activeTab = view === 'workflow' ? run.mode : view === 'config' ? 'settings' : view === 'coffee' ? 'coffee' : null;
   const keepHomeMounted = view === 'home' || (view === 'terms' && termsOrigin === 'home');
   const keepConfigMounted = view === 'config' || view === 'history' || (view === 'terms' && termsOrigin === 'config') || (view === 'coffee' && coffeeFromConfig);
@@ -420,7 +399,7 @@ export function App() {
           }}><img src="assets/toolbar-window.svg" width={23} height={23} alt="" /></button>
           <img className={styles.separator} src="assets/toolbar-line.svg" alt="" />
         </nav>)}
-        {error && !isDuplicateFailureBanner(error, engineEnabled ? engineFailure : (view === 'workflow' && run.status === 'failure' ? previewFailure : null)) && <div className={styles.errorBanner} role="alert">{error}</div>}
+        {error && <div className={styles.errorBanner} role="alert">{error}</div>}
         {ready && keepHomeMounted && <div style={view === 'home' ? { display: 'contents' } : { display: 'none' }}>
           <HomeScreen preferences={preferences} signIn={signIn} openTerms={openTermsFromHome} active={settingsLocked} />
         </div>}
@@ -437,13 +416,13 @@ export function App() {
               if (engineEnabled) {
                 setPanelFailure(null);
                 setEngineData(current => current?.status === 'failure' && current.mode === mode &&
-                  (!current.reviewMessage || isPanelCommandErrorMessage(current.reviewMessage)) ? null : current);
+                  !current.reviewMessage ? null : current);
               }
-              setError(engineData?.reviewRequired && engineData.reviewMessage && !isPanelCommandErrorMessage(engineData.reviewMessage) ? engineData.reviewMessage : '');
+              setError(engineData?.reviewRequired ? recoveryMessage(engineData.reviewMessage) ?? '' : '');
               setView(modeChoice ? 'choose' : 'workflow');
             }} />
           </div>}
-          {view === 'choose' ? <ModeChoice choose={mode => void chooseMode(mode)} /> : view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} failureDetail={engineFailureDetail} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
+          {view === 'choose' ? <ModeChoice choose={mode => void chooseMode(mode)} /> : view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
             if (engineEnabled && status === 'idle') { cancelRestartCommand(); try { applySnapshot(await panelCommand('STOP')); setPanelFailure(null); setError(''); } catch (failure) { setError((failure as Error).message); } return; }
             if (preferencesError(preferences)) { setPendingMode(run.mode); setView('config'); return; }
             if (engineEnabled) {
@@ -493,14 +472,10 @@ export function App() {
                 }
                 applySnapshot(await panelCommand('START', run.mode));
               } catch (failure) {
-                // A Start-command failure renders the matching error screen,
-                // not just a banner. Unknown responses and connection errors
-                // use the catch-all; maintenance keeps its recovery guidance.
-                if (!(failure instanceof Error && failure.message === MAINTENANCE_MESSAGE)) {
-                  setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode: run.mode,
-                    ...(failure instanceof Error && isPanelCommandErrorMessage(failure.message) ? { detail: failure.message } : {}) });
-                  setError('');
-                } else setError((failure as Error).message);
+                // Failure screens expose categories only, never worker prose.
+                // Detected maintenance remains active and retries in the engine.
+                setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode: run.mode });
+                setError('');
               }
               return;
             }
