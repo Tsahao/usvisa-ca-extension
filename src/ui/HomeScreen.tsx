@@ -36,12 +36,10 @@ export function HomeScreen({ preferences, signIn, openTerms, active = false }: {
   return <form className={styles.root} noValidate onSubmit={event => { event.preventDefault(); void submit(); }}>
     <header className={styles.brand}>
       <div className={styles.logo} aria-hidden>
-        <img className={styles.reflection} src="assets/welcome-reflection.svg" alt="" />
-        <img className={styles.reflectionBottom} src="assets/welcome-reflection-bottom.svg" alt="" />
-        <img className={styles.maple} src="assets/welcome-maple.svg" alt="" />
+        <img className={styles.logoArtwork} src="assets/welcome-logo.png" width={70.5} height={70.5} alt="" />
       </div>
       <h2 className={styles.title}>US Visa Scheduler</h2>
-      <p className={styles.subtitle}>For Consulates In Canada</p>
+      <p className={styles.subtitle}>for consulates in Canada</p>
     </header>
     <fieldset disabled={saving || active} className={`${panel.group} ${styles.fields}`}>
       <PreferenceFields draft={draft} update={update} validationEvents={validationEvents} autoLabel="Auto Book" />

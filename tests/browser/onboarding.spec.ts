@@ -40,12 +40,10 @@ for (const { feature, signedOut } of [{ feature: 'booking', signedOut: false }, 
       await expect(panel.getByRole('button', { name: 'Sign in', exact: true })).toBeDisabled();
       await expect(region.getByRole('navigation')).toHaveCount(0);
       expect(await region.locator('img').evaluateAll(images => images.every(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
-      for (const [asset, width] of [['welcome-reflection.svg', 14.7692], ['welcome-reflection-bottom.svg', 19.2], ['welcome-maple.svg', 25.8462]] as const) {
-        const img = region.locator(`img[src="assets/${asset}"]`);
-        expect(await img.evaluate(image => image.getBoundingClientRect().width)).toBeCloseTo(width, 1);
-      }
+      const logo = region.locator('img[src="assets/welcome-logo.png"]');
+      expect(await logo.evaluate(image => image.getBoundingClientRect().width)).toBeCloseTo(70.5, 1);
       const form = region.locator('fieldset'); const box = (await form.boundingBox())!; const panelBox = (await region.boundingBox())!;
-      expect(box.width).toBeCloseTo(308, 0); expect(box.y - panelBox.y).toBeCloseTo(175, 0);
+      expect(box.width).toBeCloseTo(308, 0); expect(box.y - panelBox.y).toBeCloseTo(179, 0);
       if (feature === 'both') await region.screenshot({ path: 'test-results/onboarding-empty.png' });
       await panel.getByLabel('Email', { exact: true }).fill('synthetic@example.invalid');
       await panel.getByLabel('Password', { exact: true }).fill('synthetic-password');

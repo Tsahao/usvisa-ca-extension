@@ -1,13 +1,12 @@
 .root { width: 356px; max-width: 100%; flex: 1; min-height: 0; overflow-y: auto; background: #fbfbfb; text-align: center; display: flex; flex-direction: column; align-items: center; padding: 52px 23px 20px; scrollbar-width: thin; }
 .brand { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; }
-.logo { position: relative; width: 48px; height: 48px; border-radius: 50%; background: radial-gradient(ellipse at 50% 115%, #ffdddd 0, transparent 48%), linear-gradient(145deg, #eeeeee, #ffffff); border: 1px solid #e8e8e8; box-shadow: inset 0 1px 3px #fff, 0 1px 1px #0001; }
-.logo::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: #ffffff99; backdrop-filter: blur(4px); z-index: 1; }
-.maple { position: absolute; left: 10.08px; top: 10.08px; z-index: 2; }
-.reflection { position: absolute; left: 15.62px; top: 18.94px; }
-.reflectionBottom { position: absolute; left: 13.4px; top: 14.51px; transform: rotate(180deg); }
-.title { margin: 12px 0 0; font-size: 18px; line-height: 21px; font-weight: 500; color: #000; transform: scaleX(1.14); }
-.subtitle { margin: 4px 0 0; font-size: 11px; line-height: 15px; font-weight: 500; color: #0003; }
-.fields { flex-shrink: 0; width: 309px; max-width: 100%; margin-top: 22px; }
+.logo { position: relative; width: 48px; height: 48px; }
+/* The 2× Figma icon export includes its native refraction, reflections and
+   shadow padding. Keep the visible glass disc in the original 48px slot. */
+.logoArtwork { position: absolute; left: -11.077px; top: -5.169px; }
+.title { margin: 12px 0 0; font-size: 18px; line-height: 21px; font-weight: 500; color: #000; }
+.subtitle { margin: 4px 0 0; font-size: 12px; line-height: 15px; font-weight: 500; color: #0000004d; }
+.fields { flex-shrink: 0; width: 309px; max-width: 100%; margin-top: 26px; }
 .fields input[type=date] { width: 121px; background: white; border: 1px solid #e2e2e2; text-align: left; }
 .fields input[role=switch] { width: 36px; height: 16px; margin: 0; }
 .fields input[role=switch]::after { width: 18px; height: 12px; }
