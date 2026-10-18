@@ -29,7 +29,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
   const [focused, setFocused] = useState<keyof Preferences | null>(null);
   // Preferences arrive asynchronously; without this, a config screen opened
   // before loading finishes would display (and could save) stale values —
-  // including a stale Test Mode position.
+  // including a stale Auto Mode position.
   useEffect(() => {
     setDraft(structuredClone(preferences));
     setCompleted({});
@@ -63,11 +63,11 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
           <Row label="Consulate"><select aria-label="Consulate" {...validationEvents('consulate')} value={draft.consulate} onChange={event => update('consulate', event.target.value as Preferences['consulate'])}><option value="">Select Consulate</option>{CITIES.map(city => <option key={city} value={city}>{cityLabel(city)}</option>)}</select></Row>
           <Row label="Earliest Acceptable"><input aria-label="Earliest Acceptable" type="date" {...validationEvents('earliest')} value={draft.earliest} onChange={event => update('earliest', event.target.value)} /></Row>
           <Row label="Latest Acceptable"><input aria-label="Latest Acceptable" type="date" {...validationEvents('latest')} value={draft.latest} onChange={event => update('latest', event.target.value)} /></Row>
+          <Toggle label="Auto Mode" checked={draft.autoMode} change={value => update('autoMode', value)} />
         </fieldset>
         <button className={panel.disclosure} type="button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>Advanced {advanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
         {advanced && <fieldset disabled={active || saving} className={panel.advanced}>
           <div className={panel.group}>
-            <Toggle label="Test Mode" checked={draft.testMode} change={value => update('testMode', value)} />
             <Toggle label="Earlier appointments only" checked={draft.onlyEarlier} change={value => update('onlyEarlier', value)} />
             <Row label="Checking interval (s)"><input className={panel.shortInput} type="number" aria-label="Checking interval (s)" {...validationEvents('interval')} min="60" max="86400" value={draft.interval} onChange={event => update('interval', Number(event.target.value))} /></Row>
             <Row label="Paid IVR Group"><input aria-label="Paid IVR Group" inputMode="numeric" {...validationEvents('paidIvr')} value={draft.paidIvr} onChange={event => update('paidIvr', event.target.value)} /></Row>

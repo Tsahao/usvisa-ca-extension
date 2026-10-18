@@ -57,6 +57,87 @@ describe('cross-component review regressions', () => {
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+  function paidMonitoring(autoMode: boolean, dates = ['2026-11-19'], currentDate: string | null = '2027-06-21') {
+    const { testMode: _legacy, ...rest } = prefs;
+    stored.uiPreferencesV1 = { ...rest, autoMode };
+    const initial = seed();
+    stored.engineStateV1 = { ...initial, group: { ...initial.group, currentDate }, policyKey: policyKey(stored.uiPreferencesV1),
+      executor: { tabId: 7, applicantIds: ['77777777'], targetTime: null, skippedDates: [], actionPending: false } };
+    tabs = [{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment?applicants[]=77777777' }];
+    const available = { dates };
+    mock.scripting.executeScript.mockImplementation(async ({ func }: { func: { name: string } }) => {
+      if (func.name === 'readPaidPage') return [{ result: { kind: 'form', scheduleId: '11111111', applicantIds: ['77777777'] } }];
+      if (func.name === 'fetchDaysJson') return [{ result: { status: 200, body: available.dates.map(date => ({ date })) } }];
+      throw new Error(`Unexpected monitoring action: ${func.name}`);
+    });
+    return available;
+  }
+
+  it('keeps refreshing paid dates and notifying on changes with Auto Mode OFF, including across worker wakes', async () => {
+    const available = paidMonitoring(false);
+    await fire();
+    expect(state()).toMatchObject({ status: 'running', stage: null, lastCandidate: '2026-11-19', intent: null, verification: null });
+    expect(stored.engineObservationV1).toMatchObject({ mode: 'booking', dates: ['2026-11-19'] });
+    expect(Date.parse(state().nextPollAt!) - Date.now()).toBeGreaterThanOrEqual(120_000);
+    expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19' }));
+    const nextPoll = async () => { vi.setSystemTime(new Date(state().nextPollAt!)); await fire(); };
+    await nextPoll();
+    expect(mock.notifications.create).toHaveBeenCalledTimes(1);
+    vi.resetModules(); await import('../src/background'); await flush();
+    await nextPoll();
+    expect(mock.notifications.create).toHaveBeenCalledTimes(1);
+    available.dates = ['2026-11-20']; await nextPoll();
+    expect(mock.notifications.create).toHaveBeenCalledTimes(2);
+    available.dates = []; await nextPoll();
+    expect(state()).toMatchObject({ status: 'running', lastCandidate: null, stage: null });
+    expect(stored.engineObservationV1.dates).toEqual([]);
+    available.dates = ['2026-11-20']; await nextPoll();
+    expect(mock.notifications.create).toHaveBeenCalledTimes(3);
+    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => ['readPaidPage', 'fetchDaysJson'].includes(input.func.name))).toBe(true);
+    expect(state()).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
+  });
+
+  it.each([
+    { dates: ['2026-10-31', '2027-01-01'], currentDate: null },
+    { dates: ['2026-11-19', '2026-12-01'], currentDate: '2026-11-19' },
+  ])('does not notify paid dates outside the window or earlier-only policy (%j)', async ({ dates, currentDate }) => {
+    paidMonitoring(false, dates, currentDate);
+    await fire();
+    expect(state()).toMatchObject({ status: 'running', stage: null, lastCandidate: null, intent: null });
+    expect(mock.notifications.create).not.toHaveBeenCalled();
+    expect(stored.engineObservationV1.dates).toEqual(dates);
+  });
+
+  it('retries a failed paid notification without stopping monitoring or booking', async () => {
+    paidMonitoring(false);
+    mock.notifications.create.mockRejectedValueOnce(new Error('Synthetic notification failure'));
+    await fire();
+    expect(stored.paidMonitorV1.monitor.alert.pending).toBe(true);
+    expect(state()).toMatchObject({ status: 'running', consecutiveFailures: 0, stage: null, intent: null });
+    vi.setSystemTime(new Date(state().nextPollAt!)); await fire();
+    expect(mock.notifications.create).toHaveBeenCalledTimes(2);
+    expect(stored.paidMonitorV1.monitor.alert.pending).toBe(false);
+  });
+
+  it('advances a paid candidate to booking only with Auto Mode ON', async () => {
+    paidMonitoring(true);
+    await fire();
+    expect(state()).toMatchObject({ status: 'running', stage: 'form', lastCandidate: '2026-11-19' });
+    expect(mock.notifications.create).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('leaves Date Alerts behavior unchanged with Auto Mode %s', async autoMode => {
+    stored.uiPreferencesV1 = { ...prefs, autoMode };
+    stored.engineStateV1 = { ...seed('alerts'), policyKey: policyKey(stored.uiPreferencesV1), monitorTabId: 7 };
+    tabs = [{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment' }];
+    mock.scripting.executeScript.mockResolvedValue([{ result: { ...summary, rows: summary.rows.map(row =>
+      row.city === 'Vancouver' ? { ...row, text: 'November 19, 2026' } : row) } }]);
+    await fire();
+    expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19' }));
+    expect(state()).toMatchObject({ mode: 'alerts', status: 'running', stage: null, intent: null, executor: null });
+    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => input.func.name === 'readSummaryRaw')).toBe(true);
+  });
+
   it.each([null, 7])('holds the full verification deadline before tab resolution (%s)', async tabId => {
     const initial = seed();
     const now = new Date().toISOString();

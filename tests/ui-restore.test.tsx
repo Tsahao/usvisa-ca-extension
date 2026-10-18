@@ -36,6 +36,22 @@ const idleSnapshot = (mode: string): Record<string, unknown> =>
   ({ mode, status: 'idle', reviewRequired: false, dates: [], rows: [], checkedAt: null, currentDate: null, confirmedDate: null });
 
 describe('paid/unpaid workflow retention', () => {
+  it.each([true, false])('migrates saved Test Mode %s to inverse Auto Mode and saves only the new preference', async testMode => {
+    const { autoMode: _autoMode, ...legacy } = DEMO_PREFERENCES;
+    const { localState } = stubExtension({ preferences: { ...legacy, testMode }, snapshot: idleSnapshot('booking') });
+    const { App } = await import('../src/ui/App');
+    render(<App />);
+    const user = userEvent.setup();
+    await screen.findByRole('button', { name: 'Start' });
+    expect(screen.queryByText(/Test Mode/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(!testMode);
+    expect(screen.getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded')).toBe('false');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(localState.uiPreferencesV1).toMatchObject({ autoMode: !testMode });
+    expect(localState.uiPreferencesV1).not.toHaveProperty('testMode');
+  });
+
   it('opens coffee checkout separately while worker observations continue without Start/Stop', async () => {
     const { sendMessage, refreshWorker, localState } = stubExtension({ lastMode: 'alerts', snapshot: { ...idleSnapshot('alerts'), status: 'running' } });
     const { App } = await import('../src/ui/App');

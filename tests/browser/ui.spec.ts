@@ -103,7 +103,7 @@ test('Figma screens, assets and responsive panel', async ({ page }) => {
   await page.getByLabel('Checking interval (s)').fill('120');
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Reset Advanced' }).click();
-  await page.getByRole('switch', { name: 'Test Mode' }).scrollIntoViewIfNeeded();
+  await page.getByRole('switch', { name: 'Auto Mode' }).scrollIntoViewIfNeeded();
   await capture('advanced');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.getByLabel('Preview scenario').selectOption('running');

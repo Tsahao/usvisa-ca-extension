@@ -1,5 +1,6 @@
 import { canBook, CONSULATES, validatePreferences } from '../domain/dates';
 import { guardBooking } from '../domain/booking';
+import { readAutoMode } from '../domain/auto-mode';
 import { sameApplicants, validateApplicantIds } from '../domain/applicants';
 import { parseTimesPayload } from '../domain/availability';
 import { classifyRoute } from '../domain/routes';
@@ -49,17 +50,18 @@ type Prefs = {
   earliest: string;
   latest: string;
   onlyEarlier: boolean;
-  testMode: boolean;
+  autoMode: boolean;
   policyKey: string;
 };
 async function readPrefs(deps: ExecDeps): Promise<Prefs | null> {
   const raw = await deps.loadPrefs();
+  const autoMode = readAutoMode(raw);
   if (!raw || typeof raw.consulate !== 'string' || !Object.hasOwn(CONSULATES, raw.consulate) ||
-      typeof raw.earliest !== 'string' || typeof raw.latest !== 'string' || typeof raw.onlyEarlier !== 'boolean') return null;
+      typeof raw.earliest !== 'string' || typeof raw.latest !== 'string' || typeof raw.onlyEarlier !== 'boolean' || autoMode === null) return null;
   try { validatePreferences({ earliest: raw.earliest, latest: raw.latest, exclusions: [], onlyEarlier: raw.onlyEarlier }); }
   catch { return null; }
   return { consulate: raw.consulate as Prefs['consulate'], earliest: raw.earliest, latest: raw.latest,
-    onlyEarlier: raw.onlyEarlier, testMode: raw.testMode !== false, policyKey: policyKey(raw) };
+    onlyEarlier: raw.onlyEarlier, autoMode, policyKey: policyKey(raw) };
 }
 
 // A stage owns one tab throughout the run. Reads revalidate immediately;
@@ -108,6 +110,13 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   const windowPrefs = prefs && { earliest: prefs.earliest, latest: prefs.latest, exclusions: [], onlyEarlier: prefs.onlyEarlier };
   if (!prefs || !windowPrefs) return park('config-changed');
   if (state.lastCandidate !== null && !canBook(state.lastCandidate, state.group.currentDate, windowPrefs)) return park('candidate-invalid');
+  // Monitoring never fills a candidate or creates a booking intent. This also
+  // protects a persisted candidate stage after an upgrade or a direct call;
+  // the worker owns notifications and continues its normal paced polls.
+  if (!prefs.autoMode && state.lastCandidate !== null && !state.intent) {
+    return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
+      stage: null, lastCandidate: null, executor: state.executor && { ...state.executor, targetTime: null } };
+  }
   if (state.stage === 'actions' && !state.group.applicantIds) return park('roster-missing');
   const prefsUnchanged = async () => JSON.stringify(await readPrefs(deps)) === JSON.stringify(prefs);
   const pace = (stage: BookingStage, delayMs = state.lastCandidate !== null &&
@@ -272,7 +281,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   if (state.stage === 'warning' && page.kind === 'applicants') return pace('applicants');
 
   const act = async (request: PaidAction, nextStage: BookingStage): Promise<EngineState> => {
-    // Reread durable Test Mode and policy immediately before the mutation.
+    // Reread durable Auto Mode and policy immediately before the mutation.
     if (deps.isCancelled?.() || !await prefsUnchanged()) return park();
     state = { ...state, executor: { ...state.executor!, actionPending: true }, updatedAt: deps.nowIso() };
     await deps.saveState(state);
@@ -289,7 +298,8 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     action, scheduleId, applicantIds: state.executor!.applicantIds!, facilityId: CONSULATES[prefs.consulate], date, time,
     earliest: prefs.earliest, latest: prefs.latest, currentDate: state.group!.currentDate,
     currentDateTag: state.group!.currentDate === null ? 'unbooked' : 'booked',
-    onlyEarlier: prefs.onlyEarlier, testMode: prefs.testMode,
+    // Serialized submit guards/intents retain their inverse legacy bit.
+    onlyEarlier: prefs.onlyEarlier, testMode: !prefs.autoMode,
     ...(implicitApplicantId ? { implicitApplicantId } : {}),
   });
   const baselineGuard = async (): Promise<EngineState | null> => {
@@ -308,10 +318,10 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     case 'confirm': {
       const intent = state.intent!;
       const time = state.executor!.targetTime;
-      if (!time || intent.targetDate !== state.lastCandidate || intent.testMode !== prefs.testMode || intent.consulate !== prefs.consulate ||
+      if (!time || intent.targetDate !== state.lastCandidate || intent.testMode !== !prefs.autoMode || intent.consulate !== prefs.consulate ||
           page.kind !== 'form' || page.slotWarning === true || page.calendarReady !== true ||
           page.date !== intent.targetDate || page.time !== time) return verify();
-      if (prefs.testMode) return verify();
+      if (!prefs.autoMode) return verify();
       // This injected wait only reads the bound document. It cannot click,
       // submit or replay anything; Stop/settings changes are checked after
       // it returns and again after the durable confirmation checkpoint.
@@ -423,18 +433,12 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
         state = { ...state, executor: { ...state.executor!, actionPending: false } };
         return pace('form');
       }
-      if (prefs.testMode) {
-        // Test Mode dry-run boundary: readiness guards above (roster, custody,
-        // fresh form, baseline, date/window/earlier-only policy) have passed.
-        // Never click the final Schedule/Reschedule submit and never open the
-        // portal confirmation dialog — with or without a data-confirm gate.
-        // Park without creating a booking intent or mutation checkpoint for a
-        // click that will not occur. Legacy persisted test-mode intents still
-        // verify; this path creates none.
+      if (!prefs.autoMode) {
+        // Defense in depth: only explicit Auto Mode ON may submit.
         if (!await prefsUnchanged() || deps.isCancelled?.()) return park();
-        return parkForReview(setStage(state, 'done', deps.nowIso()), deps.nowIso());
+        return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }), stage: null };
       }
-      // Live submission (Test Mode explicitly OFF, user authorization October
+      // Live submission (Auto Mode explicitly ON, user authorization October
       // 15, 2026 for the no-gate case only): click the validated
       // Schedule/Reschedule submit with a valid gate or with a fully absent
       // gate. A valid gate opens the recognized confirmation dialog for
@@ -450,7 +454,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       if (!await prefsUnchanged() || deps.isCancelled?.()) return park();
       state = recordIntent(state, { owner, runId, now: deps.nowIso(), intent: {
         runId, mode: 'booking', groupId: scheduleId, targetDate: fresh.date,
-        consulate: prefs.consulate, testMode: prefs.testMode, createdAt: deps.nowIso(), phase: 'prepared',
+        consulate: prefs.consulate, testMode: !prefs.autoMode, createdAt: deps.nowIso(), phase: 'prepared',
       } });
       state = { ...state, executor: { ...state.executor!, actionPending: true } };
       try { await deps.saveState(state); } catch { return verify(); }

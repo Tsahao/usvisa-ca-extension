@@ -4,7 +4,7 @@ import { resolveGroup } from './domain/groups';
 import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
-import { acceptNotification, monitorForScope, observeSummary, resetBaseline, validateMonitorState } from './domain/monitor';
+import { acceptNotification, monitorForScope, observeMonitorDate, observeSummary, resetBaseline, validateMonitorState } from './domain/monitor';
 import { mapHttpStatus, pollDelaySeconds } from './domain/timing';
 import { isSameGroupUrl } from './domain/trust';
 import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from './adapter/reads';
@@ -21,6 +21,7 @@ import { panelFailureKind } from './engine/panel-errors';
 import { preferencesError, type Preferences } from './ui/model';
 import { validateEngineMessage } from './engine/messages';
 import { applyPollResult, engineAlarmAt, planPollStep, recordCandidate, setStage } from './engine/poll';
+import { readAutoMode } from './domain/auto-mode';
 import { ENGINE_KEY, loadEngineState, saveEngineState as persistEngineState } from './engine/storage';
 import {
   bindGroup,
@@ -787,7 +788,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                 mode: message.mode, policyKey: queueKey, now });
               if (queued !== state) state = queued;
               if (isProductPanelSender(sender.url) && prefsForQueue && !preferencesError(prefsForQueue as unknown as Preferences))
-                analytics?.queueRestart(state, message.mode, prefsForQueue.testMode === true);
+                analytics?.queueRestart(state, message.mode, readAutoMode(prefsForQueue) !== true);
             }
             const active = state.authentication !== null || (state.verification?.nextReadAt !== null && state.verification?.nextReadAt !== undefined);
             if (!active) {
@@ -803,7 +804,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
             if (state.status === 'verifying') state = { ...state, status: 'stopped' as const, authentication: null, verification: null, nextPollAt: null };
             const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
             if (!prefs || preferencesError(prefs)) throw new Error('Save valid configurations before starting.');
-            if (!state.intent && isProductPanelSender(sender.url)) analyticsStart = analytics?.start(message.mode, prefs.testMode) ?? null;
+            if (!state.intent && isProductPanelSender(sender.url)) analyticsStart = analytics?.start(message.mode, readAutoMode(prefs) !== true) ?? null;
             const success = (await area.get(['engineSuccessV1'])).engineSuccessV1;
             if (!state.intent && (state.restartFailed || message.restart === true || panelSnapshot(state, undefined, success).status === 'success')) {
               state = { ...reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now,
@@ -1632,7 +1633,7 @@ function queueEnginePoll(): void {
           return;
         }
         // Booking stages prepare the owned form before polling, then fill a
-        // candidate: one verified stage per alarm, with final Test Mode guards.
+        // candidate: one verified stage per alarm, with final Auto Mode guards.
         // Submission/confirmation checkpoint exceptions route into automatic
         // verification (never a replay) when a durable intent exists; other
         // exceptions preserve the run for retry.
@@ -1778,7 +1779,7 @@ function queueEnginePoll(): void {
           return;
         }
         if (!sameApplicants(page.applicantIds, state.executor!.applicantIds) ||
-            (state.group.applicantIds && !sameApplicants(page.applicantIds, state.group.applicantIds)) || typeof prefs?.testMode !== 'boolean') {
+            (state.group.applicantIds && !sameApplicants(page.applicantIds, state.group.applicantIds)) || readAutoMode(prefs) === null) {
           await park('roster-changed');
           return;
         }
@@ -1852,6 +1853,33 @@ function queueEnginePoll(): void {
         // date is exhausted, the next paced poll starts a fresh sweep.
         if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [] };
         const recorded = recordCandidate(applied, candidate, stamped);
+        if (readAutoMode(prefs) === false) {
+          // Auto Mode OFF is a monitor, not a dry run: no candidate field
+          // changes, time requests, submit, confirmation, or booking intent.
+          // The lifecycle already validated this group's current policy. A
+          // different policy starts a fresh local notification scope.
+          const freshPrefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
+          if (cancelledRuns.has(`${state.owner}:${state.runId}`) || policyKey(freshPrefs) !== policyKey(prefs)) {
+            await park('config-changed'); return;
+          }
+          const scopeKey = `booking:${scheduleId}:${state.group.ivr}:${state.group.currentDate}:${policyKey(prefs)}`;
+          const saved = (await area.get(['paidMonitorV1'])).paidMonitorV1;
+          const monitor = monitorForScope(saved, scopeKey, true);
+          const { state: advanced, alertDue } = observeMonitorDate(monitor, candidate, {
+            scopeKey, prefs: windowPrefs, rangeOnly: true, now: stamped,
+          });
+          await area.set({ paidMonitorV1: { scopeKey, monitor: advanced } });
+          if (alertDue && !cancelledRuns.has(`${state.owner}:${state.runId}`)) {
+            try {
+              await platform.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png',
+                title: 'US Visa Scheduler for Canada', message: `New date available: ${alertDue}` });
+              await area.set({ paidMonitorV1: { scopeKey, monitor: acceptNotification(advanced, alertDue) } });
+            } catch { /* Keep delivery pending for the next healthy poll. */ }
+          }
+          await saveEngineState(area, recorded);
+          await syncEngineAlarm(engineAlarmAt(recorded));
+          return;
+        }
         // A matched candidate is time-sensitive: save it, then continue on
         // the immediate short wake with the usual fresh policy/checkpoints.
         const next = recorded.lastCandidate && recorded.stage === null

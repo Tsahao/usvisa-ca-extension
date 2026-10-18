@@ -16,7 +16,7 @@ function harness(testMode: boolean, initial = false, gate: true | false | string
   let cancelled = false;
   const checkpoints: EngineState[] = [];
   const submit = vi.fn(); const confirm = vi.fn();
-  const prefs = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode };
+  const prefs = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, autoMode: !testMode };
   vi.stubGlobal('location', { href: `${BASE}/appointment?applicants[]=77777777&applicants[]=88888888` });
   document.body.innerHTML = `<form id="appointment-form" method="post" action="${BASE}/appointment">
     <select id="appointments_consulate_appointment_facility_id"><option value="95">Vancouver</option></select>
@@ -93,7 +93,7 @@ describe('complete synthetic submission, confirmation and recovery', () => {
       ? new Promise(resolve => { finish = resolve; }) : original(...args);
     const pending = runBookingStage(h.deps, submitted);
     await vi.waitFor(() => expect(finish).toBeDefined());
-    if (change.startsWith('stop')) h.cancel(); else h.prefs.testMode = true;
+    if (change.startsWith('stop')) h.cancel(); else h.prefs.autoMode = false;
     finish!({ ok: change !== 'stop-missing-dialog' });
     const next = await pending;
     expect(next.status).toBe('verifying');
@@ -144,18 +144,18 @@ describe('complete synthetic submission, confirmation and recovery', () => {
     expect(state).toMatchObject({ status: 'stopped', intent: null, executor: null });
     expect(h.submit).toHaveBeenCalledOnce(); expect(h.confirm).toHaveBeenCalledOnce();
   });
-  it('never clicks submit or opens a dialog in Test Mode; the dry run parks without intent or verification', async () => {
+  it('never clicks submit or opens a dialog with Auto Mode OFF; monitoring continues', async () => {
     const h = harness(true); let state = await runBookingStage(h.deps, h.state); h.tick();
-    expect(state).toMatchObject({ status: 'verifying', stage: 'done', intent: null });
+    expect(state).toMatchObject({ status: 'running', stage: null, intent: null });
     expect(h.submit).not.toHaveBeenCalled(); expect(h.confirm).not.toHaveBeenCalled();
     expect(document.querySelectorAll('.reveal-overlay [data-reveal]')).toHaveLength(0);
     expect(h.checkpoints.filter(entry => entry.intent !== null)).toHaveLength(0);
     // No verification reads are scheduled for a click that never occurred.
     expect(state.verification).toBeNull();
   });
-  it('never clicks a gateless direct submit in Test Mode either', async () => {
+  it('never clicks a gateless direct submit with Auto Mode OFF either', async () => {
     const h = harness(true, false, false); let state = await runBookingStage(h.deps, h.state); h.tick();
-    expect(state).toMatchObject({ status: 'verifying', stage: 'done', intent: null, verification: null });
+    expect(state).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
     expect(h.submit).not.toHaveBeenCalled(); expect(h.confirm).not.toHaveBeenCalled();
     expect(document.querySelectorAll('.reveal-overlay [data-reveal]')).toHaveLength(0);
     expect(h.checkpoints.filter(entry => entry.intent !== null)).toHaveLength(0);
@@ -280,7 +280,7 @@ describe('complete synthetic submission, confirmation and recovery', () => {
   });
   it.each(['settings', 'stop', 'storage', 'form', 'roster', 'baseline'])('prevents confirmation when %s changes after submission', async issue => {
     const h = harness(false); let state = await runBookingStage(h.deps, h.state); h.tick();
-    if (issue === 'settings') h.prefs.testMode = true;
+    if (issue === 'settings') h.prefs.autoMode = false;
     if (issue === 'stop') h.cancel();
     if (issue === 'storage') h.deps.saveState = async () => { throw new Error('synthetic storage failure'); };
     if (issue === 'form') document.querySelector<HTMLInputElement>('#appointments_consulate_appointment_date')!.value = '2026-11-20';

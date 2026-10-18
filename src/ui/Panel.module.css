@@ -104,10 +104,5 @@
 .detached .panel { --content-card-width: 276px; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; box-shadow: none; }
 .reopen { border: 1px solid #ddd; padding: 12px 20px; border-radius: 20px; background: white; margin-top: 26px; }
 .errorBanner { font-size: 12px; color: #bc2a2e; background: #ffeded; padding: 12px; }
-.testMode { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; pointer-events: none; margin: 0; padding: 0 24px 10px; text-align: center; color: #ff8d28; font-family: 'Arial Narrow', 'Helvetica Neue', sans-serif; font-size: 12px; font-weight: 500; line-height: 22px; text-transform: uppercase; font-stretch: condensed; }
-/* Overlay line lives in bottom whitespace without shrinking content, so the
-   existing absolute footers just step up a little when it is present, keeping
-   a tight gap like Figma 96:23766 (gray top 18px above orange top). */
-.testModeOn .workflowFooter { bottom: 28px; }
 .loading { text-align: center; font-size: 13px; padding: 30px; }
 @media (max-width: 740px) { .preview { gap: 30px; flex-direction: column-reverse; align-items: center; padding: 12px 8px 32px; } .previewControls { padding-top: 0; } }

@@ -1388,7 +1388,7 @@ describe('read-only probe boundaries', () => {
       earliest: '2026-11-01',
       latest: '2026-12-31',
       onlyEarlier: false,
-      testMode: true,
+      autoMode: true,
     };
     chromeMock.tabs.query.mockResolvedValue([
       { id: 9, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment' },
@@ -1759,7 +1759,7 @@ describe('read-only probe boundaries', () => {
       }),
       executor: { tabId: 9, applicantIds: ['77777777'], targetTime: null, skippedDates: ['2026-11-19'], actionPending: false },
     };
-    stored.uiPreferencesV1 = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: false, testMode: true };
+    stored.uiPreferencesV1 = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: false, autoMode: true };
     const url = 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment?applicants[]=77777777';
     chromeMock.tabs.query.mockResolvedValue([{ id: 8, url }, { id: 9, url }]);
     mockPaidPoll({ status: 200, body: [{ date: '2026-11-19' }, { date: '2026-11-20' }] });

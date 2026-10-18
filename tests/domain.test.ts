@@ -8,10 +8,10 @@ const prefs: DatePreferences = {
   earliest: '2026-11-01', latest: '2026-12-31',
   exclusions: [{ start: '2026-11-10', end: '2026-11-15' }], onlyEarlier: true,
 };
-describe('test mode default', () => {
-  it('ships OFF for fresh preferences', () => {
-    expect(DEFAULT_ADVANCED.testMode).toBe(false);
-    expect(EMPTY_PREFERENCES.testMode).toBe(false);
+describe('auto mode default', () => {
+  it('ships ON for fresh preferences and is not an advanced setting', () => {
+    expect(DEFAULT_ADVANCED).not.toHaveProperty('autoMode');
+    expect(EMPTY_PREFERENCES.autoMode).toBe(true);
   });
 });
 describe('dashboard prose dates', () => {

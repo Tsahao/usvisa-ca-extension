@@ -9,7 +9,7 @@ function fixture(sendMessage = vi.fn(async () => ({ ok: true, diagnostics: { ver
   context: { status: 'stopped', stage: 'form' } }))) {
   const create = vi.fn(async (_options: { url: string }) => ({}));
   vi.stubGlobal('chrome', { runtime: { sendMessage, getManifest: () => ({ version: '0.2.2' }) }, tabs: { create } });
-  render(<ReportProblem live mode="booking" status="failure" testMode={false} failureKind="generic" />);
+  render(<ReportProblem live mode="booking" status="failure" autoMode failureKind="generic" />);
   return { sendMessage, create, button: screen.getByRole('button', { name: 'Report a problem' }) };
 }
 

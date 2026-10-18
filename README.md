@@ -12,9 +12,11 @@ or the official scheduling provider.
 - **Alerts:** monitor an unpaid group's availability across seven consulates;
   desktop notifications apply to the selected consulate. This mode never pays
   or books.
-- **Test Mode:** prepare the booking form without clicking the final submit or
-  opening its confirmation dialog. Test Mode defaults **OFF**; enable it before
-  starting if you want a dry run.
+- **Auto Mode:** a visible **Login and preferences** setting, defaulting **ON**.
+  In Book, ON automatically books a matching slot; OFF keeps refreshing
+  availability and updating the panel, and sends a desktop notification for a
+  matching date without filling or submitting it. It has no effect on Alerts.
+  Existing Test Mode settings migrate inversely to preserve booking permission.
 - Automatic sign-in and bounded session renewal, with manual handling of
   CAPTCHA and second-factor challenges.
 - Automatic recovery from transient failures: interrupted reads, lost replies,
@@ -85,7 +87,7 @@ available after a successful retry, so a run need not stall to be investigated.
 
 Configured production builds send five limited, pseudonymous PostHog usage
 events: installation, accepted workflow Start, terminal workflow failure, and
-validated unpaid-alert activation, and verified successful booking (excluding Test Mode). Count
+validated unpaid-alert activation, and verified successful booking (Auto Mode ON only). Count
 `appointment_booked` events in PostHog to measure bookings made by the extension.
 Payloads exclude credentials, visa and
 applicant identifiers, portal content, URLs, consulates and appointment dates.
@@ -122,8 +124,9 @@ bookings, send external notifications, or deliver analytics to a real project.
 
 The development preview and probe are test tools; the production build omits
 the probe. Automated verification is synthetic. The owner also reports
-successful live initial-booking and rescheduling checks with Test Mode ON and
-OFF; this is user-reported evidence, not an independent live retest. Recovery,
+successful live initial-booking and rescheduling checks in prior releases with
+Test Mode ON and OFF; this is user-reported evidence, not an independent live
+retest of Auto Mode. Recovery,
 cooldown/resume and diagnostics behavior are covered by synthetic tests only;
 this document makes no live-verification claim for them. In the development
 probe, **Read/export developer diagnostics** shows the bounded local log

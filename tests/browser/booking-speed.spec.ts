@@ -8,12 +8,12 @@ import { installPortalCalendar } from '../fixtures/portal-calendar';
 
 // Measure only eligible days response -> booking POST, on natural worker
 // timing. All portal traffic is synthetic and the real origin is DNS-blocked.
-for (const scenario of ['gated', 'direct', 'test-gated', 'test-direct', 'stop-dialog', 'settings-dialog',
+for (const scenario of ['gated', 'direct', 'monitor-gated', 'monitor-direct', 'stop-dialog', 'settings-dialog',
   'gated-switch', 'direct-switch', 'slow-switch', 'stop-switch'] as const) {
   test(`matched candidate advances without fixed field/confirmation waits (${scenario})`, async ({}, testInfo) => {
     test.setTimeout(25_000);
     const gated = !scenario.includes('direct');
-    const testMode = scenario.startsWith('test-');
+    const autoMode = !scenario.startsWith('monitor-');
     const interruption = scenario.endsWith('-dialog');
     const switchConsulate = scenario.endsWith('-switch');
     const facilityDelay = scenario === 'slow-switch' ? 3200 : scenario === 'stop-switch' ? 1800 : 250;
@@ -78,7 +78,7 @@ for (const scenario of ['gated', 'direct', 'test-gated', 'test-direct', 'stop-di
       await host.goto(`${base}/appointment?applicants[]=77777777&applicants[]=88888888`);
       await host.evaluate(installPortalCalendar, { times: ['09:15'], delay: 300, facilityDelay });
       const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31',
-        onlyEarlier: true, testMode, interval: 60, paidIvr: '22222222', unpaidIvr: '' };
+        onlyEarlier: true, autoMode, interval: 60, paidIvr: '22222222', unpaidIvr: '' };
       await panel.evaluate(async prefs => {
         await chrome.storage.local.set({ uiPreferencesV1: prefs });
         await chrome.runtime.sendMessage({ type: 'PANEL_STOP' });
@@ -110,16 +110,17 @@ for (const scenario of ['gated', 'direct', 'test-gated', 'test-direct', 'stop-di
         } else {
           await panel.evaluate(async () => {
             const { uiPreferencesV1: prefs } = await chrome.storage.local.get('uiPreferencesV1');
-            await chrome.storage.local.set({ uiPreferencesV1: { ...(prefs as Record<string, unknown>), testMode: true } });
+            await chrome.storage.local.set({ uiPreferencesV1: { ...(prefs as Record<string, unknown>), autoMode: false } });
           });
         }
         await expect(host.locator('.button.alert')).not.toHaveAttribute('aria-disabled', 'true');
         await expect.poll(async () => (await read()).status).toBe('verifying');
         expect(posts).toBe(0);
         expect((await read()).intent?.phase).toBe('submitted');
-      } else if (testMode) {
-        await expect.poll(async () => (await read()).stage).toBe('done');
-        expect(await read()).toMatchObject({ intent: null, verification: null });
+      } else if (!autoMode) {
+        await expect.poll(async () => (await read()).lastCandidate).toBe('2026-11-19');
+        expect(await read()).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
+        await expect(host.locator('#appointments_consulate_appointment_date')).toHaveValue('');
         await expect(host.locator('#appointments_submit')).toHaveAttribute('data-clicks', '0');
         expect(posts).toBe(0);
         await expect(host.locator('.reveal-overlay')).toHaveCount(0);
@@ -138,8 +139,11 @@ for (const scenario of ['gated', 'direct', 'test-gated', 'test-direct', 'stop-di
       }
       expect(daysReads).toBe(1);
       const history = await panel.evaluate(async () => chrome.runtime.sendMessage({ type: 'PANEL_HISTORY' }));
-      expect(history).toMatchObject({ ok: true, rows: [{ earliestDate: '2026-11-19', booked: testMode || scenario === 'stop-switch' ? 'No' : 'Attempted' }] });
-      if (scenario !== 'stop-switch') {
+      expect(history).toMatchObject({ ok: true, rows: [{ earliestDate: '2026-11-19', booked: !autoMode || scenario === 'stop-switch' ? 'No' : 'Attempted' }] });
+      if (!autoMode) {
+        expect(timesReads).toBe(0);
+        await expect(host.locator('#appointments_consulate_appointment_time')).toHaveValue('');
+      } else if (scenario !== 'stop-switch') {
         expect(timesReads).toBe(1);
         await expect(host.locator('#appointments_consulate_appointment_time')).toHaveValue('09:15');
       }

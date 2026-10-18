@@ -87,9 +87,8 @@ for (const testMode of [true, false]) {
         }).toBe(true);
       };
       if (testMode) {
-        // Test Mode never clicks the final submit and never opens the portal
-        // confirmation dialog, even with an explicit gate. The dry run parks
-        // at readiness without a booking intent or verification reads.
+        // Legacy Test Mode ON is Auto Mode OFF: it never submits a candidate
+        // and continues monitoring without intent or verification reads.
         await panel.evaluate(async () => {
           const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;
           state.nextPollAt = new Date(Date.now() - 1000).toISOString();
@@ -98,9 +97,9 @@ for (const testMode of [true, false]) {
         });
         await expect.poll(async () => {
           const state = await read();
-          return state.status === 'verifying' && state.stage === 'done' && !state.executor?.actionPending;
+          return state.status === 'running' && state.stage === null && !state.executor?.actionPending;
         }).toBe(true);
-        expect(await read()).toMatchObject({ status: 'verifying', stage: 'done', intent: null, verification: null });
+        expect(await read()).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
         await expect(host.locator('#appointments_submit')).toHaveAttribute('data-fixture-clicks', '0');
         expect(await host.locator('.reveal-overlay .button.alert').count()).toBe(0);
         expect(confirmed).toBe(0);

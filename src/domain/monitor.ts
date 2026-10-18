@@ -33,9 +33,19 @@ export function observeSummary(
   reading: unknown,
   args: { scopeKey: string; consulate: Consulate; prefs: DatePreferences; rangeOnly: boolean; now: string },
 ): { state: MonitorState; alertDue: string | null } {
+  const date = selectedDate(validateSummaryReading(reading), args.consulate);
+  return observeMonitorDate(state, date, args);
+}
+
+// Shared change detection/delivery semantics for summary alerts and eligible
+// paid dates. The paid caller applies the full window/earlier-only policy first.
+export function observeMonitorDate(
+  state: MonitorState,
+  date: string | null,
+  args: { scopeKey: string; prefs: DatePreferences; rangeOnly: boolean; now: string },
+): { state: MonitorState; alertDue: string | null } {
   if (args.scopeKey !== state.scopeKey) throw new Error('Monitor scope changed; reset the baseline explicitly.');
   if (!isIsoDateTime(args.now)) throw new Error('Invalid monitor timestamp.');
-  const date = selectedDate(validateSummaryReading(reading), args.consulate);
   const alert = observeDate(state.alert, date, args.prefs, args.rangeOnly);
   const next: MonitorState = {
     ...state,

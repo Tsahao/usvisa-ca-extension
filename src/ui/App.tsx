@@ -82,7 +82,7 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
       {title && failureDetail && <p className={styles.failureDetail}>{failureDetail}</p>}
       {title ? <div className={styles.failureActions}>
         <button className={styles.secondary} onClick={configure}>{message.detail}</button>
-        <ReportProblem live={!simulated} mode={run.mode} status={run.status} testMode={preferences.testMode} failureKind={failureKind ?? 'generic'} />
+        <ReportProblem live={!simulated} mode={run.mode} status={run.status} autoMode={preferences.autoMode} failureKind={failureKind ?? 'generic'} />
       </div> : <p className={styles.bookedDate}>{message.detail}</p>}
       {!title && run.status === 'success' && run.mode === 'booking' && <button className={`${styles.secondary} ${styles.coffeeLink}`} onClick={openCoffee}>Buy me a coffee?</button>}
     </div> : <>
@@ -314,9 +314,6 @@ export function App() {
     earliestDate: ['2026-11-19', '2027-01-20', '2026-12-31', '2026-12-30'][index % 4],
     booked: index === 0 ? 'Yes' : index === 2 || index === 3 ? 'Attempted' : 'No',
   })) : [], [previewHistory]);
-  // Figma 96:23766: saved Test Mode shows one orange line at the panel bottom
-  // on every view except Settings, which keeps Save/Cancel at the bottom.
-  const showTestMode = ready && preferences.testMode && view !== 'config';
   return <main className={detached ? styles.detached : embedded ? styles.embedded : styles.preview}>
     {!embedded && !engineEnabled && <aside className={styles.previewControls}>
       <span className={styles.kicker}>Interface milestone · step 3</span><h1>US Visa Scheduler for Canada</h1><p>Figma interface preview with simulated data. No login, notifications, payment, or booking occurs.</p>
@@ -335,7 +332,7 @@ export function App() {
       {isExtension && import.meta.env.MODE !== 'production' && <a href="probe.html">Open development probe</a>}
     </aside>}
     {hidden ? <button className={styles.reopen} onClick={() => setHidden(false)}>Show scheduler · {run.status}</button> : <div className={styles.panelWrap}>
-      <section className={`${styles.panel}${showTestMode ? ` ${styles.testModeOn}` : ''}`} aria-label="US Visa Scheduler for Canada">
+      <section className={styles.panel} aria-label="US Visa Scheduler for Canada">
         {view !== 'home' && (view === 'terms' || view === 'history' ? <nav className={`${styles.toolbar} ${styles.toolbarTerms}${toolbarScrolled ? ` ${styles.toolbarScrolled}` : ''}`} aria-label="Scheduler navigation">
           <button aria-label="Back" className={styles.tab} onClick={view === 'history' ? () => setView('config') : backFromTerms}><ChevronLeft size={20} /></button>
           <img className={styles.separator} src="assets/toolbar-line.svg" alt="" />
@@ -352,7 +349,7 @@ export function App() {
           <img className={styles.separator} src="assets/toolbar-line.svg" alt="" />
         </nav>)}
         {error && !isDuplicateFailureBanner(error, engineEnabled ? engineFailure : (view === 'workflow' && run.status === 'failure' ? previewFailure : null)) && <div className={styles.errorBanner} role="alert">{error}</div>}
-        {!ready ? <p className={styles.loading}>{error ? 'Preferences unavailable' : 'Loading preferences…'}</p> : view === 'home' ? <HomeScreen choose={(mode: Mode) => void choose(mode)} openTerms={openTermsFromHome} testMode={showTestMode} />
+        {!ready ? <p className={styles.loading}>{error ? 'Preferences unavailable' : 'Loading preferences…'}</p> : view === 'home' ? <HomeScreen choose={(mode: Mode) => void choose(mode)} openTerms={openTermsFromHome} />
         : <>
           {keepConfigMounted && <div style={view === 'config' ? { display: 'contents' } : { display: 'none' }}>
             <Configuration preferences={preferences} active={settingsLocked} trackScroll={trackScroll} openTerms={openTermsFromConfig} openHistory={() => setView('history')} cancel={() => setView(preferencesError(preferences) ? 'home' : 'workflow')} save={async value => {
@@ -371,7 +368,7 @@ export function App() {
               setView('workflow');
             }} />
           </div>}
-          {view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} testMode={showTestMode} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} failureDetail={engineFailureDetail} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
+          {view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} failureDetail={engineFailureDetail} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
             if (engineEnabled && status === 'idle') { cancelRestartCommand(); try { applySnapshot(await panelCommand('STOP')); setPanelFailure(null); setError(''); } catch (failure) { setError((failure as Error).message); } return; }
             if (preferencesError(preferences)) { setPendingMode(run.mode); setView('config'); return; }
             if (engineEnabled) {
@@ -435,7 +432,6 @@ export function App() {
             await persistRun({ ...run, status, lastChecked: status === 'running' ? '23:51:04' : run.lastChecked });
           }} /> : null}
         </>}
-        {showTestMode && <p className={styles.testMode} role="note">Test Mode will not book appointment</p>}
       </section>
     </div>}
   </main>;
