@@ -2,9 +2,46 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from '../src/adapter/reads';
 import { resolveGroup, validateDashboardSnapshot } from '../src/domain/groups';
+import { dashboardFeatures } from '../src/domain/features';
 
 describe('website adapter readers', () => {
   afterEach(() => vi.unstubAllGlobals());
+  it('recognizes a booked group with a nested summary alongside unpaid, courier and archived groups', () => {
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups' });
+    // Synthetic structure only: no live identifiers, dates or page dump.
+    document.body.innerHTML = `
+      <section class="application attend_appointment card success"><strong>22222222</strong>
+        <h4 class="status"><small>Current Status</small><br>Attend Appointment</h4>
+        <div class="card"><p class="consular-appt">Synthetic appointment summary</p></div>
+        <a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></section>
+      <section class="alert application card needs_payment"><strong>44444444</strong>
+        <h4 class="status">Pay Visa Fee</h4><a href="/en-ca/niv/schedule/33333333/payment">Continue</a></section>
+      <section class="application card needs_courier_in success"><strong>66666666</strong>
+        <h4 class="status">Send Documents</h4><a href="/en-ca/niv/schedule/55555555/applicants/10101010">Details</a></section>
+      <section class="application archived card"><strong>88888888</strong>
+        <a href="/en-ca/niv/schedule/77777777/applicants/20202020">Details</a></section>`;
+    const serialized: typeof readDashboardGroups = new Function(`return (${readDashboardGroups.toString()})`)();
+    const snapshot = serialized();
+    expect(snapshot.groups.map(group => group.paymentStatus)).toEqual(['paid', 'unpaid', 'unknown', 'unknown']);
+    expect(dashboardFeatures(snapshot)).toBe('both');
+  });
+
+  it.each([
+    ['attend_appointment', '', 'unknown'],
+    ['', '<h4 class="status">Attend Appointment</h4>', 'unknown'],
+    ['attend_appointment', '<div class="card"><h4 class="status">Attend Appointment</h4></div>', 'unknown'],
+    ['attend_appointment', '<table><tr><td><h4 class="status">Attend Appointment</h4></td></tr></table>', 'unknown'],
+    ['attend_appointment needs_payment', '<h4 class="status">Attend Appointment</h4>', 'unknown'],
+    ['attend_appointment', '<h4 class="status">Pay Visa Fee</h4>', 'unknown'],
+    ['attend_appointment', '<h4 class="status">Attend Appointment</h4><h4 class="status">Pay Visa Fee</h4>', 'unknown'],
+    ['attend_appointment', '<h4 class="status"><small>Current Status</small> Attend   Appointment </h4>', 'paid'],
+  ])('requires consistent outer booked markers and group-scoped status (%s, %s)', (classes, status, expected) => {
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups' });
+    document.body.innerHTML = `<section class="application card ${classes}"><strong>22222222</strong>${status}
+      <a href="/en-ca/niv/schedule/11111111/continue_actions">Continue</a></section>`;
+    expect(readDashboardGroups().groups[0].paymentStatus).toBe(expected);
+  });
+
   it('collects dashboard groups with IVRs and ignores other links', () => {
     vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/groups' });
     document.body.innerHTML = `

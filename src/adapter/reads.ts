@@ -117,10 +117,14 @@ export function readDashboardGroups(): { groups: DashboardGroup[] } {
       if (normalized.length > 1) return 'unknown' as const;
       const payFee = (normalized[0] ?? '') === 'Pay Visa Fee';
       const needsPayment = outer.classList.contains('needs_payment');
+      // A booked summary may sit inside a nested .card. Recognize its outer
+      // attend_appointment marker only with the matching group-scoped status,
+      // without loosening nested-card scoping for identity or other evidence.
+      const bookedStatus = outer.classList.contains('attend_appointment') && normalized[0] === 'Attend Appointment';
       // Paid markers are group-scoped ready_to_schedule or booked appointment
-      // markup. Both paid and unpaid cards can carry continue_actions links,
+      // evidence. Both paid and unpaid cards can carry continue_actions links,
       // so link shape alone is never evidence.
-      const paidMarker = outer.classList.contains('ready_to_schedule') ||
+      const paidMarker = bookedStatus || outer.classList.contains('ready_to_schedule') ||
         Array.from(outer.querySelectorAll('.ready_to_schedule')).some(element => inScope(outer, element)) ||
         Array.from(outer.querySelectorAll('p.consular-appt')).some(element => inScope(outer, element));
       // Consistency: contradictory markers stay unknown even when the status

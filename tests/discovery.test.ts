@@ -14,6 +14,12 @@ const started = (): EngineState => ({ ...startRun(emptyEngineState(now), { mode:
 describe('dashboard-driven onboarding', () => {
   it.each([
     [[paid], 'booking'], [[unpaid], 'alerts'], [[unpaid, paid], 'both'],
+    [[paid, unpaid, { scheduleId: '55555555', ivr: '66666666', paymentStatus: 'unknown' }], 'both'],
+    [[unpaid, { ...paid, paymentStatus: 'unknown' }], 'alerts'],
+    [[{ ...paid, paymentStatus: 'unknown' }, unpaid], 'alerts'],
+    [[unpaid, { scheduleId: '', ivr: null, paymentStatus: 'unknown' }], 'alerts'],
+    [[paid, unpaid, { scheduleId: '', ivr: null, paymentStatus: 'unknown' }], 'both'],
+    [[paid, { scheduleId: '', ivr: null, paymentStatus: 'unknown' }], 'booking'],
     [[{ ...paid, paymentStatus: 'unknown' }], 'booking'],
     [[paid, { ...unpaid, paymentStatus: 'unknown' }], 'booking'],
     [[{ scheduleId: '', ivr: null, paymentStatus: 'unknown' }], 'booking'], [[], 'booking'],
@@ -22,12 +28,17 @@ describe('dashboard-driven onboarding', () => {
   });
 
   it('rejects malformed and ambiguous identities rather than making them feature evidence', () => {
-    for (const raw of [null, {}, { groups: null }, { groups: [null] }, { groups: [{ ...paid, scheduleId: 'bad' }] }, { groups: [paid, paid] }])
+    for (const raw of [null, {}, { groups: null }, { groups: [null] }, { groups: [{ ...paid, scheduleId: 'bad' }] }, { groups: [paid, paid] },
+      { groups: [unpaid, { scheduleId: 'bad', ivr: null, paymentStatus: 'unknown' }] },
+      { groups: [unpaid, { scheduleId: '', ivr: unpaid.ivr, paymentStatus: 'unknown' }] },
+      { groups: [unpaid, { scheduleId: unpaid.scheduleId, ivr: null, paymentStatus: 'unknown' }] },
+      { groups: [unpaid, { scheduleId: '', ivr: undefined, paymentStatus: 'unknown' }] }])
       expect(() => dashboardFeatures(raw)).toThrow();
   });
 
   it('automatically chooses the sole feature without creating booking authority', () => {
-    const selected = assessDashboard(started(), { groups: [unpaid] });
+    const selected = assessDashboard(started(), { groups: [unpaid, { ...paid, paymentStatus: 'unknown' },
+      { scheduleId: '', ivr: null, paymentStatus: 'unknown' }] });
     expect(selected).toMatchObject({ mode: 'alerts', status: 'running', intent: null, group: null, executor: null,
       discovery: { features: 'alerts', requested: false, choosing: false } });
     expect(panelSnapshot(selected, null, null)).toMatchObject({ mode: 'alerts', availableModes: 'alerts' });
@@ -56,6 +67,19 @@ describe('dashboard-driven onboarding', () => {
     const returning: EngineState = { ...started(), mode: 'alerts', discovery: { features: 'both', requested: false, choosing: false } };
     expect(assessDashboard(returning, { groups: [paid, unpaid] })).toMatchObject({ mode: 'alerts', discovery: { choosing: false } });
     expect(assessDashboard(returning, { groups: [paid] })).toMatchObject({ mode: 'booking', group: null, executor: null, lastCandidate: null });
+  });
+
+  it('refreshes a stopped booking-only account to both features on explicit Start despite unrelated unknown groups', () => {
+    const running = { ...started(), discovery: { features: 'booking' as const, requested: false, choosing: false } };
+    const stopped = stopRun(running, { owner: running.owner!, runId: running.runId!, now });
+    expect(panelSnapshot(stopped, null, null).availableModes).toBe('booking');
+    const resumed = startRun(stopped, { mode: 'booking', owner: running.owner!, runId: 'run-token-002', now });
+    const refreshed = assessDashboard(resumed, { groups: [paid, unpaid,
+      { scheduleId: '55555555', ivr: '66666666', paymentStatus: 'unknown' },
+      { scheduleId: '77777777', ivr: '88888888', paymentStatus: 'unknown' }] });
+    expect(panelSnapshot(refreshed, null, null).availableModes).toBe('both');
+    expect(panelSnapshot(refreshed, null, null).modeChoiceRequired).not.toBe(true);
+    expect(refreshed).toMatchObject({ mode: 'booking', group: null, executor: null, intent: null });
   });
 
   it('never lets feature discovery discard unresolved intent or a mutation checkpoint', () => {

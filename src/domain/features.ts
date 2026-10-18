@@ -1,4 +1,4 @@
-import { validateDashboardSnapshot, type EngineMode } from './groups';
+import type { EngineMode } from './groups';
 
 export type DashboardFeatures = 'booking' | 'alerts' | 'both';
 export type DashboardDiscovery = {
@@ -12,18 +12,28 @@ export function isDashboardFeatures(value: unknown): value is DashboardFeatures 
 }
 
 // Classification controls which features are offered, never permission to act.
-// Unknown/incomplete markup offers scheduling as the documented fallback;
+// Positive evidence independently exposes each feature. Only a dashboard
+// without either known group type offers scheduling as the fallback;
 // normal exact-group, paid-baseline and complete-roster guards still apply.
 export function dashboardFeatures(raw: unknown): DashboardFeatures {
   if (!raw || typeof raw !== 'object' || !('groups' in raw) || !Array.isArray(raw.groups))
     throw new Error('Invalid dashboard snapshot.');
   const groups = raw.groups;
-  if (groups.some(group => !group || typeof group !== 'object')) throw new Error('Invalid dashboard group.');
-  if (groups.some(group => group.scheduleId === '' || group.ivr === null)) return 'booking';
-  const snapshot = validateDashboardSnapshot(raw);
-  if (!snapshot.groups.length || snapshot.groups.some(group => group.paymentStatus === 'unknown')) return 'booking';
-  const paid = snapshot.groups.some(group => group.paymentStatus === 'paid');
-  const unpaid = snapshot.groups.some(group => group.paymentStatus === 'unpaid');
+  // Unreadable siblings must not erase positive payment evidence. Preserve
+  // the reader's incomplete identities while rejecting malformed/duplicate
+  // identifiers; exact selected-group validation still gates every workflow.
+  const digitId = (value: unknown) => typeof value === 'string' && /^[0-9]{1,32}$/.test(value);
+  for (const group of groups) {
+    if (!group || typeof group !== 'object' ||
+        (group.scheduleId !== '' && !digitId(group.scheduleId)) ||
+        (group.ivr !== null && !digitId(group.ivr))) throw new Error('Invalid dashboard group.');
+  }
+  const schedules = groups.map(group => group.scheduleId).filter(id => id !== '');
+  const ivrs = groups.map(group => group.ivr).filter(id => id !== null);
+  if (new Set(schedules).size !== schedules.length || new Set(ivrs).size !== ivrs.length)
+    throw new Error('Ambiguous dashboard groups.');
+  const paid = groups.some(group => group.paymentStatus === 'paid');
+  const unpaid = groups.some(group => group.paymentStatus === 'unpaid');
   return paid && unpaid ? 'both' : unpaid ? 'alerts' : 'booking';
 }
 
