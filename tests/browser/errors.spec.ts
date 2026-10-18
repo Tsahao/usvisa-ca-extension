@@ -37,7 +37,10 @@ for (const scenario of [
       const region = panel.getByRole('region', { name: 'US Visa Scheduler for Canada' });
       await region.getByRole('button', { name: 'Start', exact: true }).click();
       await expect(region.getByRole('heading', { name: scenario.title, exact: true })).toBeVisible();
-      if (scenario.kind === 'generic') await expect(region.getByText('The extension found no visa groups on this dashboard. Refresh the dashboard; if this repeats, report this message.', { exact: true })).toBeVisible();
+      // The redesigned failure screen shows its category; worker diagnostics
+      // are available through Report a problem rather than duplicated here.
+      if (scenario.kind === 'generic') await expect(region.getByText('The extension found no visa groups on this dashboard. Refresh the dashboard; if this repeats, report this message.', { exact: true })).toHaveCount(0);
+      await expect(region.getByRole('button', { name: 'Report a problem', exact: true })).toBeVisible();
       await expect(region.getByRole('button', { name: 'Check configurations', exact: true })).toBeVisible();
       await expect(region.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
       await expect(region).toContainText('Tap to retry');

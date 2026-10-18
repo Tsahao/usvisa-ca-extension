@@ -71,9 +71,10 @@ test('Figma screens, assets and responsive panel', async ({ page }) => {
   await expect(panel.getByRole('navigation')).toHaveCount(0);
   await capture('home');
   await expect(panel).toHaveCSS('height', '586px');
-  const logo = panel.locator('img[src="assets/welcome-maple.svg"]');
-  await expect(logo).toHaveJSProperty('naturalWidth', 26);
-  expect(await logo.evaluate(image => (image as HTMLImageElement).getBoundingClientRect().width)).toBeCloseTo(25.8462, 1);
+  const logo = panel.locator('img[src="assets/welcome-logo.png"]');
+  await expect(logo).toHaveJSProperty('naturalWidth', 141);
+  expect(await logo.evaluate(image => image.getBoundingClientRect().width)).toBeCloseTo(70.5, 1);
+  expect(await logo.evaluate(image => image.parentElement!.getBoundingClientRect().width)).toBe(48);
   await page.getByRole('button', { name: 'Fill synthetic preferences' }).click();
   await page.getByRole('button', { name: 'Open configuration' }).click();
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue('preview@example.invalid');
