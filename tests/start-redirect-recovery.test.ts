@@ -218,7 +218,9 @@ describe('stale-dashboard Retry recovery', () => {
     chromeMock.scripting.executeScript.mockResolvedValue([{ result: { groups: [] } }]);
     const reply = await sendStart('booking');
     expect(reply.ok).toBe(false);
-    expect(stored.engineStateV1).toEqual(oldStoppedSave());
+    // The paused save keeps its exact recorded freshness; only the fixed
+    // identifier-free selection cause is retained for the problem report.
+    expect(stored.engineStateV1).toEqual({ ...oldStoppedSave(), authenticationFailureReason: 'no-dashboard-group' });
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
   });
 

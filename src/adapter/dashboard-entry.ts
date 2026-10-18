@@ -1,4 +1,4 @@
-export type DashboardContinueRequest = { scheduleId: string; ivr: string; dashboardPath: string; applicantIds: string[] };
+export type DashboardContinueRequest = { scheduleId: string; ivr: string | null; dashboardPath: string; applicantIds: string[] };
 
 export function performDashboardContinue(request: DashboardContinueRequest): { ok: boolean } {
   const url = new URL(location.href);
@@ -6,7 +6,7 @@ export function performDashboardContinue(request: DashboardContinueRequest): { o
     ids.every(id => typeof id === 'string' && /^[0-9]{1,32}$/.test(id)) && new Set(ids).size === ids.length;
   if (url.origin !== 'https://ais.usvisa-info.com' || url.username || url.password || url.port || url.hash ||
       !/^\/en-ca\/niv\/groups(?:\/[0-9]{1,32})?$/.test(request.dashboardPath) || url.pathname !== request.dashboardPath ||
-      !/^[0-9]{1,32}$/.test(request.scheduleId) || !/^[0-9]{5,32}$/.test(request.ivr) || !validIds(request.applicantIds)) return { ok: false };
+      !/^[0-9]{1,32}$/.test(request.scheduleId) || (request.ivr !== null && !/^[0-9]{5,32}$/.test(request.ivr)) || !validIds(request.applicantIds)) return { ok: false };
   const targetPath = `/en-ca/niv/schedule/${request.scheduleId}/continue_actions`;
   const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('ul.actions a[href]')).filter(link => {
     const target = new URL(link.getAttribute('href') ?? '', url);
@@ -25,7 +25,10 @@ export function performDashboardContinue(request: DashboardContinueRequest): { o
     }).filter(Boolean));
     const ivrs = new Set(Array.from(scope.querySelectorAll('strong')).map(element => (element.textContent ?? '').trim()).filter(value => /^[0-9]{5,32}$/.test(value)));
     if (schedules.size > 1 || ivrs.size > 1) break;
-    if (schedules.size === 1 && schedules.has(request.scheduleId) && ivrs.has(request.ivr)) group = scope;
+    // A null-IVR binding proves the group by the unique schedule scope: the
+    // exact-schedule Continue link (single, exact path) is the entry
+    // evidence. A readable binding additionally requires its exact IVR.
+    if (schedules.size === 1 && schedules.has(request.scheduleId) && (request.ivr === null || ivrs.has(request.ivr))) group = scope;
   }
   if (!group) return { ok: false };
   const tables = Array.from(group.querySelectorAll('table')).filter(table => table.querySelector(`a[href*="/applicants/"]`));

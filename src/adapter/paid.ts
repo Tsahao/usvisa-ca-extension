@@ -13,7 +13,7 @@ export type PaidPage = {
 
 // Serialized by Chrome: every runtime dependency must be inside this function.
 // Applicant-stage controls supply the roster independently of booking URL IDs.
-export function readPaidPage(scheduleId: string, implicitApplicantId: string | null = null): PaidPage | null {
+export function readPaidPage(scheduleId: string, implicitApplicantId: string | null = null, inspectCapability = false): PaidPage | null {
   const url = new URL(location.href);
   const base = `/en-ca/niv/schedule/${scheduleId}`;
   if (!/^[0-9]{1,32}$/.test(scheduleId) || url.origin !== 'https://ais.usvisa-info.com' ||
@@ -45,6 +45,25 @@ export function readPaidPage(scheduleId: string, implicitApplicantId: string | n
   else if (url.searchParams.get('confirmed_limit_message') === '1' && !applicantIds.length && applicants.length && !facility && !date && !time) kind = 'applicants';
   else if (!url.search && !facility && !date && !time && document.querySelector('input[type="checkbox"]')) kind = 'warning';
   else return null;
+  if (inspectCapability && kind === 'form') {
+    // Unknown dashboard payment evidence must be resolved by real usable
+    // booking controls, not just a matching URL or three detached elements.
+    const forms = document.querySelectorAll<HTMLFormElement>('#appointment-form');
+    if (forms.length !== 1) return null;
+    const form = forms[0];
+    const target = new URL(form.getAttribute('action') ?? '', url);
+    if (form.method.toLowerCase() !== 'post' || target.origin !== url.origin || target.username || target.password ||
+        target.port || target.hash || target.pathname !== `${base}/appointment` ||
+        facility?.tagName !== 'SELECT' || date?.tagName !== 'INPUT' || time?.tagName !== 'SELECT' ||
+        [facility, date, time].some(field => !field || field.form !== form ||
+          document.querySelectorAll(`[id="${field.id}"]`).length !== 1)) return null;
+    const targetIds = target.searchParams.getAll('applicants[]');
+    for (const [key, value] of target.searchParams) {
+      if (key !== 'applicants[]' || !/^[0-9]{1,32}$/.test(value)) return null;
+    }
+    if (targetIds.length && (new Set(targetIds).size !== targetIds.length ||
+        [...targetIds].sort().join(',') !== [...applicantIds].sort().join(','))) return null;
+  }
   const visible = (element: HTMLElement) => {
     for (let node: HTMLElement | null = element; node; node = node.parentElement) {
       const style = getComputedStyle(node);

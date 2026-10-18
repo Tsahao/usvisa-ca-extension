@@ -5,6 +5,7 @@ import { sameApplicants, validateApplicantIds } from '../domain/applicants';
 import { parseTimesPayload } from '../domain/availability';
 import { classifyRoute } from '../domain/routes';
 import { isSameGroupUrl } from '../domain/trust';
+import { normalizeReadingIvr } from '../domain/groups';
 import { mapHttpStatus, SESSION_AGE_MINUTES } from '../domain/timing';
 import { isDiagnosticPhase, type DiagnosticDetail, type DiagnosticEvent } from '../domain/diagnostics';
 import { performPaidAction, type ActResult, type PaidAction } from '../adapter/acts';
@@ -144,7 +145,12 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   const baselineFailure = (raw: unknown): EngineState | null => {
     const reading = raw as { scheduleId?: unknown; ivr?: unknown; kind?: unknown; status?: unknown } | null;
     if (state.intent || reading?.kind !== 'read-failure') return null;
-    if (reading.scheduleId !== scheduleId || reading.ivr !== state.group!.ivr) return park('group-changed');
+    // The schedule is the primary identity; a null (unreadable) IVR on either
+    // side never fabricates a mismatch, while a readable disagreement or a
+    // malformed/missing field stays terminal.
+    const readingIvr = normalizeReadingIvr(reading.ivr);
+    if (reading.scheduleId !== scheduleId || readingIvr === undefined ||
+        (readingIvr !== null && state.group!.ivr !== null && readingIvr !== state.group!.ivr)) return park('group-changed');
     if (deps.isCancelled?.()) return park();
     if (typeof reading.status !== 'number' || !Number.isInteger(reading.status) || reading.status < 0 || reading.status > 599) return retry('reply-malformed');
     return mapHttpStatus(reading.status) === 'denied'
@@ -245,9 +251,10 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     return pace('actions');
   }
   let implicitApplicantId: string | null = null;
+  if (state.group!.pendingInspection) note('payment-inspection-attempted');
   let page: PaidPage | null;
   try {
-    page = await inject(readPaidPage, [scheduleId]) as PaidPage;
+    page = await inject(readPaidPage, state.group!.pendingInspection ? [scheduleId, null, true] : [scheduleId]) as PaidPage;
     if (!page && state.group!.applicantIds?.length === 1 &&
         sameApplicants(state.executor!.applicantIds, state.group!.applicantIds) && classifyRoute(owned.url!) === 'appointment' &&
         !new URL(owned.url!).search) {
@@ -264,7 +271,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       catch (error) { return baselineInvalid(error); }
       if (baselineDate !== state.group!.currentDate) return park('baseline-changed');
       implicitApplicantId = state.group!.applicantIds[0];
-      page = await inject(readPaidPage, [scheduleId, implicitApplicantId]) as PaidPage;
+      page = await inject(readPaidPage, state.group!.pendingInspection ? [scheduleId, implicitApplicantId, true] : [scheduleId, implicitApplicantId]) as PaidPage;
     }
   } catch { return retry('script-interrupted'); }
   // A missing reply or a foreign schedule never mutates or retries blindly:
@@ -365,6 +372,18 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     case 'form': {
       const ids = state.executor!.applicantIds;
       if (page.kind !== 'form' || !sameApplicants(page.applicantIds, ids) || !ids) return park();
+      if (state.group!.pendingInspection) {
+        // Actual form controls and the independent bound roster/baseline,
+        // not a continue_actions URL, establish booking capability.
+        if (!sameApplicants(state.group!.applicantIds, ids)) return park('roster-changed');
+        const refused = await baselineGuard();
+        if (refused) return refused;
+        if (deps.isCancelled?.() || !await prefsUnchanged()) return park('config-changed');
+        const { pendingInspection: _resolved, ...group } = state.group!;
+        state = { ...state, group, updatedAt: deps.nowIso() };
+        await deps.saveState(state);
+        note('payment-inspection-resolved');
+      }
       if (state.lastCandidate === null) {
         if (!await prefsUnchanged()) return park();
         if (state.consecutiveFailures > 0) note('executor-recovered', undefined, 0);

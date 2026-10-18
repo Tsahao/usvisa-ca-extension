@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { panelCommandError, type PanelReadStep } from '../src/engine/start-errors';
+import { isPanelCommandErrorMessage, panelCommandError, type PanelReadStep } from '../src/engine/start-errors';
 import { isPanelFailureKind, panelFailureKind } from '../src/engine/panel-errors';
 import { validateGroupBinding } from '../src/domain/groups';
 
@@ -15,7 +15,10 @@ describe('safe Start diagnostics and dashboard custody', () => {
     expect(panelCommandError(new Error('Paid group not found on the dashboard.'), 'selection')).toContain('No eligible paid group');
     expect(panelCommandError(new Error('Invalid dashboard group.'), 'selection')).toContain('schedule or IVR Account Number');
     expect(panelCommandError(new Error('Selected dashboard group is incomplete.'), 'selection')).toContain('selected group’s schedule or IVR');
-    expect(panelCommandError(new Error('Site under maintenance.'), 'groups')).toContain('under maintenance');
+  });
+  it('accepts legacy saved maintenance diagnostics without generating manual retry instructions', () => {
+    expect(isPanelCommandErrorMessage('The visa website is under maintenance. Wait for it to recover, then press Start.')).toBe(true);
+    expect(panelCommandError(new Error('Site under maintenance.'), 'groups')).not.toContain('press Start');
   });
   it('treats object prototype names as unknown errors', () => {
     for (const message of ['constructor', '__proto__', 'toString'])

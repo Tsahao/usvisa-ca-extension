@@ -1,6 +1,6 @@
 import { platform, type InjectionResult, type Tab } from './platform';
 import { classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
-import { resolveGroup } from './domain/groups';
+import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
 import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
@@ -372,6 +372,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
     // authorize continued booking for the saved group. The independent fresh
     // appointment read below revalidates its baseline and complete roster.
     let selectionOk = false;
+    let selection: GroupResolution | null = null;
     if (policyOk && currentPreferences && group && verifierTabId !== null) {
       try {
         const latest = (await platform.storage.local.get(['uiPreferencesV1'])).uiPreferencesV1;
@@ -380,10 +381,21 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
         if (tab.id === undefined || classifyRoute(tab.url ?? '') !== 'dashboard' ||
             (group.dashboardPath && new URL(tab.url!).pathname !== group.dashboardPath)) throw new Error('Dashboard changed.');
         const snapshot = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
-        const selected = resolveGroup(snapshot[0]?.result, { mode: 'booking',
+        selection = resolveGroup(snapshot[0]?.result, { mode: 'booking',
           paidIvr: currentPreferences.paidIvr, unpaidIvr: currentPreferences.unpaidIvr, preferPaid: true });
-        selectionOk = selected.scheduleId === group.scheduleId && selected.ivr === group.ivr;
+        // Same-group identity: schedule primary, a null/asymmetric IVR never a
+        // fabricated mismatch, readable IVRs must agree.
+        selectionOk = sameGroupRef(selection, group);
       } catch { selectionOk = false; }
+    }
+    // A provisional binding stays provisional only while the fresh evidence
+    // is still unknown; a confirmed-compatible classification clears it (the
+    // rechecks below revalidate baseline/roster before any restart).
+    const keepProvisional = selectionOk && group?.pendingInspection === true && selection?.paymentStatus === 'unknown';
+    if (selectionOk && selection) {
+      if (selection.ivr === null) noteDiagnostic('ivr-unreadable-proceeded', { mode: state.mode });
+      if (group?.pendingInspection === true && selection.paymentStatus !== 'unknown')
+        noteDiagnostic('payment-inspection-resolved', { mode: state.mode });
     }
     if (next.status === 'stopped') {
       if (!policyOk || !selectionOk) {
@@ -423,6 +435,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       restarted = bindGroup(restarted, { owner: prevQueued.owner, runId, now,
         binding: { scheduleId: group.scheduleId, ivr: group.ivr, kind: prevQueued.mode === 'booking' ? 'paid' : 'unpaid',
           currentDate: prevIntent.targetDate, dashboardPath: group.dashboardPath,
+          ...(keepProvisional ? { pendingInspection: true } : {}),
           ...(group.applicantIds ? { applicantIds: group.applicantIds } : {}) } });
       restarted = { ...restarted, policyKey: currentPolicy as string, pollIntervalS: currentInterval,
         stage: 'actions', executor: null, queuedStart: null, verificationError: null };
@@ -473,6 +486,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       restarted = bindGroup(restarted, { owner: prevQueued.owner, runId, now,
         binding: { scheduleId: group.scheduleId, ivr: group.ivr, kind: prevQueued.mode === 'booking' ? 'paid' : 'unpaid',
           currentDate: baseline, dashboardPath: group.dashboardPath,
+          ...(keepProvisional ? { pendingInspection: true } : {}),
           ...(group.applicantIds ? { applicantIds: group.applicantIds } : {}) } });
       restarted = { ...restarted, policyKey: currentPolicy as string, pollIntervalS: currentInterval,
         stage: null, executor: null, queuedStart: null, verificationError: null };
@@ -505,10 +519,16 @@ async function dashboardTab() {
 // authorizes with redirected absent or explicitly false. Contradictory
 // flag/status/text/roster, malformed fields, ordinary 502/network (status 0
 // without redirect) and valid booked/unbooked readings never qualify here.
-function isFreshBaselineAuthDenied(raw: unknown, expected: { scheduleId: string; ivr: string }): boolean {
+function isFreshBaselineAuthDenied(raw: unknown, expected: { scheduleId: string; ivr: string | null }): boolean {
   if (typeof raw !== 'object' || raw === null) return false;
   const reading = raw as Record<string, unknown>;
-  if (reading.scheduleId !== expected.scheduleId || reading.ivr !== expected.ivr) return false;
+  if (reading.scheduleId !== expected.scheduleId) return false;
+  // The schedule is the primary identity: a null (unreadable) IVR on either
+  // side never fabricates a mismatch; a readable disagreement or malformed
+  // field never qualifies.
+  const readingIvr = normalizeReadingIvr(reading.ivr);
+  if (readingIvr === undefined) return false;
+  if (readingIvr !== null && expected.ivr !== null && readingIvr !== expected.ivr) return false;
   if (reading.kind !== 'read-failure') return false;
   if (reading.text !== null) return false;
   if ('applicantIds' in reading) return false;
@@ -589,7 +609,12 @@ async function attemptRestart(area: import('./engine/storage').StorageArea, stat
   const live = await platform.tabs.get(tab.id!);
   if (live.url !== tab.url || live.status === 'loading' || !await unchanged()) return parkForReview(state, now);
   let next = bindGroup(state, { owner: state.owner!, runId: state.runId!, now,
-    binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath, ...(applicantIds ? { applicantIds } : {}) } });
+    binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
+      ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) } });
+  // Degraded success: the restart was authorized although the card's IVR
+  // stayed unreadable and/or its payment classification stayed unknown.
+  if (match.ivr === null) noteDiagnostic('ivr-unreadable-proceeded', { mode: state.mode });
+  if (match.inspectionRequired) noteDiagnostic('payment-unknown-proceeded', { mode: state.mode });
   next = { ...next, restartPending: false, consecutiveFailures: 0, cooldownUntil: null, startedAt: now,
     nextPollAt: new Date(Date.now() + 2_000).toISOString(), updatedAt: now };
   if (state.mode === 'booking') return { ...next, stage: 'actions',
@@ -1001,7 +1026,14 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                 if (message.discover === true || state.discovery) await dashboardUnchanged();
                 state = { ...discoveredState, nextPollAt: new Date(Date.parse(now) + 2_000).toISOString() };
                 state = bindGroup(state, { owner: state.owner!, runId: state.runId!, now, binding: { ...match, kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
-                  ...(applicantIds ? { applicantIds } : {}) } });
+                  ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) } });
+                // Degraded success: the run was authorized although the card's
+                // IVR stayed unreadable and/or its payment classification
+                // stayed unknown. Fixed allowlisted codes; repeats coalesce.
+                if (state.group) {
+                  if (match.ivr === null) noteDiagnostic('ivr-unreadable-proceeded', { mode });
+                  if (match.inspectionRequired) noteDiagnostic('payment-unknown-proceeded', { mode });
+                }
                 if (mode === 'booking') state = { ...state, stage: 'actions',
                   executor: { tabId: tab.id!, applicantIds: applicantIds!, targetTime: null, skippedDates: [], actionPending: false } };
                 state = reviewLifecycle(state, prefs as unknown as Record<string, unknown>, now);
@@ -1041,6 +1073,20 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
         // Validated classification beside the existing safe error: only the
         // exact known IVR domain errors (or their fixed safe diagnostics)
         // yield a specific kind; nothing arbitrary, no IVR or credentials.
+        // A selection refusal additionally retains its exact fixed code on
+        // the saved run state (best effort) so a Report a problem draft can
+        // carry the precise terminal cause without changing this response.
+        const errorMessage = error instanceof Error ? error.message : '';
+        const code = selectionFailureCode(errorMessage);
+        if (code) {
+          noteDiagnostic('auth-terminal', { mode: message.mode === 'alerts' ? 'alerts' : 'booking', purpose: 'start', reason: code, detail: code });
+          try {
+            const current = await loadEngineState(area);
+            // Diagnostic-only metadata write: no workflow transition, so the
+            // saved run's recorded freshness (updatedAt) is preserved exactly.
+            if (current) await saveEngineState(area, { ...current, authenticationFailureReason: code });
+          } catch { /* The Start response below is unchanged. */ }
+        }
         respond({ ok: false, error: detail, failureKind: panelFailureKind(error) });
       }
     });
@@ -1062,7 +1108,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
       const diagnostics = await engineDiagnostics.read();
       if (message.type !== 'ENGINE_PROBLEM_REPORT') return { ok: true, diagnostics };
       const state = await loadEngineState({ get: keys => platform.storage.local.get(keys), set: values => platform.storage.local.set(values) });
-      return { ok: true, diagnostics, context: problemContext(state) };
+      return { ok: true, diagnostics, context: problemContext(state, diagnostics) };
     })
       .then(respond)
       .catch(() => respond({ ok: false }));
@@ -1111,13 +1157,17 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
         const paidIvr = typeof prefs?.paidIvr === 'string' ? prefs.paidIvr : '';
         const unpaidIvr = typeof prefs?.unpaidIvr === 'string' ? prefs.unpaidIvr : '';
         const results = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
-        const raw = results[0]?.result as { groups?: { scheduleId?: unknown; ivr?: unknown; paymentStatus?: unknown }[] } | undefined;
+        const raw = results[0]?.result as { groups?: { scheduleId?: unknown; ivr?: unknown; paymentStatus?: unknown; continuePath?: unknown; paymentConflict?: unknown }[] } | undefined;
+        // Pass the reader's own evidence through unchanged (nullable IVR,
+        // trusted Continue path, conflict flag); resolveGroup validates it.
         const identified = Array.isArray(raw?.groups)
           ? raw.groups.filter(
-              (group): group is { scheduleId: string; ivr: string; paymentStatus?: unknown } =>
-                typeof group?.scheduleId === 'string' && typeof group?.ivr === 'string',
+              (group): group is { scheduleId: string; ivr: string | null; paymentStatus?: unknown; continuePath?: unknown; paymentConflict?: unknown } =>
+                typeof group?.scheduleId === 'string' && (group?.ivr === null || typeof group?.ivr === 'string'),
             ).map(group => ({ scheduleId: group.scheduleId, ivr: group.ivr,
-              ...(typeof group.paymentStatus === 'string' ? { paymentStatus: group.paymentStatus as never } : {}) }))
+              ...(typeof group.paymentStatus === 'string' ? { paymentStatus: group.paymentStatus as never } : {}),
+              ...(typeof group.continuePath === 'string' ? { continuePath: group.continuePath } : {}),
+              ...(group.paymentConflict === true ? { paymentConflict: true } : {}) }))
           : [];
         // Resolution throws on any ambiguity or mismatch: no state changes.
         const match = resolveGroup({ groups: identified }, { mode, paidIvr, unpaidIvr });
@@ -1138,7 +1188,8 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
         const next = bindGroup(started, {
           owner,
           runId: started.runId ?? '',
-          binding: { ...match, kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate, ...(applicantIds ? { applicantIds } : {}) },
+          binding: { ...match, kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate,
+            ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) },
           now,
         });
         if (next !== current) await saveEngineState(area, next);
@@ -1406,7 +1457,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
             next = bindGroup(current, {
               owner: validated.owner,
               runId: validated.runId,
-              binding: { ...match, kind: validated.mode === 'booking' ? 'paid' : 'unpaid', currentDate, ...(applicantIds ? { applicantIds } : {}), ...(dashboardPath ? { dashboardPath } : {}) },
+              binding: { ...match, kind: validated.mode === 'booking' ? 'paid' : 'unpaid', currentDate, ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}), ...(dashboardPath ? { dashboardPath } : {}) },
               now,
             });
             break;
@@ -1614,6 +1665,7 @@ function queueEnginePoll(): void {
             await saveEngineState(area, state);
           }
           let raw: unknown;
+          if (state.group!.pendingInspection) noteDiagnostic('payment-inspection-attempted', { mode: state.mode });
           try {
             const results = await platform.scripting.executeScript({ target: { tabId: payment.id }, func: readSummaryRaw, args: [scheduleId] });
             raw = results[0]?.result;
@@ -1639,6 +1691,21 @@ function queueEnginePoll(): void {
               raw as { headingFound: boolean; rows: { city: string; text: string }[] },
             );
             if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
+            if (state.group!.pendingInspection) {
+              // A complete seven-city summary on the same owned schedule is
+              // the Alerts capability evidence. Revalidate after the read;
+              // a redirect or preference change cannot resolve inspection.
+              const live = await platform.tabs.get(payment.id);
+              if (live.url !== payment.url || live.status === 'loading' ||
+                  (live.pendingUrl && live.pendingUrl !== 'about:blank') ||
+                  JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) !== JSON.stringify(prefs)) {
+                await failSoft(); return;
+              }
+              const { pendingInspection: _resolved, ...group } = state.group!;
+              state = { ...state, group, updatedAt: stamped };
+              await saveEngineState(area, state);
+              noteDiagnostic('payment-inspection-resolved', { mode: state.mode });
+            }
             const scopeKey = `alerts:${scheduleId}:${consulate}:any:${windowPrefs.earliest}:${windowPrefs.latest}`;
             const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1 as
               | { scopeKey?: unknown; monitor?: unknown }
@@ -1770,7 +1837,12 @@ function queueEnginePoll(): void {
             return;
           }
           const reading = baseline[0]?.result as { scheduleId?: unknown; ivr?: unknown; kind?: unknown; status?: unknown } | undefined;
-          if (reading?.kind === 'read-failure' && reading.scheduleId === scheduleId && reading.ivr === state.group.ivr &&
+          // The read-failure result echoes the requested scope; compare under
+          // the shared identity rule so a missing/null IVR on either side is
+          // never manufactured into a mismatch. Malformed evidence still
+          // fails closed (it cannot equal the requested scope).
+          const readingIvr = normalizeReadingIvr(reading?.ivr);
+          if (reading?.kind === 'read-failure' && reading.scheduleId === scheduleId && readingIvr === state.group.ivr &&
               typeof reading.status === 'number' && Number.isInteger(reading.status) && reading.status >= 0 && reading.status <= 599) {
             if (mapHttpStatus(reading.status) === 'denied') {
               noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });

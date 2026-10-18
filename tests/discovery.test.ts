@@ -93,7 +93,7 @@ describe('dashboard-driven onboarding', () => {
 
   it('uses the first paid group in mixed page order, while exact IVRs never fall back', () => {
     const args = { mode: 'booking' as const, paidIvr: '', unpaidIvr: '', preferPaid: true };
-    expect(resolveGroup({ groups: [unpaid, paid] }, args)).toEqual({ scheduleId: paid.scheduleId, ivr: paid.ivr });
+    expect(resolveGroup({ groups: [unpaid, paid] }, args)).toEqual({ scheduleId: paid.scheduleId, ivr: paid.ivr, paymentStatus: 'paid', inspectionRequired: false });
     expect(() => resolveGroup({ groups: [unpaid, paid] }, { ...args, paidIvr: unpaid.ivr })).toThrow('Unpaid group rejected');
     expect(() => resolveGroup({ groups: [unpaid, paid] }, { ...args, paidIvr: '99999999' })).toThrow('Paid group not found');
   });

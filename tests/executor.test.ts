@@ -46,6 +46,43 @@ function harness(kind: PaidPage['kind']) {
 }
 
 describe('paid executor', () => {
+  it('resolves provisional payment evidence only on a form with independently revalidated roster and baseline', async () => {
+    const h = harness('form'); const state = seeded('form');
+    state.group = { ...state.group!, ivr: null, pendingInspection: true, dashboardPath: '/en-ca/niv/groups' };
+    state.lastCandidate = null;
+    const events: DiagnosticEvent[] = [];
+    h.d.recordDiagnostic = event => { events.push(event); };
+    const next = validateEngineState(await runBookingStage(h.d, state));
+    expect(next.group!.pendingInspection).toBeUndefined();
+    expect(next).toMatchObject({ status: 'running', stage: null, intent: null });
+    expect(h.mutations).toEqual([]);
+    expect(h.checkpoints[0].group!.pendingInspection).toBeUndefined();
+    expect(events.map(event => event.code)).toEqual(['payment-inspection-attempted', 'payment-inspection-resolved']);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readPaidPage', 'readCurrentAppointment']);
+  });
+  it.each(['wrong-roster', 'wrong-baseline', 'wrong-ivr', 'missing-page', 'actions-only'])(
+    'does not resolve inspection or submit with unsupported capability (%s)', async issue => {
+      const h = harness(issue === 'actions-only' ? 'actions' : 'form');
+      const state = seeded(issue === 'actions-only' ? 'actions' : 'form');
+      state.group = { ...state.group!, pendingInspection: true, dashboardPath: '/en-ca/niv/groups' };
+      const original = h.d.inject;
+      h.d.inject = vi.fn(async (id, func, args) => {
+        if (func.name === 'readPaidPage' && issue === 'missing-page') return null;
+        if (func.name === 'readCurrentAppointment' && issue === 'wrong-baseline')
+          return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 2, 2027', applicantIds: IDS };
+        if (func.name === 'readCurrentAppointment' && issue === 'wrong-ivr')
+          return { scheduleId: '11111111', ivr: '99999999', kind: 'booked', text: 'January 1, 2027', applicantIds: IDS };
+        return original(id, func, args);
+      });
+      if (issue === 'wrong-roster') h.page.applicantIds = ['99999999'];
+      const events: DiagnosticEvent[] = [];
+      h.d.recordDiagnostic = event => { events.push(event); };
+      const next = await runBookingStage(h.d, state);
+      expect(next.group!.pendingInspection).toBe(true);
+      expect(events.some(event => event.code === 'payment-inspection-resolved')).toBe(false);
+      expect(h.mutations.every(action => action.action === 'reschedule')).toBe(true);
+      expect(next.intent).toBeNull();
+    });
   it('retries a read-only page interruption and recovers without skipping the action checkpoint', async () => {
     const h = harness('actions');
     const original = h.d.inject;
@@ -99,6 +136,55 @@ describe('paid executor', () => {
     expect(await runBookingStage(h.d, next)).toMatchObject({ status: 'running', stage: 'actions', executor: { tabId: 7, actionPending: false } });
     expect(h.checkpoints).toHaveLength(1); expect(h.checkpoints[0].executor?.actionPending).toBe(true);
     expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
+  });
+  it('continues a null-IVR dashboard binding with a null request IVR after a readable baseline', async () => {
+    const h = harness('actions'); const state = seeded('actions');
+    state.lastCandidate = null;
+    state.group = { ...state.group!, ivr: null, dashboardPath: '/en-ca/niv/groups/55555555' };
+    state.executor!.applicantIds = IDS;
+    h.d.getTab = async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    h.d.inject = vi.fn(async (_id, func, args) => {
+      if (func.name === 'readCurrentAppointment') {
+        expect(args).toEqual(['11111111', null, true, true, '/en-ca/niv/groups/55555555', true]);
+        return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027', applicantIds: IDS };
+      }
+      if (func.name === 'performDashboardContinue') {
+        expect(args![0]).toEqual({ scheduleId: '11111111', ivr: null, dashboardPath: '/en-ca/niv/groups/55555555', applicantIds: IDS });
+        return { ok: true };
+      }
+      throw new Error('Unexpected injection');
+    });
+    const next = validateEngineState(await runBookingStage(h.d, state));
+    expect(next).toMatchObject({ status: 'running', stage: 'actions', executor: { tabId: 7, actionPending: false } });
+    expect(h.mutations).toEqual([]);
+    expect(h.checkpoints).toHaveLength(1);
+    expect(h.checkpoints[0].executor!.actionPending).toBe(true);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
+  });
+  it.each([
+    { bindingIvr: null, reading: { scheduleId: '11111111', ivr: '99999999' }, outcome: 'retry' },
+    { bindingIvr: null, reading: { scheduleId: '11111111', ivr: null }, outcome: 'retry' },
+    { bindingIvr: '22222222', reading: { scheduleId: '11111111', ivr: null }, outcome: 'retry' },
+    { bindingIvr: null, reading: { scheduleId: '11111111', ivr: 12345 }, outcome: 'park' },
+    { bindingIvr: null, reading: { scheduleId: '99999999', ivr: null }, outcome: 'park' },
+  ] as const)('classifies null-aware dashboard baseline read failures (%j)', async ({ bindingIvr, reading, outcome }) => {
+    const h = harness('actions'); const state = seeded('actions');
+    state.lastCandidate = null;
+    state.group = { ...state.group!, ivr: bindingIvr, dashboardPath: '/en-ca/niv/groups/55555555' };
+    state.executor!.applicantIds = IDS;
+    h.d.getTab = async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
+    h.d.inject = vi.fn(async () => ({ ...reading, kind: 'read-failure', text: null, status: 503 }));
+    const next = validateEngineState(await runBookingStage(h.d, state));
+    if (outcome === 'park') {
+      expect(next).toMatchObject({ status: 'verifying', nextPollAt: null, intent: null });
+      expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment']);
+    } else {
+      // A null IVR on either side and a readable disagreement against a null
+      // binding never fabricate an identity mismatch: the schedule is primary
+      // and the failed GET stays on the counted retry budget.
+      expect(next).toMatchObject({ status: 'running', consecutiveFailures: 1, nextPollAt: '2026-10-12T00:01:00.000Z' });
+    }
+    expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
   });
   it.each(['wrong-group', 'wrong-ivr', 'changed-roster', 'changed-baseline', 'cancelled'])(
     'still parks an unsafe dashboard handoff without clicking Continue (%s)', async issue => {

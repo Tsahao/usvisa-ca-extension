@@ -123,8 +123,9 @@ describe('product worker telemetry integration (mocked network only)', () => {
     await send({ type: 'PANEL_START', mode: 'alerts' });
     const before = structuredClone(stored.engineStateV1);
     const report = await send({ type: 'ENGINE_PROBLEM_REPORT' });
-    expect(report).toMatchObject({ ok: true, diagnostics: { version: 1 }, context: { status: expect.any(String), stage: expect.any(String) } });
-    expect(Object.keys(report.context).sort()).toEqual(['stage', 'status']);
+    expect(report).toMatchObject({ ok: true, diagnostics: { version: 1 },
+      context: { status: expect.any(String), stage: expect.any(String), failureCode: 'unpaid-group-not-found' } });
+    expect(Object.keys(report.context).sort()).toEqual(['failureCode', 'stage', 'status']);
     expect(JSON.stringify(report)).not.toMatch(/fixture@example|private-synthetic|11111111|22222222|Vancouver|2026-11-01|schedule\//);
     expect(stored.engineStateV1).toEqual(before);
     const respond = vi.fn();

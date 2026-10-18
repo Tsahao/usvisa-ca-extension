@@ -1,4 +1,4 @@
-import { isExtensionVersion, pruneDiagnostics, validateDiagnostics } from './diagnostics';
+import { isAuthenticationFailureReason, isExtensionVersion, pruneDiagnostics, validateDiagnostics } from './diagnostics';
 import { isPanelFailureKind } from '../engine/panel-errors';
 import type { EngineState } from '../engine/workflow';
 
@@ -7,10 +7,24 @@ export const REPORT_URL_LIMIT = 2000;
 const REPORT_STAGES = ['authentication', 'actions', 'warning', 'applicants', 'form', 'confirm', 'done', 'none'] as const;
 
 // Project only fixed fields, never serialize the workflow or preferences.
-export function problemContext(state: EngineState | null) {
+export function problemContext(state: EngineState | null, diagnostics?: unknown) {
+  // A direct Start can refuse before an engine run exists. Retain its fixed
+  // cause from the diagnostic log rather than inventing a workflow to store it.
+  let startFailure: string | null = null;
+  if (!state && diagnostics) {
+    try {
+      const latest = validateDiagnostics(diagnostics).entries.find(entry =>
+        ['auth-terminal', 'auth-started', 'auth-recovered'].includes(entry.code));
+      if (latest?.code === 'auth-terminal' && isAuthenticationFailureReason(latest.reason)) startFailure = latest.reason;
+    } catch { /* Diagnostics never prevent reporting. */ }
+  }
   return {
-    status: state?.status ?? 'idle',
+    status: state?.status ?? (startFailure ? 'stopped' : 'idle'),
     stage: state?.authentication ? 'authentication' : REPORT_STAGES.find(value => value === (state?.stage ?? 'none')) ?? 'unknown',
+    // Stable identifier-free terminal failure code retained on the run (for
+    // example an exact dashboard selection refusal). Developer state only:
+    // never a UI category, never page content or identifiers.
+    failureCode: state?.authenticationFailureReason ?? startFailure,
   };
 }
 
@@ -21,11 +35,14 @@ export function buildProblemEmail(args: {
   const version = isExtensionVersion(args.version) ? args.version : 'unknown';
   // Never include raw user-agent, error messages, or worker replies.
   const browser = args.userAgent.match(/(?:Edg|Chrome|Chromium)\/[\d.]{1,32}/)?.[0] ?? 'unknown';
-  const context = args.context as { status?: unknown; stage?: unknown } | undefined;
+  const context = args.context as { status?: unknown; stage?: unknown; failureCode?: unknown } | undefined;
   const status = ['idle', 'running', 'verifying', 'stopped'].find(value => value === context?.status) ??
     ['idle', 'running', 'success', 'failure'].find(value => value === args.status) ?? 'unknown';
   const stage = REPORT_STAGES.find(value => value === context?.stage) ?? 'unknown';
   const failure = isPanelFailureKind(args.failureKind) ? args.failureKind : 'generic';
+  // The specific terminal code is validated against the shared allowlist so a
+  // tampered context can never smuggle arbitrary text into the draft.
+  const failureCode = isAuthenticationFailureReason(context?.failureCode) ? context.failureCode : 'none';
   let lines: string[] = [];
   let available = false;
   try {
@@ -40,7 +57,7 @@ export function buildProblemEmail(args: {
     '--- Technical details ---', `Report generated: ${args.now}`, `Extension version: ${version}`,
     `Browser version: ${browser}`, `Workflow mode: ${args.mode === 'booking' ? 'Book' : 'Alerts'}`,
     `Auto Mode: ${args.autoMode ? 'On' : 'Off'}`, `Workflow status: ${status}`,
-    `Workflow stage: ${stage}`, `Failure reason: ${failure}`, '', '--- Recent diagnostics ---',
+    `Workflow stage: ${stage}`, `Failure reason: ${failure}`, `Failure code: ${failureCode}`, '', '--- Recent diagnostics ---',
   ].join('\n') + '\n';
   const prefix = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(`[Visa Extension] Problem report — v${version}`)}&body=`;
   const url = (text: string) => prefix + encodeURIComponent(body + text);

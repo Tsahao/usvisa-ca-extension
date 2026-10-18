@@ -1,5 +1,6 @@
 import { appointmentApplicants, appointmentDateRelaxed } from '../domain/appointment';
 import { sameApplicants } from '../domain/applicants';
+import { normalizeReadingIvr } from '../domain/groups';
 import { verifyBooking } from '../domain/booking';
 import { COOLDOWN_S, SETUP_FAILURE_COOLDOWN_AFTER, VERIFICATION_READ_GAP_S, pollDelaySeconds } from '../domain/timing';
 import type { DiagnosticDetail, DiagnosticEvent } from '../domain/diagnostics';
@@ -65,9 +66,14 @@ export async function runVerificationRead(state: EngineState, deps: {
   if (deps.isCancelled?.()) return { ...state, verification: null, nextPollAt: null, updatedAt: now };
   if (raw == null) return unreadable('reply-missing', true);
   const reading = raw as { scheduleId?: unknown; ivr?: unknown; kind?: unknown; status?: unknown };
+  const readingIvr = normalizeReadingIvr(reading.ivr);
+  // An explicit readable disagreement is identity movement (terminal); a
+  // missing or malformed field is a transient unreadable reply. A null
+  // (unreadable) IVR on either side never fabricates a mismatch.
   if ((typeof reading.scheduleId === 'string' && reading.scheduleId !== state.group.scheduleId) ||
-      (typeof reading.ivr === 'string' && reading.ivr !== state.group.ivr)) return unreadable('group-changed', false);
-  if (reading.scheduleId !== state.group.scheduleId || reading.ivr !== state.group.ivr) return unreadable('reply-malformed', true);
+      (typeof reading.ivr === 'string' && state.group.ivr !== null && reading.ivr !== state.group.ivr))
+    return unreadable('group-changed', false);
+  if (reading.scheduleId !== state.group.scheduleId || readingIvr === undefined) return unreadable('reply-malformed', true);
   if (reading.kind === 'read-failure') return unreadable('transport', true);
   let date: string | null;
   try {

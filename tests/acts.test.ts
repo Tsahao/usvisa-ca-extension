@@ -24,6 +24,27 @@ const form = () => {
 afterEach(() => { vi.unstubAllGlobals(); delete (window as unknown as { jQuery?: unknown }).jQuery; vi.useRealTimers(); });
 
 describe('serialized paid adapters', () => {
+  it.each(['plain', 'applicant-query', 'disabled-until-date'])(
+    'recognizes real booking capability when payment markup is unknown (%s)', variant => {
+      form();
+      document.body.innerHTML = `<form id="appointment-form" method="post" action="${base}/appointment${variant === 'applicant-query' ? formQuery : ''}">${document.body.innerHTML}</form>`;
+      if (variant === 'disabled-until-date') document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_time')!.disabled = true;
+      expect(read(request.scheduleId, null, true)).toMatchObject({ kind: 'form', applicantIds: ids });
+    });
+  it.each(['detached', 'foreign-action', 'other-schedule', 'wrong-applicants', 'get-form', 'duplicate-control'])(
+    'refuses unsupported booking capability without mutating the page (%s)', variant => {
+      form();
+      if (variant !== 'detached') {
+        const action = variant === 'foreign-action' ? 'https://example.invalid/appointment' :
+          variant === 'other-schedule' ? base.replace('11111111', '99999999') + '/appointment' :
+          base + '/appointment' + (variant === 'wrong-applicants' ? '?applicants[]=99999999' : '');
+        document.body.innerHTML = `<form id="appointment-form" method="${variant === 'get-form' ? 'get' : 'post'}" action="${action}">${document.body.innerHTML}</form>`;
+      }
+      if (variant === 'duplicate-control') document.body.insertAdjacentHTML('beforeend', '<input id="appointments_consulate_appointment_date">');
+      const before = document.body.innerHTML;
+      expect(read(request.scheduleId, null, true)).toBeNull();
+      expect(document.body.innerHTML).toBe(before);
+    });
   it('continues immediately after a synchronous successful facility days callback', async () => {
     vi.useFakeTimers(); form();
     const calendar = installPortalCalendar();
