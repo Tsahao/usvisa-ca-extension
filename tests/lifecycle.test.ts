@@ -7,6 +7,18 @@ const NOW = '2026-10-12T00:00:00.000Z';
 const prefs = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', testMode: true, onlyEarlier: true, interval: 120 };
 const seeded = () => startRun(emptyEngineState(NOW), { mode: 'booking', owner: 'owner-token-01', runId: 'run-id-0001', now: NOW });
 describe('durable lifecycle review', () => {
+  it('retains 30-second intervals across lifecycle review, storage and polling', () => {
+    const settings = { ...prefs, interval: 30 };
+    const state = validateEngineState(JSON.parse(JSON.stringify(reviewLifecycle(seeded(), settings, NOW))));
+    expect(state).toMatchObject({ status: 'running', pollIntervalS: 30 });
+    expect(reviewLifecycle(state, settings, NOW).status).toBe('running');
+    expect(applyPollResult(state, { outcome: 'healthy', now: NOW, random: () => 0 }).nextPollAt).toBe('2026-10-12T00:00:30.000Z');
+  });
+  it.each([29, 30.5, 86401])('refuses invalid interval %s in lifecycle and persisted state', interval => {
+    expect(reviewLifecycle(seeded(), { ...prefs, interval }, NOW).status).toBe('verifying');
+    expect(() => validateEngineState({ ...seeded(), pollIntervalS: interval })).toThrow('Invalid poll interval.');
+  });
+
   it('pins non-secret settings and honors the configured healthy interval', () => {
     const state = reviewLifecycle(seeded(), { ...prefs, email: 'synthetic@example.invalid', password: 'synthetic-password' }, NOW);
     expect(state.pollIntervalS).toBe(120);

@@ -264,7 +264,7 @@ export function validateEngineState(value: unknown): EngineState {
       ...(auth.dashboardFirst === undefined ? {} : { dashboardFirst: auth.dashboardFirst }),
       ...(auth.checkpoint === undefined ? {} : { checkpoint: auth.checkpoint }) };
   }
-  if (!Number.isInteger(pollIntervalS) || (pollIntervalS as number) < 60 || (pollIntervalS as number) > 86400) throw new Error('Invalid poll interval.');
+  if (!Number.isInteger(pollIntervalS) || (pollIntervalS as number) < 30 || (pollIntervalS as number) > 86400) throw new Error('Invalid poll interval.');
   if (!(startedAt === null || isIsoDateTime(startedAt)) ||
       !(policyKey === null || (typeof policyKey === 'string' && policyKey.length <= 1024))) throw new Error('Invalid lifecycle state.');
   const alert = validateAlert(state.alert);

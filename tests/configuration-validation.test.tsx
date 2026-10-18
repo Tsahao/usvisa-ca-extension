@@ -17,6 +17,18 @@ function expectQuiet() { expect(screen.queryByRole('alert')).toBeNull(); }
 function saveDisabled() { return (screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled; }
 
 describe('Settings validation timing', () => {
+  it('allows saving a 30-second checking interval', async () => {
+    const { user, props } = setup(DEMO_PREFERENCES);
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    const input = screen.getByLabelText('Checking interval (s)');
+    expect(input.getAttribute('min')).toBe('30');
+    await user.clear(input);
+    await user.type(input, '30');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...DEMO_PREFERENCES, interval: 30 });
+    expectQuiet();
+  });
+
   it('stays quiet throughout first-time entry and only enables Save for a complete valid draft', async () => {
     const { user, props } = setup();
     expectQuiet();
@@ -139,6 +151,12 @@ describe('Settings validation timing', () => {
 });
 
 describe('shared preference validation', () => {
+  it.each([29, 30, 59, 60, 30.5, 86400, 86401])('validates checking interval boundary %s', interval => {
+    const error = preferencesError({ ...DEMO_PREFERENCES, interval });
+    if (Number.isInteger(interval) && interval >= 30 && interval <= 86400) expect(error).toBeNull();
+    else expect(error).toBe('Checking interval must be a whole number from 30 to 86400 seconds.');
+  });
+
   it.each([
     ['', ''], ['2026-02-30', '2027-01-01'], ['2027-01-01', '2026-11-01'],
     ['2026-11-01', '2026-11-01'], ['2026-11-01', '2027-01-01'],

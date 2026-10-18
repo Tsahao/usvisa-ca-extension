@@ -14,6 +14,15 @@ import {
 } from '../src/domain/timing';
 
 describe('timing and failure budgets', () => {
+  it('allows a 30-second minimum with unchanged jitter for healthy polls and retries', () => {
+    expect(pollDelaySeconds(() => 0, 30)).toBe(30);
+    expect(pollDelaySeconds(() => 0.9999, 30)).toBe(60);
+    expect(failureRetryDelaySeconds(() => 0, 30)).toBe(30);
+    for (const interval of [29, 30.5, 86401, NaN]) {
+      expect(() => pollDelaySeconds(() => 0, interval)).toThrow('Invalid poll interval.');
+    }
+  });
+
   it('paces healthy polls at 60s plus 0–30s jitter', () => {
     expect(pollDelaySeconds(() => 0)).toBe(60);
     expect(pollDelaySeconds(() => 0.9999)).toBe(90);
