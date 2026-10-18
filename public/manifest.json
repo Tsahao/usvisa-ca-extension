@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "US Visa Scheduler for Canada",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Monitor available US visa appointments at consulates in Canada and automatically book one that fits user’s preferred date range.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms", "activeTab", "scripting", "notifications"],
