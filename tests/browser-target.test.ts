@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, existsSync, writeFileSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseBrowserArgs, resolveBrowserTarget } from '../scripts/browser-target.mjs';
@@ -80,4 +80,34 @@ describe('browser target selection', () => {
       }
     } finally { rmSync(staging, { recursive: true, force: true }); }
   }, 30_000);
+
+  // Regression: a macOS Finder `.DS_Store` left in publicDir used to be copied
+  // verbatim into dist/ and fail the release smoke allowlist. Builds against a
+  // private copy of publicDir so the shared source tree is never mutated.
+  it('prunes Finder .DS_Store metadata copied from public/ out of every build flavor', () => {
+    const staging = mkdtempSync(join(tmpdir(), 'usvisa-target-dotfiles-'));
+    try {
+      const publicCopy = join(staging, 'public');
+      cpSync(resolve('public'), publicCopy, { recursive: true });
+      writeFileSync(join(publicCopy, '.DS_Store'), 'local OS artifact, not a build input');
+      writeFileSync(join(publicCopy, 'assets/.DS_Store'), 'nested local OS artifact');
+      for (const mode of ['production', 'test']) {
+        const outDir = join(staging, mode);
+        const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production', BROWSER_TARGET: 'chrome', VITE_POSTHOG_ENABLED: 'false' };
+        delete env.VITE_POSTHOG_PROJECT_TOKEN;
+        delete env.VITE_POSTHOG_HOST;
+        const program = `import { build } from 'vite';\n` +
+          `await build({ configFile: ${JSON.stringify(resolve('vite.config.ts'))}, mode: ${JSON.stringify(mode)},\n` +
+          `  publicDir: ${JSON.stringify(publicCopy)}, build: { outDir: ${JSON.stringify(outDir)} }, logLevel: 'error' });`;
+        const result = spawnSync(process.execPath, ['--input-type=module', '-e', program], { env, encoding: 'utf8', cwd: resolve('.') });
+        expect(result.status, result.stderr).toBe(0);
+        expect(existsSync(join(outDir, '.DS_Store')), `${mode} root metadata`).toBe(false);
+        expect(existsSync(join(outDir, 'assets/.DS_Store')), `${mode} nested metadata`).toBe(false);
+        if (mode === 'production') {
+          const smoke = spawnSync(process.execPath, [resolve('scripts/release-smoke.mjs'), outDir], { env, encoding: 'utf8' });
+          expect(smoke.status, smoke.stderr).toBe(0);
+        }
+      }
+    } finally { rmSync(staging, { recursive: true, force: true }); }
+  }, 60_000);
 });

@@ -51,6 +51,10 @@ npm run package:release  # release/…zip + .sha256 (smoke checks run first)
   audited permission set, visa-site-only host access, strict runtime file allowlist, no website-accessible developer resources, runtime asset presence, and
   the absence of probe pages, source maps, private config, and test fixtures.
   It never prints bundle contents.
+- Builds remove macOS Finder `.DS_Store` metadata, which Vite would otherwise
+  copy verbatim from `public/`. `apply: 'build'` keeps this off the dev server,
+  and it normalizes that one artifact only: every other unexpected runtime file
+  still fails the smoke allowlist rather than being silently dropped.
 - `scripts/package-release.mjs` zips an explicit runtime allowlist
   (`manifest.json`, `background.js`, `panel.html`, `panel.js`, `assets/`,
   `icons/`, `LICENSE`, generated `SOURCE.txt` and complete
