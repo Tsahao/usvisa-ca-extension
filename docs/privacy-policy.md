@@ -39,7 +39,15 @@ for up to 7 days outside the user interface: event code, timestamp, fixed
 validation-branch detail, workflow phase, run purpose, run mode, extension version and a failure
 count — never credentials, settings, portal URLs or page content, applicant
 identifiers, appointment dates or raw errors. It is not sent to analytics or
-the publisher, and it is separate from the user-facing View Logs.
+the publisher automatically, and it is separate from the user-facing View Logs.
+On failure screens, **Report a problem** opens an email draft to
+browser.latte.1k@icloud.com with extension/browser versions, workflow mode,
+Test Mode, status, stage, a fixed failure category and recent sanitized
+diagnostics. Older entries may be omitted to fit email-link limits. You can
+review, edit or discard the draft; nothing is sent unless you send the email.
+Sending shares the report, your email address and any comments you add with
+the publisher through your email provider. An email app or configured browser
+email handler is required.
 Recording is best effort; the entry limit can remove older events sooner,
 and storage failures or a full recording queue can result in missing events.
 
@@ -55,13 +63,14 @@ The extension does not clear portal cookies or automatically sign you out.
 
 ## Limited usage analytics
 
-Configured production builds send four limited usage events to PostHog to
+Configured production builds send five limited usage events to PostHog to
 understand adoption and workflow reliability:
 
 - `installation_seen`: once per tracking-enabled installation.
 - `workflow_started`: when a new Book or Alerts workflow is accepted.
 - `workflow_failed`: when a tracked workflow ends with a terminal failure requiring user action.
 - `alerts_monitoring_established`: after a selected unpaid group and its first complete availability summary have been validated.
+- `appointment_booked`: after a real booking is verified as successful, once per tracked booking workflow; excludes Test Mode.
 
 Events contain random installation and event identifiers, a timestamp,
 extension version and production-environment label. Workflow events also

@@ -14,6 +14,7 @@ import { Configuration } from './Configuration';
 import { Terms } from './Terms';
 import { Coffee } from './Coffee';
 import { History } from './History';
+import { ReportProblem } from './ReportProblem';
 import type { HistoryRow } from '../domain/history';
 import styles from './Panel.module.css';
 
@@ -79,7 +80,10 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
       {!title && run.status === 'success' ? <CalendarCheck size={42} /> : <span className={styles.failureIcon} aria-hidden><TriangleAlert size={42} /></span>}
       <h2>{message.title}</h2>
       {title && failureDetail && <p className={styles.failureDetail}>{failureDetail}</p>}
-      {title ? <button className={styles.secondary} onClick={configure}>{message.detail}</button> : <p className={styles.bookedDate}>{message.detail}</p>}
+      {title ? <div className={styles.failureActions}>
+        <button className={styles.secondary} onClick={configure}>{message.detail}</button>
+        <ReportProblem live={!simulated} mode={run.mode} status={run.status} testMode={preferences.testMode} failureKind={failureKind ?? 'generic'} />
+      </div> : <p className={styles.bookedDate}>{message.detail}</p>}
       {!title && run.status === 'success' && run.mode === 'booking' && <button className={`${styles.secondary} ${styles.coffeeLink}`} onClick={openCoffee}>Buy me a coffee?</button>}
     </div> : <>
       <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : cityLabel(preferences.consulate)}</h2><p>{hasData ? formatDate(run.mode === 'booking' ? observed : cityDate(preferences.consulate)) : NO_VALUE}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? NO_VALUE}</p></div></div>

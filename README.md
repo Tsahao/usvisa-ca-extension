@@ -83,14 +83,23 @@ limit can evict older events before seven days, and failed storage writes or
 an overloaded recording queue can drop events. Recovery events remain
 available after a successful retry, so a run need not stall to be investigated.
 
-Configured production builds send four limited, pseudonymous PostHog usage
+Configured production builds send five limited, pseudonymous PostHog usage
 events: installation, accepted workflow Start, terminal workflow failure, and
-validated unpaid-alert activation. Payloads exclude credentials, visa and
+validated unpaid-alert activation, and verified successful booking (excluding Test Mode). Count
+`appointment_booked` events in PostHog to measure bookings made by the extension.
+Payloads exclude credentials, visa and
 applicant identifiers, portal content, URLs, consulates and appointment dates.
 No autocapture, heatmaps or session replay is used. The first release has no
 analytics opt-out switch in its panel. Analytics uses ordinary cross-origin
 requests (CORS), without requesting host access to PostHog. Delivery remains
 best-effort; a blocked analytics request never stops visa workflows.
+
+Failure screens offer **Report a problem**, which opens an editable email
+draft to `browser.latte.1k@icloud.com`. It includes version information, fixed
+workflow details and recent sanitized diagnostics, shortened to fit email-link
+limits. No credentials, visa identifiers, appointment dates or page contents
+are included. Nothing is sent automatically; a configured email handler is
+required, and users review and send the draft themselves.
 
 Production tracking is disabled unless valid build configuration is supplied.
 Copy `.env.example` to `.env.local` to configure it, or set

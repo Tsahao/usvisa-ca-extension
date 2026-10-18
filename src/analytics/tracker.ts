@@ -1,5 +1,5 @@
 import type { AnalyticsConfig } from './config';
-import { buildAlertsEstablished, buildInstallationSeen, buildWorkflowFailed, buildWorkflowStarted,
+import { buildAlertsEstablished, buildAppointmentBooked, buildInstallationSeen, buildWorkflowFailed, buildWorkflowStarted,
   type AnalyticsMode, type FailureReason, type QueuedAnalyticsEvent } from './events';
 import { ANALYTICS_KEY, MAX_ATTEMPTS, appendEvent, validateAnalyticsRecord,
   type AnalyticsRecord, type StorageArea } from './store';
@@ -154,6 +154,18 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
         session.activated = true;
         appendEvent(record, buildAlertsEstablished({ ...base(), distinctId: record.distinctId,
           analyticsSessionId: session.id, testMode: session.testMode }));
+      });
+    },
+    booked(state: EngineState): void {
+      // Called only after read-only verification confirms the submitted target.
+      // Keep the intent for qualification; no appointment details enter the event.
+      if (state.owner !== 'product-panel-owner' || state.mode !== 'booking' || !state.runId ||
+          !state.intent || state.intent.mode !== 'booking' || state.intent.testMode) return;
+      void change(record => {
+        const session = record.session;
+        if (!session || session.runId !== state.runId || session.mode !== 'booking' || session.testMode || session.bookingSucceeded) return;
+        session.bookingSucceeded = true;
+        appendEvent(record, buildAppointmentBooked({ ...base(), distinctId: record.distinctId, analyticsSessionId: session.id }));
       });
     },
     end(): void {

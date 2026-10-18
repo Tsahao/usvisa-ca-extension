@@ -7,6 +7,7 @@ export const ANALYTICS_EVENTS = [
   'workflow_started',
   'alerts_monitoring_established',
   'workflow_failed',
+  'appointment_booked',
 ] as const;
 export type AnalyticsEventName = (typeof ANALYTICS_EVENTS)[number];
 
@@ -94,6 +95,8 @@ export function validateQueuedEvent(value: unknown): QueuedAnalyticsEvent {
       throw new Error('Invalid analytics event.');
   }
   if (entry.event === 'alerts_monitoring_established' && props.mode !== 'alerts') throw new Error('Invalid analytics event.');
+  if (entry.event === 'appointment_booked' && (!isUuid(props.analytics_session_id) || props.mode !== 'booking' || props.test_mode !== false || props.failure_reason !== undefined))
+    throw new Error('Invalid analytics event.');
   return entry as unknown as QueuedAnalyticsEvent;
 }
 
@@ -138,6 +141,13 @@ export function buildAlertsEstablished(args: {
     timestamp: args.timestamp,
     properties: { ...baseProperties(args.extensionVersion), analytics_session_id: args.analyticsSessionId, mode: 'alerts', test_mode: args.testMode },
     attempts: 0 };
+}
+
+export function buildAppointmentBooked(args: {
+  eventUuid: string; distinctId: string; timestamp: string; extensionVersion: string;
+  analyticsSessionId: string;
+}): QueuedAnalyticsEvent {
+  return validateQueuedEvent({ ...buildWorkflowStarted({ ...args, mode: 'booking', testMode: false }), event: 'appointment_booked' });
 }
 
 export function buildWorkflowFailed(args: {
