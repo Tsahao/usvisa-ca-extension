@@ -24,7 +24,7 @@ test('locked Settings keeps Cancel undimmed and usable without stopping monitori
 
 test('Settings waits for field completion instead of warning ahead of the user', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Book or reschedule For Paid Visa Group' }).click();
+  await page.getByRole('button', { name: 'Open configuration' }).click();
   const panel = page.getByRole('region', { name: 'US Visa Scheduler for Canada' });
   const alert = panel.getByRole('alert');
   const save = panel.getByRole('button', { name: 'Save', exact: true });
@@ -67,13 +67,13 @@ test('Figma screens, assets and responsive panel', async ({ page }) => {
     expect(await panel.locator('img').evaluateAll(images => images.every(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
     await panel.screenshot({ path: `test-results/${name}.png`, animations: 'disabled' });
   };
-  await expect(page.getByRole('button', { name: 'Get date alerts For Unpaid Visa Group' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
   await expect(panel.getByRole('navigation')).toHaveCount(0);
   await capture('home');
   await expect(panel).toHaveCSS('height', '586px');
-  const logo = panel.locator('img[src="assets/maple.svg"]');
-  await expect(logo).toHaveJSProperty('naturalWidth', 35);
-  expect(await logo.evaluate(image => (image as HTMLImageElement).getBoundingClientRect().width)).toBeCloseTo(35, 1);
+  const logo = panel.locator('img[src="assets/welcome-maple.svg"]');
+  await expect(logo).toHaveJSProperty('naturalWidth', 26);
+  expect(await logo.evaluate(image => (image as HTMLImageElement).getBoundingClientRect().width)).toBeCloseTo(25.8462, 1);
   await page.getByRole('button', { name: 'Fill synthetic preferences' }).click();
   await page.getByRole('button', { name: 'Open configuration' }).click();
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue('preview@example.invalid');
@@ -160,7 +160,7 @@ test('Figma screens, assets and responsive panel', async ({ page }) => {
   expect(await panel.locator('img').evaluateAll(images => images.every(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
   await page.setViewportSize({ width: 360, height: 500 });
   await page.getByRole('button', { name: 'Back', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Get date alerts For Unpaid Visa Group' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
   await capture('small-viewport');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(failures).toEqual([]);

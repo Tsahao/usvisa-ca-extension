@@ -4,6 +4,7 @@ import { emptyAlertState, type AlertState } from '../domain/alerts';
 import { validateApplicantIds } from '../domain/applicants';
 import { isIsoDate } from '../domain/dates';
 import { validateGroupBinding, type GroupBinding } from '../domain/groups';
+import { isDashboardFeatures, type DashboardDiscovery } from '../domain/features';
 
 export const ENGINE_VERSION = 1 as const;
 export const ENGINE_KEY = 'engineStateV1';
@@ -86,6 +87,7 @@ export type AuthenticationState = {
 };
 
 export type EngineState = {
+  discovery?: DashboardDiscovery;
   version: 1;
   runId: string | null;
   owner: string | null;
@@ -313,6 +315,15 @@ export function validateEngineState(value: unknown): EngineState {
   if (typeof restartPending !== 'boolean' || (restartPending && state.intent)) throw new Error('Invalid restart state.');
   const restartFailed = state.restartFailed ?? false;
   if (typeof restartFailed !== 'boolean') throw new Error('Invalid restart state.');
+  let discovery: DashboardDiscovery | undefined;
+  if (state.discovery !== undefined) {
+    const value = state.discovery as DashboardDiscovery | null;
+    if (!value || !(value.features === null || isDashboardFeatures(value.features)) ||
+        typeof value.requested !== 'boolean' || typeof value.choosing !== 'boolean' ||
+        (value.choosing && (value.features !== 'both' || value.requested || state.status !== 'stopped' || state.intent)))
+      throw new Error('Invalid dashboard discovery.');
+    discovery = { features: value.features, requested: value.requested, choosing: value.choosing };
+  }
   // Idle and stopped states never carry an active deadline.
   if ((state.status === 'idle' || state.status === 'stopped') && state.nextPollAt !== null)
     throw new Error('Invalid engine state.');
@@ -341,6 +352,7 @@ export function validateEngineState(value: unknown): EngineState {
     authentication, sessionRenewals: sessionRenewals as number,
     loginFailed: loginFailed as boolean, authenticationError: authenticationError as string | null, authenticationFailureReason: authenticationFailureReason as AuthenticationFailureReason | null, manualAuthentication: manualAuthentication as boolean, verificationTabId: verificationTabId as number | null,
     queuedStart, verificationError: verificationError as string | null, restartPending, restartFailed,
+    ...(discovery ? { discovery } : {}),
   };
 }
 
@@ -364,6 +376,7 @@ export function startRun(
     runId: args.runId,
     owner: args.owner,
     generation: state.generation + 1,
+    ...(state.discovery ? { discovery: { ...state.discovery, choosing: false } } : {}),
     mode: args.mode,
     status: 'running',
     intent: null,

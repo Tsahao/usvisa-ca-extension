@@ -76,9 +76,9 @@ export function validateGroupBinding(value: unknown): GroupBinding {
 
 // Binds a run to exactly one dashboard group. Fixed diagnostics only: group
 // identifiers never appear in error text.
-// - Paid exact IVR when configured; blank uses the first dashboard group in
-//   page order (most accounts have a single schedulable group, and it is the
-//   most recent). A positively identified unpaid group is always rejected
+// - Paid exact IVR when configured; product discovery prefers the first paid
+//   group in page order. Legacy/developer callers retain their first-card
+//   fallback. A positively identified unpaid group is always rejected
 //   before any booking workflow; unknown status otherwise preserves existing
 //   paid entry/baseline/roster semantics. Absence of a booking proves nothing.
 // - Unpaid blank skips paid groups (including the configured paid-IVR
@@ -90,7 +90,7 @@ export function validateGroupBinding(value: unknown): GroupBinding {
 //   specific; otherwise it fails closed as generic.
 export function resolveGroup(
   snapshot: unknown,
-  args: { mode: EngineMode; paidIvr: string; unpaidIvr: string },
+  args: { mode: EngineMode; paidIvr: string; unpaidIvr: string; preferPaid?: boolean },
 ): GroupRef {
   // Selection needs the chosen card's identity, not complete identities for
   // every sibling. Preserve incomplete placeholders and their page positions;
@@ -129,9 +129,10 @@ export function resolveGroup(
       if (match.paymentStatus === 'unpaid') throw new Error('Unpaid group rejected for paid booking.');
       return selectedRef(match);
     }
-    if (args.unpaidIvr !== '' && groups[0].ivr === args.unpaidIvr) throw new Error('Unpaid group rejected for paid booking.');
-    if (groups[0].paymentStatus === 'unpaid') throw new Error('Unpaid group rejected for paid booking.');
-    return selectedRef(groups[0]);
+    const first = args.preferPaid ? groups.find(group => group.paymentStatus === 'paid') ?? groups[0] : groups[0];
+    if (args.unpaidIvr !== '' && first.ivr === args.unpaidIvr) throw new Error('Unpaid group rejected for paid booking.');
+    if (first.paymentStatus === 'unpaid') throw new Error('Unpaid group rejected for paid booking.');
+    return selectedRef(first);
   }
   if (args.unpaidIvr === '') {
     for (const group of groups) {

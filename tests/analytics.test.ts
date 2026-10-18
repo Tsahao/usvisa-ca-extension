@@ -92,6 +92,21 @@ describe('PostHog configuration and allowlisted delivery', () => {
 });
 
 describe('durable milestones and sessions', () => {
+  it('records resolved discovery once across duplicate reads and worker wake', async () => {
+    const f = fixture();
+    f.tracker.resolvedStart(f.state, false); f.tracker.resolvedStart(f.state, false); await f.tracker.settled();
+    const session = f.record().session!.id;
+    const worker = createAnalyticsTracker(f.deps); worker.resolvedStart(f.state, false); await worker.settled();
+    expect(f.record().session!.id).toBe(session);
+    expect(f.record().outbox.filter(event => event.event === 'workflow_started')).toHaveLength(1);
+    const paid: EngineState = { ...f.state, mode: 'booking', discovery: { features: 'booking', requested: false, choosing: false },
+      group: { ...f.state.group!, kind: 'paid' } };
+    worker.observe(paid); await worker.settled();
+    expect(f.record().session!.mode).toBe('booking');
+    expect(f.record().session!.id).toBe(session);
+    expect(f.record().outbox.filter(event => event.event === 'workflow_started')).toHaveLength(1);
+  });
+
   async function bookingFixture(testMode = false) {
     const f = fixture();
     const state: EngineState = { ...f.state, mode: 'booking', status: 'verifying',

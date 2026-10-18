@@ -415,9 +415,10 @@ describe('developer preview failure scenarios', () => {
     const { App } = await import('../src/ui/App');
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByRole('button', { name: 'Get date alerts For Unpaid Visa Group' });
+    await screen.findByRole('button', { name: 'Sign in' });
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
-    await user.click(screen.getByRole('button', { name: 'Book or reschedule For Paid Visa Group' }));
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
     await screen.findByRole('button', { name: 'Start preview' });
     return user;
   }

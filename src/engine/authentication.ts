@@ -18,6 +18,7 @@ import { policyKey, reviewLifecycle } from './lifecycle';
 import { bindGroup, parkForReview, VERIFICATION_UNREADABLE, isAuthenticationFailureReason, type AuthenticationFailureReason, type AuthenticationState, type EngineState } from './workflow';
 import type { ExecDeps } from './executor';
 import { applyPollResult, engineAlarmAt } from './poll';
+import { assessDashboard } from './discovery';
 
 // Renewal keeps the existing workflow tab. Validate its current and pending
 // navigation before replacing it with a fresh GET; never adopt a duplicate.
@@ -811,8 +812,16 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
         return { ...state, authentication: null, authenticationFailureReason: null, verificationTabId: auth.tabId, verification: { reads: [], nextReadAt: deps.nowIso() },
           consecutiveFailures: 0, cooldownUntil: null, nextPollAt: null, updatedAt: deps.nowIso() };
       }
+      if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
+      if (state.discovery) {
+        const live = await deps.getTab(auth.tabId!);
+        if (live.url !== tab.url || live.status === 'loading' || (live.pendingUrl !== undefined && live.pendingUrl !== ''))
+          return fail('context-changed');
+      }
+      state = assessDashboard(state, raw);
+      if (state.discovery?.choosing) return { ...state, updatedAt: deps.nowIso() };
       readStep = 'selection';
-      const match = resolveGroup(raw as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr });
+      const match = resolveGroup(raw as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr, preferPaid: !!state.discovery });
       let currentDate: string | null = null;
       let applicantIds: string[] | undefined;
       if (state.mode === 'booking') {

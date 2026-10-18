@@ -16,6 +16,7 @@ import { appointmentApplicants, appointmentDate, appointmentDateRelaxed } from '
 import { runVerificationRead } from './engine/verification';
 import { reviewLifecycle } from './engine/lifecycle';
 import { panelSnapshot } from './engine/panel';
+import { assessDashboard } from './engine/discovery';
 import { panelCommandError, type PanelReadStep } from './engine/start-errors';
 import { panelFailureKind } from './engine/panel-errors';
 import { preferencesError, type Preferences } from './ui/model';
@@ -139,6 +140,19 @@ const analyticsConfig = analyticsDeps({
   set: values => platform.storage.local.set(values),
 });
 const analytics = analyticsConfig ? createAnalyticsTracker(analyticsConfig) : null;
+
+// Automatic discovery has no workflow mode until the dashboard is known.
+// Emit the existing Start milestone only for the resolved workflow. Its
+// non-secret policy already retains the inverse Auto Mode bit; no credential
+// read, new event type, or analytics-dependent workflow checkpoint is needed.
+function trackDiscoveredStart(state: import('./engine/workflow').EngineState): void {
+  if (!analytics || state.status !== 'running' || !state.group || state.intent) return;
+  try {
+    const policy = JSON.parse(state.policyKey ?? 'null');
+    if (Array.isArray(policy) && typeof policy[4] === 'boolean')
+      analytics.resolvedStart(state, policy[4]);
+  } catch { /* Analytics never gates or interrupts work. */ }
+}
 
 // The workflow checkpoint must succeed independently. Analytics never holds
 // the engine queue, awaits HTTP, or masks a failed safety checkpoint.
@@ -367,7 +381,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
             (group.dashboardPath && new URL(tab.url!).pathname !== group.dashboardPath)) throw new Error('Dashboard changed.');
         const snapshot = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readDashboardGroups });
         const selected = resolveGroup(snapshot[0]?.result, { mode: 'booking',
-          paidIvr: currentPreferences.paidIvr, unpaidIvr: currentPreferences.unpaidIvr });
+          paidIvr: currentPreferences.paidIvr, unpaidIvr: currentPreferences.unpaidIvr, preferPaid: true });
         selectionOk = selected.scheduleId === group.scheduleId && selected.ivr === group.ivr;
       } catch { selectionOk = false; }
     }
@@ -560,7 +574,10 @@ async function attemptRestart(area: import('./engine/storage').StorageArea, stat
   const tab = dashboards[0];
   const dashboardPath = new URL(tab.url!).pathname;
   const result = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
-  const match = resolveGroup(result[0]?.result as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr });
+  if (!await unchanged()) return parkForReview(state, now);
+  state = assessDashboard(state, result[0]?.result);
+  if (state.discovery?.choosing) return { ...state, updatedAt: now };
+  const match = resolveGroup(result[0]?.result as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr, preferPaid: true });
   let currentDate: string | null = null;
   let applicantIds: string[] | undefined;
   if (state.mode === 'booking') {
@@ -770,6 +787,12 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
         }
         if (message.type === 'PANEL_START') {
           if (message.mode !== 'booking' && message.mode !== 'alerts') throw new Error('Invalid workflow.');
+          // The education screen is one-time, including when the selected
+          // workflow subsequently fails an IVR/configuration check.
+          if (state.discovery?.choosing && !requestCancelled()) {
+            state = { ...state, discovery: { ...state.discovery, choosing: false }, updatedAt: now };
+            await saveEngineState(area, state);
+          }
           if (state.intent && state.status !== 'running') {
             const verifyingRunId = state.runId;
             // Explicit Start during unresolved intent records durable permission
@@ -804,11 +827,16 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
             if (state.status === 'verifying') state = { ...state, status: 'stopped' as const, authentication: null, verification: null, nextPollAt: null };
             const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
             if (!prefs || preferencesError(prefs)) throw new Error('Save valid configurations before starting.');
-            if (!state.intent && isProductPanelSender(sender.url)) analyticsStart = analytics?.start(message.mode, readAutoMode(prefs) !== true) ?? null;
+            const deferredAnalytics = message.discover === true || !!state.discovery;
+            if (!state.intent && !deferredAnalytics && isProductPanelSender(sender.url)) analyticsStart = analytics?.start(message.mode, readAutoMode(prefs) !== true) ?? null;
+            const beginPanelRun = (nextPollAt?: string) => {
+              if (requestCancelled()) throw new Error('Dashboard context changed.');
+              const started = startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now, nextPollAt });
+              return message.discover === true ? { ...started, discovery: { features: started.discovery?.features ?? null, requested: true, choosing: false } } : started;
+            };
             const success = (await area.get(['engineSuccessV1'])).engineSuccessV1;
             if (!state.intent && (state.restartFailed || message.restart === true || panelSnapshot(state, undefined, success).status === 'success')) {
-              state = { ...reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now,
-                nextPollAt: now }), prefs as unknown as Record<string, unknown>, now), restartPending: true };
+              state = { ...reviewLifecycle(beginPanelRun(now), prefs as unknown as Record<string, unknown>, now), restartPending: true };
               await saveEngineState(area, state);
               analytics?.link(analyticsStart, state);
               await syncEngineAlarm(engineAlarmAt(state));
@@ -818,7 +846,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
             readStep = 'dashboard';
             const dashboards = (await platform.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
             if (dashboards.length === 0) {
-              state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
+              state = reviewLifecycle(beginPanelRun(), prefs as unknown as Record<string, unknown>, now);
               state = beginTrackedAuthentication(state, 'start', now, Math.random);
               if (state.authentication && state.status === 'running') {
                 // Dashboard-first reuse: whichever flow page the user is on
@@ -865,18 +893,35 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                 } catch { /* An unreadable document still fails normal group resolution. */ }
               }
               if (maintenance) {
-                state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
+                state = reviewLifecycle(beginPanelRun(), prefs as unknown as Record<string, unknown>, now);
                 state = beginTrackedAuthentication(state, 'start', now, Math.random);
                 state = { ...state, authentication: { ...state.authentication!, tabId: tab.id! } };
                 state = deferAuthenticationForMaintenance(state, now, Math.random);
                 readStep = 'save';
                 await saveEngineState(area, state);
               } else {
+                const dashboardUnchanged = async () => {
+                  if (requestCancelled() || JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) !== JSON.stringify(prefs))
+                    throw new Error('Dashboard context changed.');
+                  const live = await platform.tabs.get(tab.id!);
+                  if (requestCancelled() || live.url !== tab.url || !isExactDashboardUrl(live.url, dashboardPath) || live.status === 'loading' ||
+                      (live.pendingUrl !== undefined && live.pendingUrl !== '')) throw new Error('Dashboard context changed.');
+                };
+                if (message.discover === true || state.discovery) await dashboardUnchanged();
+                const discoveredState = assessDashboard(beginPanelRun(), results[0]?.result);
+                const mode = discoveredState.mode;
+                if (discoveredState.discovery?.choosing) {
+                  await saveEngineState(area, discoveredState);
+                  await syncEngineAlarm(null);
+                  respond({ ok: true, snapshot: panelSnapshot(discoveredState, undefined, undefined) });
+                  return;
+                }
+                if (deferredAnalytics && isProductPanelSender(sender.url)) analyticsStart = analytics?.start(mode, readAutoMode(prefs) !== true) ?? null;
                 readStep = 'selection';
-                const match = resolveGroup(results[0]?.result as never, { mode: message.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr });
+                const match = resolveGroup(results[0]?.result as never, { mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr, preferPaid: true });
                 let currentDate: string | null = null;
                 let applicantIds: string[] | undefined;
-                if (message.mode === 'booking') {
+                if (mode === 'booking') {
                   readStep = 'appointment';
                   const appt = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, true, true, dashboardPath, true] });
                   const raw = appt[0]?.result;
@@ -893,7 +938,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                     const FIXED_SIGN_IN = 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in';
                     const prefsSnapshot = JSON.stringify(prefs);
                     const savedTabUrl = tab.url;
-                    state = reviewLifecycle(startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now }), prefs as unknown as Record<string, unknown>, now);
+                    state = reviewLifecycle({ ...discoveredState, discovery: { ...discoveredState.discovery!, requested: message.discover === true } }, prefs as unknown as Record<string, unknown>, now);
                     state = beginTrackedAuthentication(state, 'start', now, Math.random);
                     if (!state.authentication) throw new Error('Dashboard read failed.');
                     if (requestCancelled()) throw new Error('Dashboard context changed.');
@@ -953,20 +998,17 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                   readStep = 'applicants';
                   applicantIds = appointmentApplicants(raw);
                 }
-                state = startRun(state, { mode: message.mode, owner: 'product-panel-owner', runId: crypto.randomUUID(), now,
-                  // First read is fast for both modes: an already-open page is
-                  // read almost immediately, and a fresh payment landing pulls
-                  // the deadline forward on tab completion (see onUpdated below).
-                  nextPollAt: new Date(Date.parse(now) + 2_000).toISOString() });
-                state = bindGroup(state, { owner: state.owner!, runId: state.runId!, now, binding: { ...match, kind: message.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
+                if (message.discover === true || state.discovery) await dashboardUnchanged();
+                state = { ...discoveredState, nextPollAt: new Date(Date.parse(now) + 2_000).toISOString() };
+                state = bindGroup(state, { owner: state.owner!, runId: state.runId!, now, binding: { ...match, kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
                   ...(applicantIds ? { applicantIds } : {}) } });
-                if (message.mode === 'booking') state = { ...state, stage: 'actions',
+                if (mode === 'booking') state = { ...state, stage: 'actions',
                   executor: { tabId: tab.id!, applicantIds: applicantIds!, targetTime: null, skippedDates: [], actionPending: false } };
                 state = reviewLifecycle(state, prefs as unknown as Record<string, unknown>, now);
-                if (message.mode === 'alerts') await prepareAlertScope(area, state);
+                if (mode === 'alerts') await prepareAlertScope(area, state);
                 readStep = 'save';
                 await saveEngineState(area, state);
-                if (message.mode === 'alerts') {
+                if (mode === 'alerts') {
                   const tabs = await platform.tabs.query({});
                   const payment = tabs.find(entry => entry.id !== undefined && entry.url !== undefined && classifyRoute(entry.url) === 'payment' && isSameGroupUrl(entry.url, match.scheduleId));
                   state = { ...state, monitorTabId: payment?.id ?? tab.id! };
@@ -979,6 +1021,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                       const live = await platform.tabs.get(tab.id!);
                       if (classifyRoute(live.url ?? '') !== 'dashboard' || new URL(live.url!).pathname !== dashboardPath)
                         throw new Error('Dashboard context changed.');
+                      if (message.discover === true || discoveredState.discovery) await dashboardUnchanged();
                       await platform.tabs.update(tab.id!, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${match.scheduleId}/payment` });
                     } catch { state = parkForReview(state, now); await saveEngineState(area, state); }
                   }
@@ -1430,6 +1473,7 @@ function queueEnginePoll(): void {
           const deadline = engineAlarmAt(state);
           if (deadline && Date.parse(deadline) > Date.now()) { await syncEngineAlarm(deadline); return; }
           const next = await attemptRestart(area, state);
+          if (state.discovery && !state.group && next.group && !next.authentication) trackDiscoveredStart(next);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
@@ -1449,7 +1493,7 @@ function queueEnginePoll(): void {
           // opening a second tab.
           if (!next.authentication && next.status === 'running' && next.mode === 'alerts' && next.group) {
             try {
-              if (state.authentication.purpose === 'start') await prepareAlertScope(area, next);
+              if (state.authentication.purpose === 'start' || next.mode !== state.mode) await prepareAlertScope(area, next);
               const group = next.group;
               // Renewal retains custody even when duplicate summaries exist.
               const existing = state.authentication.purpose === 'renew' ? undefined : (await platform.tabs.query({})).find(entry =>
@@ -1468,6 +1512,8 @@ function queueEnginePoll(): void {
               }
             } catch { next = parkForReview(next, new Date().toISOString()); }
           }
+          if (state.discovery && state.authentication.purpose === 'start' && !state.group && !next.authentication && next.group)
+            trackDiscoveredStart(next);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;

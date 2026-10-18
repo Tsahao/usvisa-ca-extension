@@ -13,8 +13,8 @@ export class PanelCommandError extends Error {
   }
 }
 
-export async function panelCommand(action: 'STATE' | 'START' | 'STOP', mode?: Mode, restart = false): Promise<PanelSnapshot> {
-  const response = await platform.runtime.sendMessage({ type: `PANEL_${action}`, ...(mode ? { mode } : {}), ...(action === 'START' && restart ? { restart: true } : {}) });
+export async function panelCommand(action: 'STATE' | 'START' | 'STOP', mode?: Mode, restart = false, discover = false): Promise<PanelSnapshot> {
+  const response = await platform.runtime.sendMessage({ type: `PANEL_${action}`, ...(mode ? { mode } : {}), ...(action === 'START' && restart ? { restart: true } : {}), ...(action === 'START' && discover ? { discover: true } : {}) });
   if (!response?.ok || !response.snapshot) {
     // Worker replies carry fixed safe diagnostics beside validated failure
     // metadata. Unknown metadata falls back to the catch-all kind; the

@@ -1882,3 +1882,70 @@ describe('durable automatic authentication', () => {
     expect(changed).toMatchObject({ status: 'stopped', authentication: null, loginFailed: true, authenticationFailureReason: 'configuration-changed' });
   });
 });
+
+describe('first sign-in dashboard discovery', () => {
+  it.each(['booking', 'alerts', 'both'] as const)('selects %s after login without acting from discovery alone', async feature => {
+    const h = harness(); h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const initial: EngineState = { ...seed(), discovery: { features: null, requested: true, choosing: false } };
+    const auth = beginAuthentication(initial, 'start', NOW);
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      if (func.name === 'readDashboardGroups') return { groups: [
+        ...(feature !== 'booking' ? [{ scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }] : []),
+        ...(feature !== 'alerts' ? [{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' }] : []),
+      ] };
+      return inject(tab, func, params);
+    });
+    const result = validateEngineState(await runAuthentication(h.deps, { ...auth, authentication: { ...auth.authentication!, tabId: 7 } }));
+    expect(result.discovery).toEqual({ features: feature, requested: false, choosing: feature === 'both' });
+    expect(h.actions).toEqual([]); expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    if (feature === 'both') expect(result).toMatchObject({ status: 'stopped', nextPollAt: null, group: null, executor: null });
+    else expect(result).toMatchObject({ status: 'running', mode: feature, group: { kind: feature === 'booking' ? 'paid' : 'unpaid' } });
+    const baselineReads = vi.mocked(h.deps.inject).mock.calls.filter(call => call[1].name === 'readCurrentAppointment');
+    expect(baselineReads).toHaveLength(feature === 'booking' ? 1 : 0);
+    if (feature === 'booking') expect(result.group?.applicantIds).toEqual(ids);
+  });
+
+  it.each(['navigation', 'pending', 'settings', 'cancelled'])('refuses a changed %s before surfacing mixed features', async issue => {
+    const h = harness(); h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    let cancelled = false;
+    h.deps.isCancelled = () => cancelled;
+    const initial: EngineState = { ...seed(), discovery: { features: null, requested: true, choosing: false } };
+    const auth = beginAuthentication(initial, 'start', NOW);
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => {
+      const raw = await inject(tab, func, params);
+      if (func.name === 'readDashboardGroups') {
+        if (issue === 'navigation') h.setUrl('https://example.invalid/');
+        if (issue === 'pending') h.deps.getTab = async () => ({ id: 7, url: h.getUrl(), pendingUrl: 'https://example.invalid/' });
+        if (issue === 'settings') h.deps.loadPrefs = async () => ({ ...prefs, consulate: 'Toronto' });
+        if (issue === 'cancelled') cancelled = true;
+      }
+      return raw;
+    });
+    const result = await runAuthentication(h.deps, { ...auth, authentication: { ...auth.authentication!, tabId: 7 } });
+    expect(result.discovery?.choosing).toBe(false);
+    expect(result.status).not.toBe('running');
+    expect(result.group).toBeNull(); expect(h.actions).toEqual([]);
+  });
+});
+
+describe('feature changes during an active renewal', () => {
+  it.each(['booking', 'alerts'] as const)('rebinds a new %s feature only after its normal group and roster checks', async target => {
+    const h = harness(); h.setUrl('https://ais.usvisa-info.com/en-ca/niv/groups');
+    const old: EngineState = target === 'alerts' ? { ...bound(), discovery: { features: 'booking', requested: false, choosing: false } }
+      : { ...seed(), mode: 'alerts', group: { kind: 'unpaid', scheduleId: '33333333', ivr: '44444444', currentDate: null },
+        discovery: { features: 'alerts', requested: false, choosing: false } };
+    const auth = beginAuthentication(old, 'renew', NOW);
+    const inject = h.deps.inject;
+    h.deps.inject = vi.fn(async (tab, func, params) => func.name === 'readDashboardGroups' ? { groups: [target === 'booking'
+      ? { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' }
+      : { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }] } : inject(tab, func, params));
+    const result = validateEngineState(await runAuthentication(h.deps, { ...auth, authentication: { ...auth.authentication!, tabId: 7 } }));
+    expect(result).toMatchObject({ mode: target, status: 'running', intent: null, authentication: null, sessionRenewals: 0,
+      discovery: { features: target, requested: false, choosing: false } });
+    expect(result.group?.kind).toBe(target === 'booking' ? 'paid' : 'unpaid');
+    if (target === 'booking') expect(result.group?.applicantIds).toEqual(ids);
+    expect(h.actions).toEqual([]); expect(h.deps.navigateTab).not.toHaveBeenCalled();
+  });
+});

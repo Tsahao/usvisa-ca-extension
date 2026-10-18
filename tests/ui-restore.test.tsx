@@ -119,7 +119,7 @@ describe('paid/unpaid workflow retention', () => {
     stubExtension({ preferences: { ...EMPTY_PREFERENCES }, lastMode: 'alerts', snapshot: idleSnapshot('booking') });
     const { App } = await import('../src/ui/App');
     render(<App />);
-    await screen.findByRole('button', { name: 'Book or reschedule For Paid Visa Group' });
+    await screen.findByRole('button', { name: 'Sign in' });
     expect(screen.queryByRole('button', { name: 'Start' })).toBeNull();
     expect(screen.queryByRole('navigation')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Home' })).toBeNull();
@@ -145,19 +145,21 @@ describe('paid/unpaid workflow retention', () => {
     const { refreshWorker } = stubExtension({ preferences: { ...EMPTY_PREFERENCES }, snapshot: { ...idleSnapshot('alerts'), status: 'running' } });
     const { App } = await import('../src/ui/App');
     render(<App />);
-    await screen.findByRole('button', { name: 'Get date alerts For Unpaid Visa Group' });
+    await screen.findByRole('button', { name: 'Sign in' });
     await refreshWorker({ ...idleSnapshot('alerts'), status: 'running', checkedAt: '2026-10-13T18:00:00Z' });
-    expect(screen.getByRole('button', { name: 'Get date alerts For Unpaid Visa Group' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign in' })).not.toBeNull();
     expect(screen.queryByRole('navigation')).toBeNull();
   });
 
-  it('offers configuration from first-time Home when stored preferences are incomplete', async () => {
+  it('offers mandatory configuration directly on first-time Home', async () => {
     stubExtension({ preferences: { ...EMPTY_PREFERENCES }, lastMode: 'booking', snapshot: idleSnapshot('booking') });
     const { App } = await import('../src/ui/App');
     render(<App />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Book or reschedule For Paid Visa Group' }));
-    await screen.findByRole('button', { name: 'Save' });
+    await screen.findByRole('button', { name: 'Sign in' });
+    expect(screen.getByLabelText('Email')).not.toBeNull();
+    expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
   });
 
   it('persists the chosen workflow for the next popup open', async () => {

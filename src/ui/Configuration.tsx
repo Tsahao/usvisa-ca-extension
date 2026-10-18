@@ -1,16 +1,9 @@
-import { useEffect, useState, type ReactNode, type UIEvent } from 'react';
+import { useEffect, useState, type UIEvent } from 'react';
 import { ChevronDown, ChevronRight, Info } from 'lucide-react';
-import { CITIES, DEFAULT_ADVANCED, cityLabel, preferenceIssues, type Preferences } from './model';
+import { DEFAULT_ADVANCED, preferenceIssues, type Preferences } from './model';
 import panel from './Panel.module.css';
 import local from './Configuration.module.css';
-
-function Row({ label, children }: { label: string; children: ReactNode }) {
-  return <label className={panel.row}><span>{label}</span>{children}</label>;
-}
-
-function Toggle({ label, checked, change }: { label: string; checked: boolean; change: (value: boolean) => void }) {
-  return <Row label={label}><input className={panel.toggle} type="checkbox" role="switch" aria-label={label} checked={checked} onChange={event => change(event.target.checked)} /></Row>;
-}
+import { PreferenceFields, Row, Toggle } from './PreferenceFields';
 
 export function Configuration({ preferences, active, save, cancel, trackScroll, openTerms, openHistory }: {
   preferences: Preferences;
@@ -58,12 +51,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
       <div className={`${local.content}${active ? ` ${local.locked}` : ''}`}>
         <h2 className={panel.sectionLabel}>Login and preferences</h2>
         <fieldset disabled={active || saving} className={panel.group}>
-          <Row label="Email"><input aria-label="Email" type="email" autoComplete="off" value={draft.email} onChange={event => update('email', event.target.value)} /></Row>
-          <Row label="Password"><input aria-label="Password" type="password" autoComplete="off" {...validationEvents('password')} value={draft.password} onChange={event => update('password', event.target.value)} /></Row>
-          <Row label="Consulate"><select aria-label="Consulate" {...validationEvents('consulate')} value={draft.consulate} onChange={event => update('consulate', event.target.value as Preferences['consulate'])}><option value="">Select Consulate</option>{CITIES.map(city => <option key={city} value={city}>{cityLabel(city)}</option>)}</select></Row>
-          <Row label="Earliest Acceptable"><input aria-label="Earliest Acceptable" type="date" {...validationEvents('earliest')} value={draft.earliest} onChange={event => update('earliest', event.target.value)} /></Row>
-          <Row label="Latest Acceptable"><input aria-label="Latest Acceptable" type="date" {...validationEvents('latest')} value={draft.latest} onChange={event => update('latest', event.target.value)} /></Row>
-          <Toggle label="Auto Mode" checked={draft.autoMode} change={value => update('autoMode', value)} />
+          <PreferenceFields draft={draft} update={update} validationEvents={validationEvents} />
         </fieldset>
         <button className={panel.disclosure} type="button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>Advanced {advanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
         {advanced && <fieldset disabled={active || saving} className={panel.advanced}>

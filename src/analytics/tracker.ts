@@ -121,6 +121,16 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
           record.session.runId = state.runId;
       });
     },
+    resolvedStart(state: EngineState, testMode: boolean): void {
+      if (!deps.config.enabled || state.owner !== 'product-panel-owner' || !state.runId ||
+          state.status !== 'running' || !state.group || state.intent) return;
+      void change(record => {
+        // A stale-dashboard recovery may already have linked this Start.
+        // Worker wakeups and repeated resolved reads retain the same session.
+        if (record.session?.runId === state.runId) return;
+        startIn(record, deps.uuid(), state.mode, testMode, state.runId);
+      });
+    },
     startFailed(id: string | null): void {
       if (id) void change(record => { if (record.session?.id === id && record.session.runId === null) failIn(record, 'start-failed'); });
     },
@@ -137,6 +147,12 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
           startIn(record, deps.uuid(), state.mode, record.queued.testMode, state.runId);
         }
         if (record.queued?.runId === state.runId && !state.queuedStart && !state.intent) record.queued = null;
+        // A validated dashboard may change the sole available feature during
+        // the same user-started run. Keep that session; no additional Start
+        // event is created for renewal or a mode handoff.
+        if (record.session?.runId === state.runId && state.discovery?.features && !state.discovery.requested &&
+            !state.discovery.choosing && state.status === 'running' && state.group && !state.intent)
+          record.session.mode = state.mode;
         const session = record.session;
         if (!session || session.runId !== state.runId || session.mode !== state.mode) return;
         if (state.intent || state.manualAuthentication || state.verificationError) return;

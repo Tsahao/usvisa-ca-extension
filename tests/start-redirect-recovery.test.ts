@@ -58,9 +58,9 @@ describe('stale-dashboard Retry recovery', () => {
     });
   }
 
-  async function sendStart(mode = 'booking') {
+  async function sendStart(mode = 'booking', discover = false) {
     const respond = vi.fn();
-    message({ type: 'PANEL_START', mode }, sender, respond);
+    message({ type: 'PANEL_START', mode, ...(discover ? { discover: true } : {}) }, sender, respond);
     await vi.waitFor(() => expect(respond).toHaveBeenCalled());
     return respond.mock.calls[0][0] as { ok: boolean; snapshot?: any; error?: string };
   }
@@ -478,4 +478,58 @@ describe('stale-dashboard Retry recovery', () => {
     expect(next.group).toBeNull();
     expect(reply.ok).toBe(false);
   });
+  it('cancels automatic unpaid entry when Stop arrives during its discovery checkpoint', async () => {
+    mockDashboardOk();
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: { groups: [
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
+    ] } }]);
+    const stopReply = vi.fn(); let cancelled = false;
+    chromeMock.storage.local.set.mockImplementation(async (values: Record<string, any>) => {
+      Object.assign(stored, values);
+      if (!cancelled && values.engineStateV1?.mode === 'alerts' && values.engineStateV1?.status === 'running') {
+        cancelled = true; message({ type: 'PANEL_STOP' }, sender, stopReply);
+      }
+    });
+    await sendStart('booking', true);
+    await vi.waitFor(() => expect(stopReply).toHaveBeenCalled());
+    expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+    expect(chromeMock.tabs.create).not.toHaveBeenCalled();
+    expect((stored.engineStateV1 as EngineState).status).not.toBe('running');
+    expect((stored.engineStateV1 as EngineState).intent).toBeNull();
+  });
+
+  it('consumes the mixed-account chooser even when an explicit IVR fails', async () => {
+    const { emptyEngineState, startRun } = await import('../src/engine/workflow');
+    const now = new Date().toISOString();
+    stored.engineStateV1 = { ...startRun(emptyEngineState(now), { mode: 'booking', owner: 'product-panel-owner', runId: 'choice-run-001', now }),
+      status: 'stopped', nextPollAt: null, discovery: { features: 'both', choosing: true, requested: false } };
+    stored.uiPreferencesV1 = { ...prefs, paidIvr: '99999999' };
+    mockDashboardOk();
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: { groups: [
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
+    ] } }]);
+    expect(await sendStart('booking')).toMatchObject({ ok: false });
+    expect((stored.engineStateV1 as EngineState).discovery?.choosing).toBe(false);
+    expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+    expect(chromeMock.scripting.executeScript).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a fresh mixed-account sign-in after an old success in the one-time chooser', async () => {
+    const stopped = oldStoppedSave();
+    stored.engineStateV1 = stopped;
+    stored.engineSuccessV1 = { runId: stopped.runId, date: '2026-12-01' };
+    mockDashboardOk();
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: { groups: [
+      { scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' },
+      { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' },
+    ] } }]);
+    expect(await sendStart('booking', true)).toMatchObject({ ok: true });
+    chromeMock.alarms.onAlarm.addListener.mock.calls[0][0]({ name: 'enginePoll' });
+    await vi.waitFor(() => expect((stored.engineStateV1 as EngineState).discovery?.choosing).toBe(true));
+    expect(stored.engineStateV1).toMatchObject({ status: 'stopped', group: null, intent: null, nextPollAt: null });
+    expect(chromeMock.tabs.update).not.toHaveBeenCalled(); expect(chromeMock.tabs.create).not.toHaveBeenCalled();
+    expect(chromeMock.scripting.executeScript.mock.calls.every(([input]: [any]) => input.func.name === 'readDashboardGroups')).toBe(true);
+  });
+
 });

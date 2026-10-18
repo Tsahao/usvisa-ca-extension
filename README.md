@@ -53,11 +53,15 @@ npm run check
 ```
 
 Open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**,
-and choose `dist/`. Click the extension toolbar icon to open the panel and save
-your configuration before starting Book or Alerts.
+and choose `dist/`. Open the toolbar panel, complete the welcome form, and
+press the arrow to sign in. A paid-only account starts Scheduling; an unpaid-only
+account starts View dates. Accounts with both kinds of groups get a one-time
+mode chooser. Available tabs are retained and refreshed on dashboard entry.
+Reopening the panel does not restart stopped work.
 
 Both Visa Group IVR fields are optional. With a blank Paid IVR, Book uses the
-first dashboard group; with a blank Unpaid IVR, Alerts uses the first confirmed
+first confirmed paid group (or the guarded scheduling fallback when payment
+status is unknown); with a blank Unpaid IVR, Alerts uses the first confirmed
 unpaid group. Enter an IVR to choose a specific group. Unreadable older cards
 do not block a readable selected group.
 

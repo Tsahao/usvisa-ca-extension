@@ -2,6 +2,7 @@ import { CONSULATES, isIsoDate } from '../domain/dates';
 import { validateSummaryReading } from '../domain/summary';
 import { panelFailureKind, type PanelFailureKind } from './panel-errors';
 import type { EngineState } from './workflow';
+import type { DashboardFeatures } from '../domain/features';
 
 export type PanelSnapshot = {
   mode: 'booking' | 'alerts'; status: 'idle' | 'running' | 'success' | 'failure'; reviewRequired: boolean;
@@ -11,6 +12,9 @@ export type PanelSnapshot = {
   reviewMessage?: string;
   failureKind?: PanelFailureKind;
   restartFailed?: boolean;
+  availableModes?: DashboardFeatures;
+  modeChoiceRequired?: boolean;
+  discovering?: boolean;
 };
 
 export function panelSnapshot(state: EngineState | null, raw: unknown, success: unknown): PanelSnapshot {
@@ -18,6 +22,9 @@ export function panelSnapshot(state: EngineState | null, raw: unknown, success: 
     reviewRequired: state?.status === 'verifying' || state?.manualAuthentication === true || !!state?.authenticationError || !!state?.verificationError, dates: [], rows: [], checkedAt: null, currentDate: state?.group?.currentDate ?? null, confirmedDate: null,
     ...(state?.manualAuthentication ? { manualAuthentication: true } : {}) };
   if (state?.restartFailed) snapshot.restartFailed = true;
+  if (state?.discovery?.features) snapshot.availableModes = state.discovery.features;
+  if (state?.discovery?.choosing) snapshot.modeChoiceRequired = true;
+  if (state?.status === 'running' && state.discovery?.requested) snapshot.discovering = true;
   if (state?.manualAuthentication) snapshot.reviewMessage = 'Sign in manually on the official website, then press Start.';
   else if (state?.intent) snapshot.reviewMessage = snapshot.status === 'running'
     ? 'Checking the previous booking attempt. No new booking will start during this check.'

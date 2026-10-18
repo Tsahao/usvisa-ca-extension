@@ -71,6 +71,28 @@ describe('product worker telemetry integration (mocked network only)', () => {
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+  it('attributes automatic first sign-in to the resolved unpaid mode exactly once', async () => {
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: { groups: snapshot.groups.filter(group => group.paymentStatus === 'unpaid') } }]);
+    expect(await send({ type: 'PANEL_START', mode: 'booking', discover: true })).toMatchObject({ ok: true,
+      snapshot: { mode: 'alerts', availableModes: 'alerts', status: 'running' } });
+    await vi.waitFor(() => expect(record().session?.mode).toBe('alerts'));
+    await send({ type: 'PANEL_START', mode: 'alerts' }); await send({ type: 'PANEL_STATE' }); await flush();
+    expect(events().filter(event => event.event === 'workflow_started')).toHaveLength(1);
+    expect(events().find(event => event.event === 'workflow_started').properties.mode).toBe('alerts');
+    expect(chromeMock.notifications.create).not.toHaveBeenCalled();
+  });
+
+  it('does not record a workflow Start for the mixed-account education screen', async () => {
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: snapshot }]);
+    expect(await send({ type: 'PANEL_START', mode: 'booking', discover: true })).toMatchObject({ ok: true,
+      snapshot: { status: 'idle', availableModes: 'both', modeChoiceRequired: true } });
+    await flush(); expect(events().filter(event => event.event === 'workflow_started')).toHaveLength(0);
+    expect(record().session).toBeNull();
+    await send({ type: 'PANEL_START', mode: 'alerts' }); await flush();
+    expect(events().filter(event => event.event === 'workflow_started')).toHaveLength(1);
+    expect(stored.engineStateV1.discovery.choosing).toBe(false);
+  });
+
   it('counts only first successful unpaid summary, even if no dates are available; duplicate Start/polls do not inflate it', async () => {
     expect(await send({ type: 'PANEL_START', mode: 'alerts' })).toMatchObject({ ok: true });
     await vi.waitFor(() => expect(record().session?.runId).toBe(stored.engineStateV1.runId));

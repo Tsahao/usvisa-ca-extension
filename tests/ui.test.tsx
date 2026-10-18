@@ -10,7 +10,7 @@ afterEach(cleanup);
 async function preview() {
   const user = userEvent.setup();
   render(<App />);
-  await screen.findByRole('button', { name: 'Get date alerts For Unpaid Visa Group' });
+  await screen.findByRole('button', { name: 'Sign in' });
   return user;
 }
 
@@ -79,7 +79,7 @@ describe('Figma interface behavior', () => {
 
   it('requires complete preferences but does not show terms before entering a workflow', async () => {
     const user = await preview();
-    await user.click(screen.getByRole('button', { name: 'Get date alerts For Unpaid Visa Group' }));
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     expect(screen.queryByRole('heading', { name: 'Terms & conditions' })).toBeNull();
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
@@ -89,6 +89,7 @@ describe('Figma interface behavior', () => {
     await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await screen.findByRole('button', { name: 'Start preview' });
+    await user.click(screen.getByRole('button', { name: 'Alerts' }));
     await user.click(screen.getByRole('button', { name: 'Start preview' }));
     expect(screen.getByRole('heading', { name: 'Calgary' })).toBeDefined();
     const list = screen.getByLabelText('Other consulate dates');
@@ -97,11 +98,11 @@ describe('Figma interface behavior', () => {
     expect(within(list).getByText('Vancouver')).toBeDefined();
   });
 
-  it.each(['Book or reschedule For Paid Visa Group', 'Get date alerts For Unpaid Visa Group'])('opens and starts %s without terms acknowledgement', async entry => {
+  it.each(['Scheduling Visa fee paid', 'View dates Visa fee unpaid'])('opens and starts %s without terms acknowledgement', async entry => {
     const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
-    await user.click(screen.getByRole('button', { name: entry }));
-    await user.click(await screen.findByRole('button', { name: 'Start preview' }));
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await user.click(await screen.findByRole('button', { name: entry }));
     expect(screen.queryByRole('heading', { name: 'Terms & conditions' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Stop preview' })).toBeDefined();
   });
@@ -116,7 +117,7 @@ describe('Figma interface behavior', () => {
 
   it('returns from Terms to the same unsaved Settings draft and disclosure', async () => {
     const user = await preview();
-    await user.click(screen.getByRole('button', { name: 'Get date alerts For Unpaid Visa Group' }));
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     await user.type(screen.getByLabelText('Email'), 'draft@example.invalid');
     await user.click(screen.getByRole('button', { name: 'Advanced' }));
     await user.type(screen.getByLabelText('Unpaid IVR Group'), '44444444');
@@ -133,7 +134,7 @@ describe('Figma interface behavior', () => {
     expect(screen.getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded')).toBe('true');
     expect(scroller.scrollTop).toBe(90);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.getByRole('button', { name: 'Get date alerts For Unpaid Visa Group' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign in' })).not.toBeNull();
   });
 
   it('allows Terms from locked Settings without stopping the run', async () => {
@@ -150,7 +151,8 @@ describe('Figma interface behavior', () => {
   it('shows two separated dashes, not one em dash, for missing values', async () => {
     const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
-    await user.click(screen.getByRole('button', { name: 'Book or reschedule For Paid Visa Group' }));
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
     const earliest = screen.getByRole('heading', { name: 'Earliest Available' }).parentElement!;
     expect(within(earliest).getByText('- -')).toBeDefined();
     expect(screen.getByText('No current appointment')).toBeDefined();

@@ -10,6 +10,8 @@ import type { PanelSnapshot } from '../engine/panel';
 import { isPanelFailureKind, panelFailureKind, type PanelFailureKind } from '../engine/panel-errors';
 import { isPanelCommandErrorMessage } from '../engine/start-errors';
 import { HomeScreen } from './HomeScreen';
+import { ModeChoice } from './ModeChoice';
+import { isDashboardFeatures, type DashboardFeatures } from '../domain/features';
 import { Configuration } from './Configuration';
 import { Terms } from './Terms';
 import { Coffee } from './Coffee';
@@ -18,7 +20,7 @@ import { ReportProblem } from './ReportProblem';
 import type { HistoryRow } from '../domain/history';
 import styles from './Panel.module.css';
 
-type View = 'home' | 'config' | 'workflow' | 'terms' | 'coffee' | 'history';
+type View = 'choose' | 'home' | 'config' | 'workflow' | 'terms' | 'coffee' | 'history';
 type TermsOrigin = 'home' | 'config' | null;
 const activeStatuses: RunStatus[] = ['running'];
 const embedded = new URLSearchParams(location.search).has('embedded');
@@ -106,6 +108,13 @@ export function App() {
   const [coffeeFromConfig, setCoffeeFromConfig] = useState(false);
   const [previewHistory, setPreviewHistory] = useState(false);
   const [ready, setReady] = useState(false);
+  const [features, setFeatures] = useState<DashboardFeatures | null>(null);
+  const [modeChoice, setModeChoice] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [previewFeatures, setPreviewFeatures] = useState<DashboardFeatures>('both');
+  const discoveryAwaited = useRef(false);
+  const choosingMode = useRef(false);
+  const configured = useRef(false);
   const [hidden, setHidden] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [error, setError] = useState('');
@@ -141,6 +150,25 @@ export function App() {
         (snapshot.status === 'running' || snapshot.reviewRequired)) cancelRestartCommand();
     const snapshotActive = snapshot.status !== 'idle' || snapshot.reviewRequired || snapshot.checkedAt != null;
     setEngineData(snapshot);
+    const available = isDashboardFeatures(snapshot.availableModes) ? snapshot.availableModes : null;
+    setFeatures(available);
+    setDiscovering(snapshot.discovering === true);
+    setModeChoice(snapshot.modeChoiceRequired === true);
+    if (snapshot.modeChoiceRequired) {
+      discoveryAwaited.current = false;
+      pendingRef.current = null; setPendingMode(null);
+      setRun({ mode: snapshot.mode, status: 'idle', lastChecked: null }); setError('');
+      setView(current => configured.current && ['home', 'workflow', 'choose'].includes(current) ? 'choose' : current);
+      return;
+    }
+    if (snapshot.discovering) discoveryAwaited.current = true;
+    const selectionUnavailable = available && available !== 'both' && pendingRef.current && pendingRef.current !== available;
+    if (selectionUnavailable || (discoveryAwaited.current && !snapshot.discovering)) {
+      discoveryAwaited.current = false;
+      pendingRef.current = snapshot.mode; setPendingMode(snapshot.mode);
+      setRun(current => ({ ...current, mode: snapshot.mode }));
+      void saveLastMode(snapshot.mode).catch(() => {});
+    }
     // A real stopped failure carries a validated classification. Record it
     // for its own workflow even when another function is selected, so
     // returning to the failed workflow restores the exact screen. Manual
@@ -189,6 +217,7 @@ export function App() {
     const changed = (changes: Record<string, unknown>, area: string) => { if (area === 'local' && ['engineStateV1', 'engineObservationV1', 'engineSuccessV1'].some(key => key in changes)) refresh(); };
     void loadUiState(!engineEnabled).then(state => {
       if (disposed) return;
+      configured.current = !preferencesError(state.preferences);
       setPreferences(state.preferences);
       if (engineEnabled) {
         // First-time use shows the home screen when mandatory configuration is
@@ -248,9 +277,50 @@ export function App() {
     if (engineEnabled && engineData && engineData.mode === mode) applySnapshot(engineData);
     setView(preferencesError(preferences) ? 'config' : 'workflow');
   };
+  const startFailure = (failure: unknown, mode: Mode) => {
+    if (failure instanceof Error && failure.message === MAINTENANCE_MESSAGE) { setError(failure.message); return; }
+    setDiscovering(false); discoveryAwaited.current = false;
+    setRun(current => ({ ...current, mode, status: 'failure' }));
+    setPanelFailure({ kind: failure instanceof PanelCommandError ? failure.failureKind : 'generic', mode,
+      ...(failure instanceof Error && isPanelCommandErrorMessage(failure.message) ? { detail: failure.message } : {}) });
+    setError('');
+  };
+  const signIn = async (value: Preferences) => {
+    await savePreferences(value);
+    configured.current = true;
+    setPreferences(value); setError(''); setPanelFailure(null);
+    setPendingMode(null); pendingRef.current = null;
+    cancelRestartCommand(); setView('workflow');
+    if (engineEnabled) {
+      discoveryAwaited.current = true; setDiscovering(true);
+      setRun({ mode: 'booking', status: 'running', lastChecked: null });
+      try { applySnapshot(await panelCommand('START', 'booking', false, true)); }
+      catch (failure) { startFailure(failure, 'booking'); }
+    } else {
+      setFeatures(previewFeatures);
+      setModeChoice(previewFeatures === 'both');
+      if (previewFeatures === 'both') { await persistRun({ mode: 'booking', status: 'idle', lastChecked: null }); setView('choose'); }
+      else { setPendingMode(previewFeatures); pendingRef.current = previewFeatures; await saveLastMode(previewFeatures); await persistRun({ mode: previewFeatures, status: 'running', lastChecked: '23:51:04' }); }
+    }
+  };
+  const chooseMode = async (mode: Mode) => {
+    if (discovering || choosingMode.current) return;
+    choosingMode.current = true;
+    try {
+      try { await saveLastMode(mode); } catch { setError('Unable to save workflow selection. Please try again.'); return; }
+      setModeChoice(false); setPendingMode(mode); pendingRef.current = mode;
+      setPanelFailure(null); setError(''); setView('workflow');
+      if (engineEnabled) {
+        try { applySnapshot(await panelCommand('START', mode)); }
+        catch (failure) { startFailure(failure, mode); }
+      } else await persistRun({ mode, status: 'running', lastChecked: '23:51:04' });
+    } finally { choosingMode.current = false; }
+  };
+
   // Tab clicks never mutate a run when the current workflow tab is already
   // selected; switching previews the new function stopped headlessly.
   const selectWorkflow = async (mode: Mode) => {
+    if (modeChoice) { await chooseMode(mode); return; }
     if (view === 'workflow' && run.mode === mode) return;
     if (view === 'coffee' && run.mode === mode) {
       setView(preferencesError(preferences) ? 'config' : 'workflow');
@@ -308,6 +378,7 @@ export function App() {
       : (panelFailure?.mode === run.mode ? panelFailure.detail : undefined))
     : undefined;
   const activeTab = view === 'workflow' ? run.mode : view === 'config' ? 'settings' : view === 'coffee' ? 'coffee' : null;
+  const keepHomeMounted = view === 'home' || (view === 'terms' && termsOrigin === 'home');
   const keepConfigMounted = view === 'config' || view === 'history' || (view === 'terms' && termsOrigin === 'config') || (view === 'coffee' && coffeeFromConfig);
   const previewRows: HistoryRow[] = useMemo(() => previewHistory ? Array.from({ length: 14 }, (_, index) => ({
     id: `synthetic-history-${index}`, checkedAt: new Date(Date.now() - index * 3600_000).toISOString(),
@@ -317,7 +388,8 @@ export function App() {
   return <main className={detached ? styles.detached : embedded ? styles.embedded : styles.preview}>
     {!embedded && !engineEnabled && <aside className={styles.previewControls}>
       <span className={styles.kicker}>Interface milestone · step 3</span><h1>US Visa Scheduler for Canada</h1><p>Figma interface preview with simulated data. No login, notifications, payment, or booking occurs.</p>
-      <button className={styles.previewButton} onClick={() => { setPreferences(structuredClone(DEMO_PREFERENCES)); setPendingMode(null); setTermsOrigin(null); setView('home'); setHidden(false); }}>Fill synthetic preferences</button>
+      <button className={styles.previewButton} onClick={() => { setPreferences(structuredClone(DEMO_PREFERENCES)); setPendingMode(null); setTermsOrigin(null); setFeatures(null); setModeChoice(false); setView('home'); setHidden(false); }}>Fill synthetic preferences</button>
+      <label>Dashboard groups<select aria-label="Preview dashboard groups" value={previewFeatures} onChange={event => setPreviewFeatures(event.target.value as DashboardFeatures)}><option value="both">Paid and unpaid</option><option value="booking">Paid only / scheduling fallback</option><option value="alerts">Unpaid only</option></select></label>
       <label>Workflow<select aria-label="Preview workflow" disabled={previewBusy} value={run.mode} onChange={event => void scenario('idle', event.target.value as Mode)}><option value="booking">Book or reschedule</option><option value="alerts">Date alerts</option></select></label>
       <label>Scenario<select aria-label="Preview scenario" disabled={previewBusy} value={scenarioValue} onChange={event => {
         const value = event.target.value;
@@ -337,8 +409,8 @@ export function App() {
           <button aria-label="Back" className={styles.tab} onClick={view === 'history' ? () => setView('config') : backFromTerms}><ChevronLeft size={20} /></button>
           <img className={styles.separator} src="assets/toolbar-line.svg" alt="" />
         </nav> : <nav className={`${styles.toolbar}${toolbarScrolled ? ` ${styles.toolbarScrolled}` : ''}`} aria-label="Scheduler navigation">
-          <button aria-label="Booking" aria-current={activeTab === 'booking' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'booking' ? ` ${styles.tabActive}` : ''}`} onClick={() => void selectWorkflow('booking')}><img src="assets/toolbar-booking.svg" width={23} height={23} alt="" />{activeTab === 'booking' && <span aria-hidden className={styles.tabUnderline} />}</button>
-          <button aria-label="Alerts" aria-current={activeTab === 'alerts' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'alerts' ? ` ${styles.tabActive}` : ''}`} onClick={() => void selectWorkflow('alerts')}><img src="assets/toolbar-alerts.svg" width={23} height={23} alt="" />{activeTab === 'alerts' && <span aria-hidden className={styles.tabUnderline} />}</button>
+          {features !== 'alerts' && <button aria-label="Booking" disabled={discovering} aria-current={activeTab === 'booking' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'booking' ? ` ${styles.tabActive}` : ''}`} onClick={() => void selectWorkflow('booking')}><img src="assets/toolbar-booking.svg" width={23} height={23} alt="" />{activeTab === 'booking' && <span aria-hidden className={styles.tabUnderline} />}</button>}
+          {features !== 'booking' && <button aria-label="Alerts" disabled={discovering} aria-current={activeTab === 'alerts' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'alerts' ? ` ${styles.tabActive}` : ''}`} onClick={() => void selectWorkflow('alerts')}><img src="assets/toolbar-alerts.svg" width={23} height={23} alt="" />{activeTab === 'alerts' && <span aria-hidden className={styles.tabUnderline} />}</button>}
           <button aria-label="Settings" aria-current={activeTab === 'settings' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'settings' ? ` ${styles.tabActive}` : ''}`} onClick={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }}><img src="assets/toolbar-settings.svg" width={23} height={23} alt="" />{activeTab === 'settings' && <span aria-hidden className={styles.tabUnderline} />}</button>
           <button aria-label="Coffee" title="Buy me a coffee" aria-current={activeTab === 'coffee' ? 'page' : undefined} className={`${styles.tab}${activeTab === 'coffee' ? ` ${styles.tabActive}` : ''}`} onClick={() => { if (view !== 'coffee') openCoffee(); }}><img src="assets/toolbar-coffee.svg" width={23} height={23} alt="" />{activeTab === 'coffee' && <span aria-hidden className={styles.tabUnderline} />}</button>
           <button aria-label="Show Visa tab" title="Show working Visa tab" disabled={!engineEnabled || focusingTab} onClick={async () => {
@@ -349,12 +421,15 @@ export function App() {
           <img className={styles.separator} src="assets/toolbar-line.svg" alt="" />
         </nav>)}
         {error && !isDuplicateFailureBanner(error, engineEnabled ? engineFailure : (view === 'workflow' && run.status === 'failure' ? previewFailure : null)) && <div className={styles.errorBanner} role="alert">{error}</div>}
-        {!ready ? <p className={styles.loading}>{error ? 'Preferences unavailable' : 'Loading preferences…'}</p> : view === 'home' ? <HomeScreen choose={(mode: Mode) => void choose(mode)} openTerms={openTermsFromHome} />
+        {ready && keepHomeMounted && <div style={view === 'home' ? { display: 'contents' } : { display: 'none' }}>
+          <HomeScreen preferences={preferences} signIn={signIn} openTerms={openTermsFromHome} active={settingsLocked} />
+        </div>}
+        {!ready ? <p className={styles.loading}>{error ? 'Preferences unavailable' : 'Loading preferences…'}</p> : view === 'home' ? null
         : <>
           {keepConfigMounted && <div style={view === 'config' ? { display: 'contents' } : { display: 'none' }}>
-            <Configuration preferences={preferences} active={settingsLocked} trackScroll={trackScroll} openTerms={openTermsFromConfig} openHistory={() => setView('history')} cancel={() => setView(preferencesError(preferences) ? 'home' : 'workflow')} save={async value => {
+            <Configuration preferences={preferences} active={settingsLocked} trackScroll={trackScroll} openTerms={openTermsFromConfig} openHistory={() => setView('history')} cancel={() => setView(preferencesError(preferences) ? 'home' : modeChoice ? 'choose' : 'workflow')} save={async value => {
               cancelRestartCommand();
-              await savePreferences(value); setPreferences(value);
+              await savePreferences(value); configured.current = true; setPreferences(value);
               const mode = pendingMode ?? run.mode;
               await persistRun({ mode, status: 'idle', lastChecked: null });
               try { await saveLastMode(mode); } catch { setError('Unable to save workflow selection. Please try again.'); return; }
@@ -365,10 +440,10 @@ export function App() {
                   (!current.reviewMessage || isPanelCommandErrorMessage(current.reviewMessage)) ? null : current);
               }
               setError(engineData?.reviewRequired && engineData.reviewMessage && !isPanelCommandErrorMessage(engineData.reviewMessage) ? engineData.reviewMessage : '');
-              setView('workflow');
+              setView(modeChoice ? 'choose' : 'workflow');
             }} />
           </div>}
-          {view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} failureDetail={engineFailureDetail} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
+          {view === 'choose' ? <ModeChoice choose={mode => void chooseMode(mode)} /> : view === 'history' ? <History live={engineEnabled} previewRows={previewRows} trackScroll={trackScroll} /> : view === 'coffee' ? <Coffee trackScroll={trackScroll} onError={setError} /> : view === 'terms' ? <Terms trackScroll={trackScroll} /> : view === 'workflow' ? <Workflow key={run.mode} preferences={preferences} run={run} trackScroll={trackScroll} openCoffee={openCoffee} data={engineEnabled ? (engineData && engineData.mode === run.mode ? engineData : null) : undefined} failureKind={engineEnabled ? engineFailure : (run.status === 'failure' ? previewFailure : null)} failureDetail={engineFailureDetail} configure={() => { setPendingMode(pendingMode ?? run.mode); setView('config'); }} change={async status => {
             if (engineEnabled && status === 'idle') { cancelRestartCommand(); try { applySnapshot(await panelCommand('STOP')); setPanelFailure(null); setError(''); } catch (failure) { setError((failure as Error).message); } return; }
             if (preferencesError(preferences)) { setPendingMode(run.mode); setView('config'); return; }
             if (engineEnabled) {
