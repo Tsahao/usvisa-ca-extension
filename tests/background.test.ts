@@ -46,7 +46,10 @@ describe('read-only probe boundaries', () => {
         update: vi.fn(async (tabId: number) => ({ id: tabId })),
         reload: vi.fn(async () => undefined),
         query: vi.fn().mockResolvedValue([]),
-        get: vi.fn(async (tabId: number) => ({ id: tabId, url: 'https://ais.usvisa-info.com/en-ca/niv/groups' })),
+        // Keep live snapshots consistent with query results unless a test
+        // explicitly models a navigation race or stale tab.
+        get: vi.fn(async (tabId: number) => (await chromeMock.tabs.query({})).find((tab: { id: number }) => tab.id === tabId)
+          ?? { id: tabId, url: 'https://ais.usvisa-info.com/en-ca/niv/groups' }),
         onUpdated: { addListener: vi.fn(listener => { tabsUpdated = listener; }) },
       },
       windows: {
@@ -1852,7 +1855,7 @@ describe('read-only probe boundaries', () => {
     stored.engineStateV1 = {
       ...bindGroup(startRun(emptyEngineState(now), { mode: 'booking', owner: 'owner-token-01', runId: 'run-id-0001', now }), {
         owner: 'owner-token-01', runId: 'run-id-0001', now,
-        binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null },
+        binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null, applicantIds: ['77777777'] },
       }),
       executor: { tabId: 9, applicantIds: ['77777777'], targetTime: null, skippedDates: ['2026-11-19'], actionPending: false },
     };
@@ -1868,6 +1871,7 @@ describe('read-only probe boundaries', () => {
     state.lastCandidate = null;
     state.nextPollAt = now;
     chromeMock.tabs.query.mockResolvedValue([{ id: 8, url }]);
+    chromeMock.tabs.get.mockRejectedValue(new Error('Synthetic owned tab closed'));
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying' }));
     expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(2);

@@ -5,13 +5,14 @@ import path from 'node:path';
 import { bindGroup, emptyEngineState, startRun, type EngineState } from '../../src/engine/workflow';
 import { policyKey } from '../../src/engine/lifecycle';
 
-test('packaged unpaid renewal keeps its owned tab instead of adopting a duplicate summary', async () => {
+for (const navigationRecovery of [false, true]) {
+test(`packaged unpaid ${navigationRecovery ? 'manual-navigation recovery' : 'renewal'} keeps its owned tab instead of adopting a duplicate summary`, async () => {
   const profile = await mkdtemp(path.join(tmpdir(), 'usvisa-unpaid-renewal-fixture-'));
   const extensionPath = path.resolve('dist-test');
   const context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: true,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, '--host-resolver-rules=MAP ais.usvisa-info.com ~NOTFOUND'] });
   const base = '/en-ca/niv/schedule/11111111'; const dashboardPath = '/en-ca/niv/groups/55555555';
-  let signInGets = 0; let posts = 0;
+  let signInGets = 0; let rootGets = 0; let posts = 0;
   try {
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
@@ -21,7 +22,11 @@ test('packaged unpaid renewal keeps its owned tab instead of adopting a duplicat
       const request = route.request(); const url = new URL(request.url());
       if (request.method() !== 'GET') { posts++; await route.abort(); return; }
       let body: string;
-      if (url.pathname === '/en-ca/niv/users/sign_in') {
+      if (url.pathname === '/en-ca/niv/') {
+        rootGets++; body = `<script>location.replace('${dashboardPath}');</script>`;
+      } else if (url.pathname === '/en-ca/niv/users/edit' || url.pathname === '/en-ca/niv/schedule/99999999/payment') {
+        body = '<p>Synthetic manually opened account page</p>';
+      } else if (url.pathname === '/en-ca/niv/users/sign_in') {
         signInGets++; body = `<script>location.replace('${dashboardPath}');</script>`;
       } else if (url.pathname === dashboardPath) {
         body = `<section class="application card needs_payment"><strong>22222222</strong><h4 class="status">Pay Visa Fee</h4><ul class="actions"><li><a href="${base}/continue_actions">Continue</a></li></ul></section>`;
@@ -33,11 +38,12 @@ test('packaged unpaid renewal keeps its owned tab instead of adopting a duplicat
     const flow = await context.newPage(); await flow.goto(`https://ais.usvisa-info.com${base}/payment`);
     const duplicate = await context.newPage(); await duplicate.goto(flow.url());
     const tabId = await panel.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)!.id!, flow.url());
+    if (navigationRecovery) await flow.goto('https://ais.usvisa-info.com/en-ca/niv/schedule/99999999/payment');
     const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: false, interval: 60, paidIvr: '', unpaidIvr: '22222222' };
     const now = new Date().toISOString(); const args = { now, owner: 'renewal-owner-02', runId: 'renewal-run-0002' };
     const state: EngineState = { ...bindGroup(startRun(emptyEngineState(now), { ...args, mode: 'alerts' }), { ...args,
       binding: { scheduleId: '11111111', ivr: '22222222', kind: 'unpaid', currentDate: null, dashboardPath } }),
-      policyKey: policyKey(prefs), monitorTabId: tabId, startedAt: new Date(Date.now() - 3600_001).toISOString(), nextPollAt: now,
+      policyKey: policyKey(prefs), monitorTabId: tabId, startedAt: navigationRecovery ? now : new Date(Date.now() - 3600_001).toISOString(), nextPollAt: now,
       alert: { observed: '2027-04-16', delivered: '2027-04-16', pending: false } };
     await panel.evaluate(async ({ prefs, state }) => {
       await chrome.storage.local.set({ uiPreferencesV1: prefs });
@@ -46,8 +52,8 @@ test('packaged unpaid renewal keeps its owned tab instead of adopting a duplicat
       await chrome.alarms.create('enginePoll', { when: Date.now() });
     }, { prefs, state });
     const read = () => panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);
-    await expect.poll(async () => ({ signInGets, authentication: (await read()).authentication }), { timeout: 12_000 })
-      .toEqual({ signInGets: 1, authentication: null });
+    await expect.poll(async () => ({ signInGets, rootGets, authentication: (await read()).authentication }), { timeout: 12_000 })
+      .toEqual({ signInGets: navigationRecovery ? 0 : 1, rootGets: navigationRecovery ? 1 : 0, authentication: null });
     await expect(flow).toHaveURL(`https://ais.usvisa-info.com${base}/payment`);
     expect(await read()).toMatchObject({ status: 'running', sessionRenewals: 0, monitorTabId: tabId, alert: state.alert });
     expect(duplicate.isClosed()).toBe(false);
@@ -56,6 +62,7 @@ test('packaged unpaid renewal keeps its owned tab instead of adopting a duplicat
     await panel.evaluate(async () => { await chrome.runtime.sendMessage({ type: 'PANEL_STOP' }); });
   } finally { await context.close(); await rm(profile, { recursive: true, force: true }); }
 });
+}
 
 for (const dashboardHandoff of [false, true]) {
 test(`packaged hourly renewals retain one tab and recover a ${dashboardHandoff ? 'dashboard handoff 502 through Continue and gateways' : 'bare-form re-entry 503'}`, async () => {
@@ -66,14 +73,19 @@ test(`packaged hourly renewals retain one tab and recover a ${dashboardHandoff ?
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, '--host-resolver-rules=MAP ais.usvisa-info.com ~NOTFOUND'] });
   const base = '/en-ca/niv/schedule/11111111';
   const dashboardPath = '/en-ca/niv/groups/55555555';
-  let signInGets = 0; let posts = 0; let dayReads = 0; let reentryFailures = 0; let continues = 0;
+  let signInGets = 0; let rootGets = 0; let posts = 0; let dayReads = 0; let reentryFailures = 0; let continues = 0;
   try {
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
     await context.route('https://ais.usvisa-info.com/**', async route => {
       const request = route.request(); const url = new URL(request.url());
       if (request.method() !== 'GET') { posts++; await route.abort(); return; }
-      if (url.pathname === '/en-ca/niv/users/sign_in') {
+      if (url.pathname === '/en-ca/niv/') {
+        rootGets++;
+        await route.fulfill({ contentType: 'text/html', body: `<script>location.replace('${dashboardPath}');</script>` });
+      } else if (url.pathname === '/en-ca/niv/users/edit' || url.pathname === '/en-ca/niv/schedule/99999999/appointment') {
+        await route.fulfill({ contentType: 'text/html', body: '<p>Synthetic manual navigation</p>' });
+      } else if (url.pathname === '/en-ca/niv/users/sign_in') {
         signInGets++;
         await route.fulfill({ contentType: 'text/html', body: `<script>location.replace('${dashboardPath}');</script>` });
       } else if (url.pathname === dashboardPath) {
@@ -141,6 +153,34 @@ test(`packaged hourly renewals retain one tab and recover a ${dashboardHandoff ?
     expect(await read()).toMatchObject({ status: 'running', consecutiveFailures: 0, sessionRenewals: 0, lastCandidate: null, intent: null, executor: { tabId } });
     expect(posts).toBe(0); expect(continues).toBe(dashboardHandoff ? 1 : 0);
     expect(context.pages().filter(page => page.url().startsWith('https://ais.usvisa-info.com'))).toEqual([flow]);
+    // Manual navigation recovers through the same authenticated-dashboard and
+    // gateway checks, with no new tab, login POST, candidate or booking intent.
+    await flow.goto('https://ais.usvisa-info.com/en-ca/niv/users/edit');
+    state = await read();
+    await saveAndWake({ ...state, nextPollAt: new Date(Date.now() - 1000).toISOString() });
+    await expect.poll(async () => ({ rootGets, dayReads, status: (await read()).status }), { timeout: 15_000 })
+      .toEqual({ rootGets: 1, dayReads: 2, status: 'running' });
+    expect(await read()).toMatchObject({ authentication: null, stage: null, intent: null, lastCandidate: null,
+      sessionRenewals: 0, executor: { tabId, targetTime: null } });
+    expect(signInGets).toBe(6); expect(posts).toBe(0);
+    expect(context.pages().filter(page => page.url().startsWith('https://ais.usvisa-info.com'))).toEqual([flow]);
+    // Switching groups also returns through fresh original-group validation;
+    // the foreign page never supplies workflow authority or booking actions.
+    await flow.goto('https://ais.usvisa-info.com/en-ca/niv/schedule/99999999/appointment');
+    await saveAndWake({ ...await read(), nextPollAt: new Date(Date.now() - 1000).toISOString() });
+    await expect.poll(async () => ({ rootGets, dayReads, status: (await read()).status }), { timeout: 15_000 })
+      .toEqual({ rootGets: 2, dayReads: 3, status: 'running' });
+    expect(await read()).toMatchObject({ authentication: null, intent: null, group: state.group, executor: { tabId } });
+    expect(signInGets).toBe(6); expect(posts).toBe(0);
+    await expect(flow).toHaveURL(`https://ais.usvisa-info.com${base}/appointment`);
+    // Offsite navigation still parks without taking back the user's tab.
+    await context.route('https://example.invalid/**', route => route.fulfill({ contentType: 'text/html', body: '<p>Synthetic other site</p>' }));
+    await flow.goto('https://example.invalid/');
+    await saveAndWake({ ...await read(), nextPollAt: new Date(Date.now() - 1000).toISOString() });
+    await expect.poll(async () => (await read()).status).toBe('verifying');
+    expect(await read()).toMatchObject({ intent: null, authentication: null, nextPollAt: null });
+    expect(rootGets).toBe(2); expect(posts).toBe(0);
+    await expect(flow).toHaveURL('https://example.invalid/');
     await panel.evaluate(async () => { await chrome.runtime.sendMessage({ type: 'PANEL_STOP' }); });
   } finally { await context.close(); await rm(profile, { recursive: true, force: true }); }
 });

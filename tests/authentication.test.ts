@@ -6,6 +6,7 @@ import { panelSnapshot } from '../src/engine/panel';
 import { engineAlarmAt } from '../src/engine/poll';
 import type { DiagnosticEvent } from '../src/domain/diagnostics';
 import type { ExecDeps } from '../src/engine/executor';
+import { isNavigationRecoveryUrl, needsNavigationRecovery } from '../src/engine/navigation-recovery';
 
 const NOW = '2026-10-12T00:00:00.000Z';
 const ids = ['77777777', '88888888'];
@@ -58,6 +59,162 @@ function harness() {
 }
 
 describe('durable automatic authentication', () => {
+  const recoveryState = (): EngineState => ({ ...bound(), stage: null, lastCandidate: '2026-11-19',
+    group: { ...bound().group!, dashboardPath: '/en-ca/niv/groups' },
+    executor: { tabId: 7, applicantIds: ids, targetTime: '09:00', skippedDates: [], actionPending: false } });
+  const site = 'https://ais.usvisa-info.com';
+
+  it.each(['/en-ca/niv/groups', '/en-ca/niv/users/edit', '/en-ca/niv/schedule/11111111/continue',
+    '/en-ca/niv/schedule/11111111/continue_actions', '/en-ca/niv/users/sign_in',
+    '/en-ca/niv/schedule/99999999/appointment', '/en-ca/niv/schedule/99999999/payment',
+    '/en-ca/niv/schedule/99999999/appointment?applicants[]=12345678&commit=Continue',
+    '/en-ca/niv/groups/99999999'])('recovers manual navigation at %s through existing renewal and fresh validation', async path => {
+    const h = harness();
+    const original = recoveryState();
+    h.setUrl(site + path);
+    expect(needsNavigationRecovery(original, { id: 7, url: h.getUrl() })).toBe(true);
+    let state = validateEngineState(beginAuthentication(original, 'renew', NOW, () => 0, true));
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(h.deps.navigateTab).toHaveBeenCalledExactlyOnceWith(7, site + '/en-ca/niv/');
+    expect(h.saved[0]?.authentication).toMatchObject({ tabId: 7, pending: true, checkpoint: 'navigation', dashboardFirst: true });
+    expect(state.lastCandidate).toBeNull();
+    expect(h.deps.inject).not.toHaveBeenCalled();
+    expect(h.deps.createTab).not.toHaveBeenCalled();
+    // A valid session returns directly to the dashboard without credential actions.
+    h.setUrl(site + '/en-ca/niv/groups');
+    state = validateEngineState(await runAuthentication(h.deps, state));
+    expect(state).toMatchObject({ status: 'running', runId: original.runId, authentication: null,
+      stage: 'actions', sessionRenewals: 0, lastCandidate: null, executor: { tabId: 7, targetTime: null } });
+    expect(h.actions).toEqual([]);
+    expect(state.group).toEqual(original.group);
+  });
+
+  it('falls through the existing signed-out landing and login flow', async () => {
+    const h = harness();
+    h.setUrl(site + '/en-ca/niv/users/edit');
+    let state = await runAuthentication(h.deps, beginAuthentication(recoveryState(), 'renew', NOW, () => 0, true));
+    for (let i = 0; i < 5 && state.authentication; i++) { h.tick(2); state = await runAuthentication(h.deps, state); }
+    expect(state).toMatchObject({ status: 'running', authentication: null, stage: 'actions' });
+    expect(h.actions).toEqual(['prepare', 'submit']);
+    expect(h.deps.createTab).not.toHaveBeenCalled();
+  });
+
+  it('treats a foreign-group pending URL as recovery-only, even at an expected route', async () => {
+    const state = recoveryState();
+    const tab = { id: 7, url: site + '/en-ca/niv/schedule/11111111/appointment',
+      pendingUrl: site + '/en-ca/niv/schedule/99999999/appointment' };
+    expect(needsNavigationRecovery(state, tab)).toBe(true);
+    const h = harness(); h.deps.getTab = async () => tab;
+    const next = await runAuthentication(h.deps, beginAuthentication(state, 'renew', NOW, () => 0, true));
+    expect(next.group).toEqual(state.group);
+    expect(h.deps.inject).not.toHaveBeenCalled();
+    expect(h.deps.navigateTab).toHaveBeenCalledExactlyOnceWith(7, site + '/en-ca/niv/');
+  });
+
+  it('does not broaden ordinary renewal or bind a foreign group during recovery', async () => {
+    const h = harness(); h.setUrl(site + '/en-ca/niv/schedule/99999999/appointment');
+    const initial = recoveryState();
+    expect(await runAuthentication(h.deps, beginAuthentication(initial, 'renew', NOW)))
+      .toMatchObject({ status: 'stopped', authenticationFailureReason: 'untrusted-navigation' });
+    expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    const recovery = await runAuthentication(h.deps, beginAuthentication(initial, 'renew', NOW, () => 0, true));
+    h.setUrl(site + '/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = async (tab, func, params) => func.name === 'readDashboardGroups'
+      ? { groups: [{ scheduleId: '99999999', ivr: '22222222', paymentStatus: 'paid' }] } : inject(tab, func, params);
+    const next = await runAuthentication(h.deps, recovery);
+    expect(next).toMatchObject({ status: 'stopped', authentication: null, group: initial.group });
+    expect(h.actions).toEqual([]);
+  });
+
+  it.each(['https://example.invalid/en-ca/niv/users/edit', site + '/en-ca/niv/schedule/not-a-group/appointment',
+    site + '/en-ca/niv/groups/invalid', site + '/en-ca/niv/users/edit?next=unsafe',
+    site + '/en-ca/niv/schedule/99999999/appointment?next=unsafe',
+    site + '/en-ca/niv/users/edit#unsafe', site + '/en-us/niv/users/edit', 'about:blank'])('refuses navigation recovery from %s', async url => {
+    const state = recoveryState();
+    expect(isNavigationRecoveryUrl(state, url)).toBe(false);
+    expect(needsNavigationRecovery(state, { id: 7, url })).toBe(false);
+    const h = harness(); h.setUrl(url);
+    expect(await runAuthentication(h.deps, beginAuthentication(state, 'renew', NOW, () => 0, true)))
+      .toMatchObject({ status: 'stopped', authenticationFailureReason: 'untrusted-navigation' });
+    expect(h.deps.navigateTab).not.toHaveBeenCalled(); expect(h.deps.inject).not.toHaveBeenCalled();
+    expect(h.deps.createTab).not.toHaveBeenCalled();
+  });
+
+  it('does not recover an expected form, another tab, stopped work, or unsafe mutations', () => {
+    const state = recoveryState(); const tab = { id: 7, url: site + '/en-ca/niv/users/edit' };
+    expect(needsNavigationRecovery(state, { id: 7, url: site + '/en-ca/niv/schedule/11111111/appointment' })).toBe(false);
+    expect(needsNavigationRecovery(state, { id: 7, url: site + '/en-ca/niv/schedule/11111111/appointment?applicants[]=77777777&applicants[]=88888888&commit=Continue' })).toBe(false);
+    expect(needsNavigationRecovery(state, { ...tab, id: 8 })).toBe(false);
+    expect(needsNavigationRecovery({ ...state, status: 'stopped' }, tab)).toBe(false);
+    expect(needsNavigationRecovery({ ...state, executor: { ...state.executor!, actionPending: true } }, tab)).toBe(false);
+    const intent = { runId: args.runId, mode: 'booking' as const, groupId: '11111111', targetDate: '2026-11-19',
+      consulate: 'Vancouver', testMode: false, createdAt: NOW };
+    expect(needsNavigationRecovery({ ...state, intent }, tab)).toBe(false);
+    expect(beginAuthentication({ ...state, intent }, 'renew', NOW, () => 0, true).authentication).toBeNull();
+  });
+
+  it.each(['cancel', 'settings', 'offsite', 'group', 'closed', 'storage'] as const)('rechecks %s after checkpoint before navigating', async change => {
+    const h = harness(); h.setUrl(site + '/en-ca/niv/users/edit');
+    const save = h.deps.saveState;
+    h.deps.saveState = async state => {
+      await save(state);
+      if (change === 'cancel') h.deps.isCancelled = () => true;
+      if (change === 'settings') h.deps.loadPrefs = async () => ({ ...prefs, password: 'changed-synthetic-password' });
+      if (change === 'offsite') h.setUrl('https://example.invalid/');
+      if (change === 'group') h.setUrl(site + '/en-ca/niv/schedule/99999999/appointment');
+      if (change === 'closed') h.deps.getTab = async () => { throw new Error('closed'); };
+      if (change === 'storage') throw new Error('storage');
+    };
+    const state = await runAuthentication(h.deps, beginAuthentication(recoveryState(), 'renew', NOW, () => 0, true));
+    expect(state.status).toBe(change === 'group' ? 'running' : 'stopped');
+    if (change === 'group') expect(state).toMatchObject({ consecutiveFailures: 1, authentication: { phase: 'retry', dashboardFirst: true } });
+    expect(h.deps.navigateTab).not.toHaveBeenCalled(); expect(h.deps.inject).not.toHaveBeenCalled();
+  });
+
+  it('recovers a suspended GET checkpoint on budget, but never a browser restart', async () => {
+    const h = harness(); h.setUrl(site + '/en-ca/niv/users/edit');
+    await runAuthentication(h.deps, beginAuthentication(recoveryState(), 'renew', NOW, () => 0, true));
+    const pending = h.saved[0]!;
+    h.setUrl(site + '/en-ca/niv/users/edit'); // worker died before its GET
+    const resumed = validateEngineState(reconcileStartup(pending, NOW));
+    expect(await runAuthentication(h.deps, resumed)).toEqual(resumed);
+    vi.mocked(h.deps.navigateTab!).mockClear();
+    h.tick(60);
+    expect(await runAuthentication(h.deps, resumed)).toMatchObject({ status: 'running', authentication: { pending: false } });
+    expect(h.deps.navigateTab).toHaveBeenCalledExactlyOnceWith(7, site + '/en-ca/niv/');
+    expect(reconcileStartup(pending, NOW, true)).toMatchObject({ status: 'verifying', authentication: null });
+  });
+
+  it.each(['roster', 'baseline', 'group'] as const)('keeps existing %s-change refusal after dashboard recovery', async change => {
+    const h = harness(); h.setUrl(site + '/en-ca/niv/users/edit');
+    let state = await runAuthentication(h.deps, beginAuthentication(recoveryState(), 'renew', NOW, () => 0, true));
+    h.setUrl(site + '/en-ca/niv/groups');
+    const inject = h.deps.inject;
+    h.deps.inject = async (tab, func, params) => {
+      if (func.name === 'readCurrentAppointment') return { scheduleId: '11111111', ivr: '22222222', kind: 'booked',
+        text: change === 'baseline' ? 'January 2, 2027' : 'January 1, 2027', applicantIds: change === 'roster' ? [ids[0]] : ids };
+      if (func.name === 'readDashboardGroups' && change === 'group') return { groups: [{ scheduleId: '99999999', ivr: '22222222', paymentStatus: 'paid' }] };
+      return inject(tab, func, params);
+    };
+    state = await runAuthentication(h.deps, state);
+    expect(state.status).toBe('stopped'); expect(state.authentication).toBeNull(); expect(h.actions).toEqual([]);
+  });
+
+  it('recovers the owned unpaid tab without booking actions or replacing notification history', async () => {
+    const h = harness(); const original = recoveryState();
+    const state: EngineState = { ...original, mode: 'alerts', stage: null, executor: null, monitorTabId: 7,
+      group: { scheduleId: '33333333', ivr: '44444444', kind: 'unpaid', currentDate: null, dashboardPath: '/en-ca/niv/groups' } };
+    h.setUrl(site + '/en-ca/niv/groups');
+    expect(needsNavigationRecovery(state, { id: 7, url: h.getUrl() })).toBe(true);
+    let next = await runAuthentication(h.deps, beginAuthentication(state, 'renew', NOW, () => 0, true));
+    h.setUrl(site + '/en-ca/niv/groups');
+    next = await runAuthentication(h.deps, next);
+    expect(next).toMatchObject({ status: 'running', authentication: null, monitorTabId: 7, executor: null, group: state.group });
+    expect(h.actions).toEqual([]);
+    expect(vi.mocked(h.deps.inject).mock.calls.some(call => call[1].name === 'readCurrentAppointment')).toBe(false);
+  });
+
   it.each(['navigation', 'action'] as const)('recovers an interrupted typed login %s checkpoint on worker wake without replay', async checkpoint => {
     const h = harness();
     const started = beginAuthentication(seed(), 'start', NOW);

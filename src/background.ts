@@ -41,6 +41,7 @@ import {
 } from './engine/workflow';
 import { runBookingStage } from './engine/executor';
 import { beginAuthentication, deferAuthenticationForMaintenance, runAuthentication } from './engine/authentication';
+import { isNavigationRecoveryUrl, needsNavigationRecovery } from './engine/navigation-recovery';
 import { policyKey } from './engine/lifecycle';
 import { SESSION_AGE_MINUTES } from './domain/timing';
 import { openPanelWindow } from './panel-window';
@@ -106,8 +107,8 @@ function noteExceptionRecovery(state: import('./engine/workflow').EngineState): 
 // Tracked begin: records the fixed auth-started transition with the run
 // purpose/mode only. A refused begin (context/status guard) changes nothing
 // and records nothing.
-function beginTrackedAuthentication(state: import('./engine/workflow').EngineState, purpose: 'start' | 'renew' | 'verify', now: string, random: () => number): import('./engine/workflow').EngineState {
-  const next = beginAuthentication(state, purpose, now, random);
+function beginTrackedAuthentication(state: import('./engine/workflow').EngineState, purpose: 'start' | 'renew' | 'verify', now: string, random: () => number, dashboardFirst = false): import('./engine/workflow').EngineState {
+  const next = beginAuthentication(state, purpose, now, random, dashboardFirst);
   if (next !== state && next.authentication) noteDiagnostic('auth-started', { purpose, mode: next.mode });
   return next;
 }
@@ -1586,8 +1587,21 @@ function queueEnginePoll(): void {
         }
         const durablePrefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
         let sessionExpired = state.startedAt !== null && Date.parse(now) - Date.parse(state.startedAt) >= SESSION_AGE_MINUTES * 60_000;
-        if (state.executor && !state.intent) {
-          try { sessionExpired ||= classifyRoute((await platform.tabs.get(state.executor.tabId)).url ?? '') === 'login'; }
+        let navigationRecovery = false;
+        const ownedTabId = state.mode === 'booking' ? state.executor?.tabId : state.monitorTabId;
+        if (ownedTabId != null && !state.intent) {
+          try {
+            const owned = await platform.tabs.get(ownedTabId);
+            if (!isNavigationRecoveryUrl(state, owned.url) ||
+                (owned.pendingUrl && !isNavigationRecoveryUrl(state, owned.pendingUrl))) {
+              const next = parkForReview(state, now);
+              await saveEngineState(area, next);
+              await syncEngineAlarm(null);
+              return;
+            }
+            navigationRecovery = needsNavigationRecovery(state, owned);
+            sessionExpired ||= classifyRoute(owned.url ?? '') === 'login';
+          }
           catch {
             const next = parkForReview(state, now);
             await saveEngineState(area, next);
@@ -1595,8 +1609,8 @@ function queueEnginePoll(): void {
             return;
           }
         }
-        if (sessionExpired && !state.intent && state.policyKey === policyKey(durablePrefs)) {
-          const next = beginTrackedAuthentication(state, 'renew', now, Math.random);
+        if ((sessionExpired || navigationRecovery) && !state.intent && state.policyKey === policyKey(durablePrefs)) {
+          const next = beginTrackedAuthentication(state, 'renew', now, Math.random, navigationRecovery);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;

@@ -19,28 +19,7 @@ import { bindGroup, parkForReview, VERIFICATION_UNREADABLE, isAuthenticationFail
 import type { ExecDeps } from './executor';
 import { applyPollResult, engineAlarmAt } from './poll';
 import { assessDashboard } from './discovery';
-
-// Renewal keeps the existing workflow tab. Validate its current and pending
-// navigation before replacing it with a fresh GET; never adopt a duplicate.
-function trustedRenewalUrl(state: EngineState, value: string | undefined): boolean {
-  if (!state.group || !value) return false;
-  try {
-    const url = new URL(value);
-    if (url.origin !== SITE_ORIGIN || url.username || url.password || url.port || url.hash) return false;
-    if (!url.search && ['/en-ca/niv', '/en-ca/niv/', '/en-ca/niv/users/sign_in', state.group.dashboardPath].includes(url.pathname)) return true;
-    const base = `/en-ca/niv/schedule/${state.group.scheduleId}`;
-    if (state.mode === 'alerts') return url.pathname === `${base}/payment` && !url.search;
-    if (url.pathname === `${base}/continue_actions`) return !url.search;
-    if (url.pathname !== `${base}/appointment`) return false;
-    for (const [key, value] of url.searchParams) {
-      if (key === 'applicants[]' && /^[0-9]{1,32}$/.test(value)) continue;
-      if (key === 'confirmed_limit_message' && value === '1' && url.searchParams.getAll(key).length === 1) continue;
-      return false;
-    }
-    const applicants = url.searchParams.getAll('applicants[]');
-    return !applicants.length || sameApplicants(applicants, state.group.applicantIds);
-  } catch { return false; }
-}
+import { isNavigationRecoveryUrl, trustedRenewalUrl } from './navigation-recovery';
 
 export function deferAuthenticationForMaintenance(state: EngineState, now: string, random: () => number): EngineState {
   if (!state.authentication || state.authentication.pending || !['running', 'verifying'].includes(state.status)) return state;
@@ -49,7 +28,7 @@ export function deferAuthenticationForMaintenance(state: EngineState, now: strin
     loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false };
 }
 
-export function beginAuthentication(state: EngineState, purpose: AuthenticationState['purpose'], now: string, random: () => number = () => 0): EngineState {
+export function beginAuthentication(state: EngineState, purpose: AuthenticationState['purpose'], now: string, random: () => number = () => 0, dashboardFirst = false): EngineState {
   if (state.authentication || (purpose !== 'verify' && (state.status !== 'running' || state.intent)) ||
       (purpose === 'verify' && (state.status !== 'verifying' || !state.intent))) return state;
   if (purpose === 'renew' && state.sessionRenewals >= 3) return parkForReview(state, now);
@@ -57,7 +36,8 @@ export function beginAuthentication(state: EngineState, purpose: AuthenticationS
   // configured checking interval plus jitter — no fixed total timeout.
   const cycleDeadline = new Date(Date.parse(now) + pollDelaySeconds(random, state.pollIntervalS) * 1000).toISOString();
   return { ...state, authentication: { tabId: null, phase: 'prepare', pending: false, purpose, startedAt: now,
-      cycleStartedAt: now, cycleDeadline, submittedInCycle: false },
+      cycleStartedAt: now, cycleDeadline, submittedInCycle: false,
+      ...(dashboardFirst && purpose === 'renew' && !state.executor?.actionPending ? { dashboardFirst: true as const } : {}) },
     sessionRenewals: state.sessionRenewals + (purpose === 'renew' ? 1 : 0),
     verification: purpose === 'verify' ? null : state.verification, loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false, nextPollAt: now, updatedAt: now };
 }
@@ -169,7 +149,7 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
   if ((auth.phase === 'retry' || auth.phase === 'cycle-wait') && deadline && Date.parse(deadline) > Date.parse(now)) return state;
   const cycleDeadline = auth.cycleDeadline ?? new Date(Date.parse(auth.cycleStartedAt ?? auth.startedAt) + state.pollIntervalS * 1000).toISOString();
   const expired = Date.parse(now) >= Date.parse(cycleDeadline);
-  if (auth.tabId === null) {
+  if (auth.tabId === null || auth.dashboardFirst) {
     if (state.cooldownUntil && Date.parse(state.cooldownUntil) > Date.parse(now)) return state;
     // No attempt has run yet in an unexpired cycle; an expiry with no tab
     // simply opens a fresh cycle instead of counting a failure.
@@ -180,9 +160,11 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
     }
     const ownedTabId = auth.purpose === 'renew'
       ? (state.mode === 'booking' ? state.executor?.tabId : state.monitorTabId) : null;
+    if (auth.dashboardFirst && (ownedTabId == null || state.executor?.actionPending || state.intent)) return fail('context-changed');
     if (ownedTabId !== null && ownedTabId !== undefined) {
-      const trusted = (tab: Awaited<ReturnType<ExecDeps['getTab']>>) => trustedRenewalUrl(state, tab.url) &&
-        (!tab.pendingUrl || trustedRenewalUrl(state, tab.pendingUrl));
+      const trustedUrl = auth.dashboardFirst ? isNavigationRecoveryUrl : trustedRenewalUrl;
+      const trusted = (tab: Awaited<ReturnType<ExecDeps['getTab']>>) => trustedUrl(state, tab.url) &&
+        (!tab.pendingUrl || trustedUrl(state, tab.pendingUrl));
       try {
         const owned = await deps.getTab(ownedTabId);
         if (!trusted(owned)) return fail('untrusted-navigation');
@@ -204,8 +186,10 @@ export async function runAuthentication(deps: ExecDeps, initial: EngineState): P
           return next;
         }
         if (!await unchanged()) return fail(deps.isCancelled?.() ? 'cancelled' : 'configuration-changed');
-        await deps.navigateTab(ownedTabId, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
-        state = { ...state, authentication: { ...state.authentication!, pending: false, checkpoint: undefined } };
+        await deps.navigateTab(ownedTabId, auth.dashboardFirst
+          ? 'https://ais.usvisa-info.com/en-ca/niv/' : 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
+        state = { ...state, lastCandidate: auth.dashboardFirst ? null : state.lastCandidate,
+          authentication: { ...state.authentication!, dashboardFirst: undefined, pending: false, checkpoint: undefined } };
         return pace();
       } catch { return fail('tab-unavailable'); }
     }

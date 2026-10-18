@@ -78,6 +78,9 @@ export type AuthenticationState = {
   cycleStartedAt?: string;
   cycleDeadline?: string | null;
   submittedInCycle?: boolean;
+  // A navigation recovery reuses renewal validation, but tries the session
+  // through the fixed root before falling back to sign-in.
+  dashboardFirst?: true;
   // What the durable pending checkpoint guards: 'navigation' is a browser-side
   // GET to a fixed approved target (an interrupted one is safely recoverable
   // on worker wake), 'action' is an injected login form action which may have
@@ -254,8 +257,11 @@ export function validateEngineState(value: unknown): EngineState {
     if (typeof submittedInCycle !== 'boolean') throw new Error('Invalid authentication state.');
     if (!(auth.checkpoint === undefined || auth.checkpoint === 'navigation' || auth.checkpoint === 'action'))
       throw new Error('Invalid authentication state.');
+    if (auth.dashboardFirst !== undefined && (auth.dashboardFirst !== true || auth.purpose !== 'renew'))
+      throw new Error('Invalid authentication state.');
     authentication = { tabId: auth.tabId, phase: auth.phase, pending: auth.pending, startedAt: auth.startedAt, purpose: auth.purpose,
       cycleStartedAt, cycleDeadline, submittedInCycle,
+      ...(auth.dashboardFirst === undefined ? {} : { dashboardFirst: auth.dashboardFirst }),
       ...(auth.checkpoint === undefined ? {} : { checkpoint: auth.checkpoint }) };
   }
   if (!Number.isInteger(pollIntervalS) || (pollIntervalS as number) < 60 || (pollIntervalS as number) > 86400) throw new Error('Invalid poll interval.');

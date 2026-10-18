@@ -223,6 +223,34 @@ describe('background engine startup reconciliation', () => {
     expect(alarmsMock.clear).toHaveBeenCalledWith('enginePoll');
   });
 
+  it.each(['booking-poll', 'booking-stage', 'alerts'] as const)('hands unexpected %s navigation to the existing checkpointed recovery', async kind => {
+    const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
+    const { policyKey } = await import('../src/engine/lifecycle');
+    const now = new Date().toISOString();
+    const args = { owner: 'owner-token-01', runId: 'run-id-0001', now, nextPollAt: now };
+    const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver',
+      earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, testMode: true, interval: 60, paidIvr: '', unpaidIvr: '' };
+    const mode = kind === 'alerts' ? 'alerts' : 'booking';
+    const state = bindGroup(startRun(emptyEngineState(now), { ...args, mode }), { ...args,
+      binding: { scheduleId: '11111111', ivr: '22222222', kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate: null,
+        dashboardPath: '/en-ca/niv/groups', ...(mode === 'booking' ? { applicantIds: ['77777777'] } : {}) } });
+    stored.uiPreferencesV1 = prefs;
+    stored[ENGINE_KEY] = { ...state, policyKey: policyKey(prefs), stage: kind === 'booking-stage' ? 'form' : null,
+      monitorTabId: mode === 'alerts' ? 7 : null,
+      executor: mode === 'booking' ? { tabId: 7, applicantIds: ['77777777'], targetTime: null, skippedDates: [], actionPending: false } : null };
+    (chrome.tabs.get as ReturnType<typeof vi.fn>).mockImplementation(async (id: number) => ({ id, url: 'https://ais.usvisa-info.com/en-ca/niv/users/edit' }));
+    await import('../src/background');
+    onAlarm({ name: 'enginePoll' });
+    await send({ type: 'ENGINE_STOP', owner: 'other-owner-02', runId: args.runId, now }, panelSender);
+    expect(stored[ENGINE_KEY]).toMatchObject({ status: 'running', authentication: { purpose: 'renew', dashboardFirst: true }, sessionRenewals: 1 });
+    expect(chrome.scripting.executeScript).not.toHaveBeenCalled();
+    onAlarm({ name: 'enginePoll' });
+    await send({ type: 'ENGINE_STOP', owner: 'other-owner-02', runId: args.runId, now }, panelSender);
+    expect(chrome.tabs.update).toHaveBeenCalledWith(7, { url: 'https://ais.usvisa-info.com/en-ca/niv/' });
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(stored[ENGINE_KEY]).toMatchObject({ status: 'running', authentication: { tabId: 7, pending: false } });
+  });
+
   it('preserves an overdue deadline on worker wake and revalidates only once', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
