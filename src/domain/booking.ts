@@ -15,6 +15,7 @@ export type BookingExpectation = {
   scheduleId: string;
   applicantIds: string[];
   consulate: Consulate;
+  selected: Consulate[];
   currentDate: string | null;
   prefs: DatePreferences;
   testMode: boolean; // Legacy inverse bit: true means Auto Mode OFF.
@@ -24,6 +25,7 @@ export type GuardDenial =
   | 'test-mode'
   | 'group-mismatch'
   | 'applicants-mismatch'
+  | 'consulate-unselected'
   | 'consulate-mismatch'
   | 'date-ineligible'
   | 'time-missing';
@@ -47,10 +49,14 @@ export function guardBooking(
   if (!isDigitId(expected.scheduleId) || !expected.applicantIds.every(isDigitId))
     throw new Error('Invalid booking expectation.');
   if (!(expected.consulate in CONSULATES)) throw new Error('Invalid booking expectation.');
+  if (!Array.isArray(expected.selected) || !expected.selected.every(name => typeof name === 'string' && Object.hasOwn(CONSULATES, name)))
+    throw new Error('Invalid booking expectation.');
   if (expected.currentDate !== null && !isIsoDate(expected.currentDate)) return { allowed: false, reason: 'date-ineligible' };
   if (expected.testMode) return { allowed: false, reason: 'test-mode' };
   if (form.scheduleId !== expected.scheduleId) return { allowed: false, reason: 'group-mismatch' };
   if (!sameApplicants(form.applicantIds, expected.applicantIds)) return { allowed: false, reason: 'applicants-mismatch' };
+  // The anti-goal guard: never submit a facility outside the user's selection.
+  if (!expected.selected.includes(expected.consulate)) return { allowed: false, reason: 'consulate-unselected' };
   if (form.facilityId !== CONSULATES[expected.consulate]) return { allowed: false, reason: 'consulate-mismatch' };
   if (!canBook(form.date, expected.currentDate, expected.prefs)) return { allowed: false, reason: 'date-ineligible' };
   if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(form.time)) return { allowed: false, reason: 'time-missing' };

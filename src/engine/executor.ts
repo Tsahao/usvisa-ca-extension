@@ -1,4 +1,4 @@
-import { canBook, CONSULATES, selectedConsulates, validatePreferences } from '../domain/dates';
+import { canBook, CONSULATES, selectedConsulates, validatePreferences, type Consulate } from '../domain/dates';
 import { guardBooking } from '../domain/booking';
 import { readAutoMode } from '../domain/auto-mode';
 import { sameApplicants, validateApplicantIds } from '../domain/applicants';
@@ -47,7 +47,7 @@ export type ExecDeps = {
 };
 
 type Prefs = {
-  consulate: keyof typeof CONSULATES;
+  consulates: Consulate[];
   earliest: string;
   latest: string;
   onlyEarlier: boolean;
@@ -57,13 +57,12 @@ type Prefs = {
 async function readPrefs(deps: ExecDeps): Promise<Prefs | null> {
   const raw = await deps.loadPrefs();
   const autoMode = readAutoMode(raw);
-  // TODO(task 5): the form stage should honour every selected consulate.
-  const consulate = selectedConsulates(raw)?.[0];
-  if (!raw || !consulate ||
+  const consulates = selectedConsulates(raw);
+  if (!raw || !consulates || consulates.length === 0 ||
       typeof raw.earliest !== 'string' || typeof raw.latest !== 'string' || typeof raw.onlyEarlier !== 'boolean' || autoMode === null) return null;
   try { validatePreferences({ earliest: raw.earliest, latest: raw.latest, exclusions: [], onlyEarlier: raw.onlyEarlier }); }
   catch { return null; }
-  return { consulate, earliest: raw.earliest, latest: raw.latest,
+  return { consulates, earliest: raw.earliest, latest: raw.latest,
     onlyEarlier: raw.onlyEarlier, autoMode, policyKey: policyKey(raw) };
 }
 
@@ -304,7 +303,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   };
   const request = { scheduleId };
   const submission = (action: SubmissionRequest['action'], date: string, time: string): SubmissionRequest => ({
-    action, scheduleId, applicantIds: state.executor!.applicantIds!, facilityId: CONSULATES[prefs.consulate], date, time,
+    action, scheduleId, applicantIds: state.executor!.applicantIds!, facilityId: CONSULATES[state.lastCandidate!.consulate], date, time,
     earliest: prefs.earliest, latest: prefs.latest, currentDate: state.group!.currentDate,
     currentDateTag: state.group!.currentDate === null ? 'unbooked' : 'booked',
     // Serialized submit guards/intents retain their inverse legacy bit.
@@ -327,7 +326,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     case 'confirm': {
       const intent = state.intent!;
       const time = state.executor!.targetTime;
-      if (!time || intent.targetDate !== state.lastCandidate?.date || intent.testMode !== !prefs.autoMode || intent.consulate !== prefs.consulate ||
+      if (!time || intent.targetDate !== state.lastCandidate?.date || intent.testMode !== !prefs.autoMode || intent.consulate !== state.lastCandidate?.consulate ||
           page.kind !== 'form' || page.slotWarning === true || page.calendarReady !== true ||
           page.date !== intent.targetDate || page.time !== time) return verify();
       if (!prefs.autoMode) return verify();
@@ -392,7 +391,8 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
         return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
           nextPollAt: deps.nowIso(), stage: null, executor: { ...state.executor!, targetTime: null } };
       }
-      const facilityId = CONSULATES[prefs.consulate];
+      const consulate = state.lastCandidate!.consulate;
+      const facilityId = CONSULATES[consulate];
       const date = state.lastCandidate!.date;
       const fields = { ...request, applicantIds: ids, facilityId, date };
       if (page.facilityId !== facilityId) {
@@ -418,9 +418,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
           // Candidate disappeared; discard it and return to days polling.
           return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
             stage: null, lastCandidate: null,
-            executor: { ...state.executor!, targetTime: null, // TODO(task 5): use the candidate's own consulate, not the prefs stand-in.
-            skippedDates: [...state.executor!.skippedDates.filter(entry => !(entry.consulate === prefs.consulate && entry.date === date)),
-              { consulate: prefs.consulate, date }] } };
+            executor: { ...state.executor!, targetTime: null,
+            skippedDates: [...state.executor!.skippedDates.filter(entry => !(entry.consulate === consulate && entry.date === date)),
+              { consulate, date }] } };
         }
         time = [...times].sort()[0];
         state = { ...state, executor: { ...state.executor!, targetTime: time } };
@@ -436,7 +436,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
           fresh.date !== date || fresh.time !== time || typeof fresh.facilityId !== 'number') return park();
       const refused = await baselineGuard();
       if (refused) return refused;
-      const expected = { scheduleId, applicantIds: ids, consulate: prefs.consulate, currentDate: state.group!.currentDate,
+      const expected = { scheduleId, applicantIds: ids, consulate, selected: prefs.consulates, currentDate: state.group!.currentDate,
         prefs: windowPrefs, testMode: false };
       try {
         const form = { ...fresh, facilityId: fresh.facilityId };
@@ -477,7 +477,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       if (!await prefsUnchanged() || deps.isCancelled?.()) return park();
       state = recordIntent(state, { owner, runId, now: deps.nowIso(), intent: {
         runId, mode: 'booking', groupId: scheduleId, targetDate: fresh.date,
-        consulate: prefs.consulate, testMode: !prefs.autoMode, createdAt: deps.nowIso(), phase: 'prepared',
+        consulate, testMode: !prefs.autoMode, createdAt: deps.nowIso(), phase: 'prepared',
       } });
       state = { ...state, executor: { ...state.executor!, actionPending: true } };
       try { await deps.saveState(state); } catch { return verify(); }
