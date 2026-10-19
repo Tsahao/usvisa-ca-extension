@@ -105,3 +105,9 @@
 .errorBanner { font-size: 12px; color: #bc2a2e; background: #ffeded; padding: 12px; }
 .loading { text-align: center; font-size: 13px; padding: 30px; }
 @media (max-width: 740px) { .preview { gap: 30px; flex-direction: column-reverse; align-items: center; padding: 12px 8px 32px; } .previewControls { padding-top: 0; } }
+.consulates { border: 0; border-bottom: 1px solid #e3e3e3; margin: 0; padding: 10px 0; min-width: 0; font-size: 13px; color: #161616; }
+.consulatesLabel { display: block; margin-bottom: 6px; }
+.consulateOptions { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px 8px; }
+.consulateOption { display: flex; align-items: center; gap: 6px; min-height: 26px; font-size: 12px; cursor: pointer; }
+.consulateOption input { margin: 0; }
+.consulatesNote { margin: 8px 0 0; font-size: 11px; line-height: 1.4; color: #0009; }

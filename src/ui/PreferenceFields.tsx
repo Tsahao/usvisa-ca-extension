@@ -19,8 +19,16 @@ export function PreferenceFields({ draft, update, validationEvents, autoLabel = 
   return <>
     <Row label="Email"><input aria-label="Email" type="email" autoComplete="off" value={draft.email} onChange={event => update('email', event.target.value)} /></Row>
     <Row label="Password"><input aria-label="Password" type="password" autoComplete="off" {...validationEvents('password')} value={draft.password} onChange={event => update('password', event.target.value)} /></Row>
-    {/* TODO(task 3): replace with the multi-select checkbox list. */}
-    <Row label="Consulate"><select aria-label="Consulate" {...validationEvents('consulates')} value={draft.consulates[0] ?? ''} onChange={event => update('consulates', event.target.value ? [event.target.value as Preferences['consulates'][number]] : [])}><option value="">Select Consulate</option>{CITIES.map(city => <option key={city} value={city}>{cityLabel(city)}</option>)}</select></Row>
+    <fieldset className={panel.consulates} aria-label="Consulates" {...validationEvents('consulates')}>
+      <span className={panel.consulatesLabel} aria-hidden>Consulates</span>
+      <div className={panel.consulateOptions}>
+        {CITIES.map(city => <label key={city} className={panel.consulateOption}>
+          <input type="checkbox" checked={draft.consulates.includes(city)} onChange={event => update('consulates', CITIES.filter(candidate => candidate === city ? event.target.checked : draft.consulates.includes(candidate)))} />
+          <span>{cityLabel(city)}</span>
+        </label>)}
+      </div>
+      {draft.consulates.length > 2 && <p className={panel.consulatesNote}>Each check reads every selected consulate. Consider a longer checking interval.</p>}
+    </fieldset>
     <Row label="Earliest Acceptable"><input aria-label="Earliest Acceptable" type="date" {...validationEvents('earliest')} value={draft.earliest} onChange={event => update('earliest', event.target.value)} /></Row>
     <Row label="Latest Acceptable"><input aria-label="Latest Acceptable" type="date" {...validationEvents('latest')} value={draft.latest} onChange={event => update('latest', event.target.value)} /></Row>
     <Toggle label={autoLabel} checked={draft.autoMode} change={value => update('autoMode', value)} />

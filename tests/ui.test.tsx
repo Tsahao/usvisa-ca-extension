@@ -84,7 +84,7 @@ describe('Figma interface behavior', () => {
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
-    await user.selectOptions(screen.getByLabelText('Consulate'), 'Calgary');
+    await user.click(screen.getByRole('checkbox', { name: 'Calgary' }));
     await user.type(screen.getByLabelText('Earliest Acceptable'), '2026-11-01');
     await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
     await user.click(screen.getByRole('button', { name: 'Save' }));

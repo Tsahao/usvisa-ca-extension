@@ -31,7 +31,7 @@ describe('redesigned sign-in panel', () => {
     expect(button.disabled).toBe(true); expect(screen.queryByRole('alert')).toBeNull();
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'owner-address' } });
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
-    await user.selectOptions(screen.getByLabelText('Consulate'), 'Vancouver');
+    await user.click(screen.getByRole('checkbox', { name: 'Vancouver' }));
     fireEvent.change(screen.getByLabelText('Earliest Acceptable'), { target: { value: '2026-12-01' } });
     expect(button.disabled).toBe(true); expect(screen.queryByRole('alert')).toBeNull();
     fireEvent.change(screen.getByLabelText('Latest Acceptable'), { target: { value: '2026-11-01' } });
