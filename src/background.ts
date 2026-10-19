@@ -1,5 +1,5 @@
 import { platform, type InjectionResult, type Tab } from './platform';
-import { classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
+import { isBareAppointmentQuery, classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
 import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
@@ -1837,7 +1837,7 @@ function queueEnginePoll(): void {
         };
         let implicitApplicantId: string | null = null;
         if (state.group.applicantIds?.length === 1 &&
-            sameApplicants(state.executor!.applicantIds, state.group.applicantIds) && !new URL(reader.url!).search) {
+            sameApplicants(state.executor!.applicantIds, state.group.applicantIds) && isBareAppointmentQuery(new URL(reader.url!))) {
           if (!state.group.dashboardPath) { await park(); return; }
           let baseline: InjectionResult[];
           try {

@@ -113,7 +113,8 @@ export function performAppointmentSubmission(request: SubmissionRequest): { ok: 
     ids.every(id => typeof id === 'string' && /^[0-9]{1,32}$/.test(id)) && new Set(ids).size === ids.length;
   let actualIds = current.searchParams.getAll('applicants[]');
   let implicitRoster = false;
-  if (!current.search && request.implicitApplicantId &&
+  const bareQuery = (!current.search || ([...current.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && current.searchParams.get('confirmed_limit_message') === '1'));
+  if (bareQuery && request.implicitApplicantId &&
       validIds(request.applicantIds) && request.applicantIds.length === 1 && request.applicantIds[0] === request.implicitApplicantId &&
       !document.querySelector('[name="applicants[]"]')) {
     actualIds = [request.implicitApplicantId];

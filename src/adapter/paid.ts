@@ -27,7 +27,10 @@ export function readPaidPage(scheduleId: string, implicitApplicantId: string | n
   // A single-applicant paid form may have neither query nor body IDs. The
   // worker supplies a sole applicant only after a fresh complete dashboard
   // roster check; never infer a single applicant from missing controls alone.
-  if (!url.search && url.pathname === `${base}/appointment` && typeof implicitApplicantId === 'string' && /^[0-9]{1,32}$/.test(implicitApplicantId) &&
+  // The acknowledged limit warning lands the sole applicant on this form with
+  // only its own GET parameters in the query; anything else stays explicit.
+  const bareQuery = (!url.search || ([...url.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && url.searchParams.get('confirmed_limit_message') === '1'));
+  if (bareQuery && url.pathname === `${base}/appointment` && typeof implicitApplicantId === 'string' && /^[0-9]{1,32}$/.test(implicitApplicantId) &&
       !document.querySelector('[name="applicants[]"]')) {
     const forms = document.querySelectorAll<HTMLFormElement>('#appointment-form');
     if (forms.length !== 1) return null;

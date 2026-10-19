@@ -17,3 +17,17 @@ export function classifyRoute(value: string): RouteKind {
   if (/^\/en-ca\/niv\/schedule\/[0-9]+\/continue_actions$/.test(url.pathname)) return 'actions';
   return 'unsupported';
 }
+
+// The acknowledged limit warning submits a GET form that lands a sole
+// applicant directly on the booking form with only its own parameters in the
+// query. Only that exact shape, or no query at all, may bind an implicit
+// applicant; applicants[] and anything else stay explicit.
+export function isBareAppointmentQuery(url: URL): boolean {
+  if (!url.search) return true;
+  for (const [key, value] of url.searchParams) {
+    if (key === 'confirmed_limit_message' && value === '1' && url.searchParams.getAll(key).length === 1) continue;
+    if (key === 'commit' && url.searchParams.getAll(key).length === 1) continue;
+    return false;
+  }
+  return url.searchParams.get('confirmed_limit_message') === '1';
+}
