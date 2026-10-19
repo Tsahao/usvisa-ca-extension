@@ -27,8 +27,9 @@ extension books Halifax.
 
 ## Non-goals
 
-- Alerts mode is unchanged. It already reads the seven-city summary for unpaid
-  groups.
+- Alerts mode gets no multi-consulate behaviour. It already reads the
+  seven-city summary for unpaid groups and notifies on one city. See
+  "Alerts mode" below for how it reads the new preference shape.
 - No preference ordering among consulates beyond the tie-break. The user asked
   for "earliest wins".
 - No change to the warning, applicants or dashboard stages. They are
@@ -91,10 +92,11 @@ extension books Halifax.
 `EngineState.lastCandidate` changes from `string | null` to
 `{ date: string; consulate: Consulate } | null`.
 
-- `validateEngineState` accepts the old string form and migrates it by
-  pairing it with the first selected consulate from preferences if available,
-  otherwise clearing it (the next poll recomputes). It rejects an object with
-  an invalid date or a consulate not in `CONSULATES`.
+- `validateEngineState` accepts the old string form and clears it to `null`
+  (the next poll recomputes; an extension update already parks running runs
+  because `chrome.storage.session` is cleared, so nothing in flight is
+  lost). It rejects an object with an invalid date or a consulate not in
+  `CONSULATES`.
 - `recordCandidate` takes the object.
 - A new pure function in `src/domain/dates.ts`:
   `earliestCandidateAcross(byConsulate: { consulate; dates }[], currentDate, prefs)`
@@ -113,13 +115,21 @@ Per-consulate outcomes feed one cycle outcome:
 
 - Any `denied` (401/403): stop the cycle immediately and re-authenticate,
   exactly as today. Later consulates are not fetched.
-- Any `retryable` transport failure: the cycle is retryable. Later consulates
-  are still fetched so observation data stays complete, but the cycle counts
-  one failure and schedules the retry, as a single failed poll does today.
-- Otherwise the cycle is `healthy` if at least one consulate returned dates,
-  else `empty`. `applyPollResult` is called once per cycle, so the
-  four-empties cooldown now means four cycles in which no selected consulate
-  had any date.
+- All selected consulates failed with a transport error: the cycle is
+  `retryable`, handled exactly as a single failed poll is today (no
+  observation, no candidate, one failure counted).
+- At least one consulate returned 200: the cycle proceeds on the consulates
+  that answered. Failed consulates are absent from `byConsulate` (the panel
+  shows the empty marker for them) and are not counted as a failure; the
+  next cycle reads them again. The cycle is `healthy` if any answering
+  consulate returned dates, else `empty`. `applyPollResult` is called once
+  per cycle, so the four-empties cooldown now means four cycles in which no
+  answering consulate had any date.
+
+Rationale: the motivating case is time-sensitive. A Toronto timeout must not
+delay booking a Halifax slot that was read successfully in the same cycle.
+This keeps one code path per outcome: a cycle either retries or proceeds,
+never both.
 
 The observation record (`engineObservationV1`) gains `byConsulate:
 { consulate, dates }[]` and keeps `dates` as the union, so the panel calendar
@@ -145,14 +155,35 @@ cannot book an unselected consulate.
 
 `skippedDates` (dates whose times came back empty) become
 `{ consulate, date }[]` so a Halifax date with no times does not hide the same
-date in Toronto. `validateEngineState` migrates old string entries by pairing
-them with the first selected consulate.
+date in Toronto. `validateEngineState` drops old string entries (they only
+ever shorten one sweep).
 
 ### Verification and history
 
 `verification.ts` compares the confirmed appointment against
 `intent.consulate`; no change beyond the candidate now carrying the consulate.
-`history.ts` already scopes per consulate.
+
+`history.ts` already stores one scope per consulate, but the rows it sends
+to the History screen carry no city, so with two or more consulates the
+rows would interleave unlabelled. Each stored history entry gains a plain
+`consulate` field (a `CONSULATES` key) and `HistoryRow` carries it; the
+History screen shows it as a short label on each row. Entries written before
+this change have no field and render without a label; no backfill. The
+"never carry consulate names" rule applies to diagnostics
+(`engineDiagnosticsV1`), not to history, which already holds appointment
+dates; the privacy policy text in `README.md` and `docs/privacy-policy.md`
+is updated to say history rows name the consulate.
+
+### Alerts mode
+
+Alerts keeps single-city semantics. Everywhere Alerts reads
+`prefs.consulate` today (the alerts loop's park check, the unpaid monitor
+scope key, `observeSummary`, `dateHistory.observe`, the Alerts panel header
+and its "Other consulate dates" list), it uses
+`selectedConsulates(prefs)[0]`, the first selected consulate in `CITIES`
+order. The shared preference form therefore serves both modes with one
+checkbox group; `preferenceIssues` requires at least one consulate for both.
+`monitor.ts`, `unpaidMonitorV1` and the alerts scope key shape are unchanged.
 
 ### Panel
 
@@ -185,11 +216,14 @@ cycle level. Diagnostics must never carry consulate names (existing rule).
 ## Decisions made by Claude, not the user
 
 - Tie-break by fixed `CITIES` order rather than click order.
-- Transport failure on one consulate counts the cycle as retryable rather than
-  ignoring that consulate.
+- A cycle proceeds on the consulates that answered; only an all-failed cycle
+  retries.
 - Empty-cooldown counting at cycle level.
 - Per-consulate `skippedDates`.
 - Panel layout for the per-consulate rows.
+- Alerts mode uses the first selected consulate rather than its own field.
+- History rows gain a consulate label, with the privacy text updated.
+- Old string candidates and skipped dates are cleared, not migrated.
 
 ## Acceptance
 
