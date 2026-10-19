@@ -67,7 +67,7 @@ for (const testMode of [true, false]) {
       const args = { owner: 'browser-owner-01', runId: 'browser-run-0001', now };
       const state: EngineState = { ...bindGroup(startRun(emptyEngineState(now), { ...args, mode: 'booking' }), { ...args,
         binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: '2027-01-01', dashboardPath, applicantIds: ['77777777', '88888888'] } }),
-        stage: 'form', lastCandidate: '2026-11-19', policyKey: policyKey(prefs), nextPollAt: now,
+        stage: 'form', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, policyKey: policyKey(prefs), nextPollAt: now,
         executor: { tabId, applicantIds: ['77777777', '88888888'], targetTime: '08:00', skippedDates: [], actionPending: false } };
       await panel.evaluate(async state => { await chrome.storage.local.set({ engineStateV1: state }); }, state);
       const read = () => panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);

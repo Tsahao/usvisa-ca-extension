@@ -16,7 +16,7 @@ function seeded(stage: BookingStage): EngineState {
   const bound = bindGroup(startRun(emptyEngineState(NOW), { mode: 'booking', owner: OWNER, runId: RUN, now: NOW }), {
     owner: OWNER, runId: RUN, binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: '2027-01-01', applicantIds: IDS }, now: NOW,
   });
-  return { ...setStage(recordCandidate(bound, '2026-11-19', NOW), stage, NOW),
+  return { ...setStage(recordCandidate(bound, { date: '2026-11-19', consulate: 'Vancouver' }, NOW), stage, NOW),
     executor: { tabId: 7, applicantIds: stage === 'form' ? IDS : null, targetTime: null, skippedDates: [], actionPending: false } };
 }
 function harness(kind: PaidPage['kind']) {
@@ -478,7 +478,7 @@ describe('paid executor', () => {
     const h = harness('form');
     const original = h.d.inject;
     h.d.inject = async (...args) => args[1].name === 'fetchTimesJson' ? { status: 200, body: { available_times: [] } } : original(...args);
-    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ stage: null, lastCandidate: null, status: 'running', executor: { skippedDates: ['2026-11-19'] } });
+    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ stage: null, lastCandidate: null, status: 'running', executor: { skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }] } });
     expect(h.mutations).toEqual([]);
   });
   it('refuses preferences changing between the read and mutation', async () => {

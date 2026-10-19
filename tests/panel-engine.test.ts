@@ -17,7 +17,7 @@ describe('worker-backed product data', () => {
     expect(JSON.stringify(result)).not.toContain(state.owner);
   });
   it('reports review without inventing booked success from a dry-run candidate', () => {
-    expect(panelSnapshot({ ...state, status: 'verifying', lastCandidate: '2026-11-19' }, null, null)).toMatchObject({ status: 'idle', reviewRequired: true, confirmedDate: null });
+    expect(panelSnapshot({ ...state, status: 'verifying', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' } }, null, null)).toMatchObject({ status: 'idle', reviewRequired: true, confirmedDate: null });
     expect(panelSnapshot({ ...state, status: 'stopped' }, null, { runId: 'old-run-0001', date: '2026-11-19' }).status).toBe('idle');
   });
   it('explains the Start action for unresolved booking attempts without nagging paused runs', () => {

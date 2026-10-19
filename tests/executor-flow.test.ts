@@ -84,7 +84,7 @@ describe('synthetic paid flow with serialized page adapters', () => {
         if (!bare) expect(fetch).not.toHaveBeenCalled();
         expect(document.querySelector<HTMLInputElement>('#appointments_consulate_appointment_date')!.value).toBe('');
         expect((document.querySelector('select') as HTMLSelectElement).value).toBe('94');
-        state = setStage(recordCandidate(state, '2026-11-19', NOW), 'form', NOW);
+        state = setStage(recordCandidate(state, { date: '2026-11-19', consulate: 'Vancouver' }, NOW), 'form', NOW);
       }
     }
     expect(cycles).toBeLessThan(12);

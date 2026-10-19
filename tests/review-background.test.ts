@@ -76,7 +76,7 @@ describe('cross-component review regressions', () => {
   it('keeps refreshing paid dates and notifying on changes with Auto Mode OFF, including across worker wakes', async () => {
     const available = paidMonitoring(false);
     await fire();
-    expect(state()).toMatchObject({ status: 'running', stage: null, lastCandidate: '2026-11-19', intent: null, verification: null });
+    expect(state()).toMatchObject({ status: 'running', stage: null, lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, intent: null, verification: null });
     expect(stored.engineObservationV1).toMatchObject({ mode: 'booking', dates: ['2026-11-19'] });
     expect(Date.parse(state().nextPollAt!) - Date.now()).toBeGreaterThanOrEqual(120_000);
     expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19' }));
@@ -122,7 +122,7 @@ describe('cross-component review regressions', () => {
   it('advances a paid candidate to booking only with Auto Mode ON', async () => {
     paidMonitoring(true);
     await fire();
-    expect(state()).toMatchObject({ status: 'running', stage: 'form', lastCandidate: '2026-11-19' });
+    expect(state()).toMatchObject({ status: 'running', stage: 'form', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' } });
     expect(mock.notifications.create).not.toHaveBeenCalled();
   });
 

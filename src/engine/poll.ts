@@ -1,4 +1,4 @@
-import { isIsoDate } from '../domain/dates';
+import { CONSULATES, isIsoDate, type ConsulateCandidate } from '../domain/dates';
 import {
   countFailure,
   PAID_EMPTY_COOLDOWN_AFTER,
@@ -93,8 +93,9 @@ export function applyPollResult(
 
 // Records the latest eligible candidate without acting on it. Advancement
 // decisions read this field alongside a reread guard; never navigate here.
-export function recordCandidate(state: EngineState, candidate: string | null, now: string): EngineState {
-  if (candidate !== null && !isIsoDate(candidate)) throw new Error('Invalid candidate date.');
+export function recordCandidate(state: EngineState, candidate: ConsulateCandidate | null, now: string): EngineState {
+  if (candidate !== null && !isIsoDate(candidate.date)) throw new Error('Invalid candidate date.');
+  if (candidate !== null && !Object.hasOwn(CONSULATES, candidate.consulate)) throw new Error('Invalid candidate consulate.');
   if (!Number.isFinite(Date.parse(now))) throw new Error('Invalid poll timestamp.');
   if (state.status !== 'running') return state;
   return { ...state, lastCandidate: candidate, updatedAt: now };

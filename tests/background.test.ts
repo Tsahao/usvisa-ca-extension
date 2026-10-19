@@ -105,7 +105,7 @@ describe('read-only probe boundaries', () => {
     const now = new Date().toISOString();
     const previous = startRun(emptyEngineState(now), { mode: 'booking', owner: 'owner-token-01', runId: 'run-id-0001', now });
     previous.stage = 'form';
-    previous.lastCandidate = '2026-11-19';
+    previous.lastCandidate = { date: '2026-11-19', consulate: 'Vancouver' };
     previous.executor = { tabId: 9, applicantIds: ['77777777'], targetTime: '08:00', skippedDates: [], actionPending: reason === 'interrupted-action' };
     stored.engineStateV1 = reconcileStartup(previous, now, reason === 'restart');
     if (reason === 'orphan') stored.engineStateV1 = { ...stored.engineStateV1 as object, status: 'verifying', owner: null, runId: null };
@@ -1132,7 +1132,7 @@ describe('read-only probe boundaries', () => {
     mockPaidPoll({ status: 200, body: [{ date: '2026-11-19' }] });
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() =>
-      expect((stored.engineStateV1 as { lastCandidate: string }).lastCandidate).toBe('2026-11-19'),
+      expect((stored.engineStateV1 as { lastCandidate: unknown }).lastCandidate).toEqual({ date: '2026-11-19', consulate: 'Vancouver' }),
     );
     expect((stored.engineStateV1 as { consecutiveFailures: number }).consecutiveFailures).toBe(0);
     expect((stored.engineStateV1 as { nextPollAt: string }).nextPollAt).not.toBeNull();
@@ -1523,7 +1523,7 @@ describe('read-only probe boundaries', () => {
     expect(chromeMock.scripting.executeScript.mock.calls.some((call: any[]) => call[0].func.name === 'fetchDaysJson')).toBe(false);
     chromeMock.tabs.query.mockResolvedValue([{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment?applicants[]=77777777' }]);
     await wake('form', 'form');
-    expect(stored.engineStateV1).toMatchObject({ lastCandidate: '2026-11-19', executor: { tabId: 7 } });
+    expect(stored.engineStateV1).toMatchObject({ lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, executor: { tabId: 7 } });
     const injected = chromeMock.scripting.executeScript.mock.calls.map((call: { 0: { func?: { name?: string } } }) => call[0].func?.name ?? '');
     expect(injected.some((name: string) => name.includes('fetchDays'))).toBe(true);
     expect(injected.some((name: string) => name.includes('performPaidAction'))).toBe(true);
@@ -1857,14 +1857,14 @@ describe('read-only probe boundaries', () => {
         owner: 'owner-token-01', runId: 'run-id-0001', now,
         binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null, applicantIds: ['77777777'] },
       }),
-      executor: { tabId: 9, applicantIds: ['77777777'], targetTime: null, skippedDates: ['2026-11-19'], actionPending: false },
+      executor: { tabId: 9, applicantIds: ['77777777'], targetTime: null, skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }], actionPending: false },
     };
     stored.uiPreferencesV1 = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: false, autoMode: true };
     const url = 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment?applicants[]=77777777';
     chromeMock.tabs.query.mockResolvedValue([{ id: 8, url }, { id: 9, url }]);
     mockPaidPoll({ status: 200, body: [{ date: '2026-11-19' }, { date: '2026-11-20' }] });
     alarmed({ name: 'enginePoll' });
-    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ lastCandidate: '2026-11-20', stage: 'form' }));
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ lastCandidate: { date: '2026-11-20', consulate: 'Vancouver' }, stage: 'form' }));
     expect(chromeMock.scripting.executeScript.mock.calls[0][0].target).toEqual({ tabId: 9 });
     const state = stored.engineStateV1 as { stage: string | null; nextPollAt: string; lastCandidate: string | null };
     state.stage = null;

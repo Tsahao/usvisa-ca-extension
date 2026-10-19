@@ -1983,11 +1983,11 @@ function queueEnginePoll(): void {
         void dateHistory.observe(state, consulate, [...dates].sort()[0] ?? null, stamped);
         const candidate =
           dates.length === 0 ? null : earliestCandidate(
-            dates.filter(date => !state.executor?.skippedDates.includes(date)), state.group.currentDate, windowPrefs);
+            dates.filter(date => !state.executor?.skippedDates.some(entry => entry.date === date)), state.group.currentDate, windowPrefs);
         // Empty times exclude that date for this sweep; once every eligible
         // date is exhausted, the next paced poll starts a fresh sweep.
         if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [] };
-        const recorded = recordCandidate(applied, candidate, stamped);
+        const recorded = recordCandidate(applied, candidate === null ? null : { date: candidate, consulate }, stamped); // TODO(task 6): per-consulate candidates
         if (readAutoMode(prefs) === false) {
           // Auto Mode OFF is a monitor, not a dry run: no candidate field
           // changes, time requests, submit, confirmation, or booking intent.

@@ -112,7 +112,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       (state.policyKey !== null && state.policyKey !== prefs?.policyKey)) return park('config-changed');
   const windowPrefs = prefs && { earliest: prefs.earliest, latest: prefs.latest, exclusions: [], onlyEarlier: prefs.onlyEarlier };
   if (!prefs || !windowPrefs) return park('config-changed');
-  if (state.lastCandidate !== null && !canBook(state.lastCandidate, state.group.currentDate, windowPrefs)) return park('candidate-invalid');
+  if (state.lastCandidate !== null && !canBook(state.lastCandidate.date, state.group.currentDate, windowPrefs)) return park('candidate-invalid');
   // Monitoring never fills a candidate or creates a booking intent. This also
   // protects a persisted candidate stage after an upgrade or a direct call;
   // the worker owns notifications and continues its normal paced polls.
@@ -327,7 +327,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     case 'confirm': {
       const intent = state.intent!;
       const time = state.executor!.targetTime;
-      if (!time || intent.targetDate !== state.lastCandidate || intent.testMode !== !prefs.autoMode || intent.consulate !== prefs.consulate ||
+      if (!time || intent.targetDate !== state.lastCandidate?.date || intent.testMode !== !prefs.autoMode || intent.consulate !== prefs.consulate ||
           page.kind !== 'form' || page.slotWarning === true || page.calendarReady !== true ||
           page.date !== intent.targetDate || page.time !== time) return verify();
       if (!prefs.autoMode) return verify();
@@ -393,7 +393,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
           nextPollAt: deps.nowIso(), stage: null, executor: { ...state.executor!, targetTime: null } };
       }
       const facilityId = CONSULATES[prefs.consulate];
-      const date = state.lastCandidate!;
+      const date = state.lastCandidate!.date;
       const fields = { ...request, applicantIds: ids, facilityId, date };
       if (page.facilityId !== facilityId) {
         state = { ...state, executor: { ...state.executor!, targetTime: null } };
@@ -418,7 +418,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
           // Candidate disappeared; discard it and return to days polling.
           return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
             stage: null, lastCandidate: null,
-            executor: { ...state.executor!, targetTime: null, skippedDates: [...new Set([...state.executor!.skippedDates, date])] } };
+            executor: { ...state.executor!, targetTime: null, // TODO(task 5): use the candidate's own consulate, not the prefs stand-in.
+            skippedDates: [...state.executor!.skippedDates.filter(entry => !(entry.consulate === prefs.consulate && entry.date === date)),
+              { consulate: prefs.consulate, date }] } };
         }
         time = [...times].sort()[0];
         state = { ...state, executor: { ...state.executor!, targetTime: time } };
