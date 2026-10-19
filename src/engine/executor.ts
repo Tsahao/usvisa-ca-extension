@@ -3,7 +3,7 @@ import { guardBooking } from '../domain/booking';
 import { readAutoMode } from '../domain/auto-mode';
 import { sameApplicants, validateApplicantIds } from '../domain/applicants';
 import { parseTimesPayload } from '../domain/availability';
-import { classifyRoute } from '../domain/routes';
+import { isBareAppointmentQuery, classifyRoute } from '../domain/routes';
 import { isSameGroupUrl } from '../domain/trust';
 import { normalizeReadingIvr } from '../domain/groups';
 import { mapHttpStatus, SESSION_AGE_MINUTES } from '../domain/timing';
@@ -257,7 +257,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     page = await inject(readPaidPage, state.group!.pendingInspection ? [scheduleId, null, true] : [scheduleId]) as PaidPage;
     if (!page && state.group!.applicantIds?.length === 1 &&
         sameApplicants(state.executor!.applicantIds, state.group!.applicantIds) && classifyRoute(owned.url!) === 'appointment' &&
-        !new URL(owned.url!).search) {
+        isBareAppointmentQuery(new URL(owned.url!))) {
       // Revalidate the independent complete roster before relying on a form
       // with no applicant IDs. Warning/selection pages keep their own guards.
       if (!state.group!.dashboardPath) return park();

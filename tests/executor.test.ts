@@ -240,6 +240,38 @@ describe('paid executor', () => {
       expect(await runBookingStage(h.d, state)).toMatchObject({ status: 'verifying', intent: null, nextPollAt: null });
       expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
     });
+  it('binds the sole applicant on the form reached through the acknowledged warning query', async () => {
+    // One-applicant groups skip the applicant picker: acknowledging the limit
+    // warning lands directly on the booking form with only the warning's own
+    // GET parameters, never applicants[].
+    const h = harness('form'); const state = seeded('applicants');
+    state.lastCandidate = null;
+    state.group = { ...state.group!, applicantIds: [IDS[0]], dashboardPath: '/en-ca/niv/groups/99999999' };
+    state.executor = { ...state.executor!, applicantIds: [IDS[0]] };
+    h.d.getTab = async () => ({ id: 7, url: `${BASE}/appointment?confirmed_limit_message=1&commit=Continue` });
+    h.d.inject = vi.fn(async (_id, func, args) => {
+      if (func.name === 'readPaidPage') return args?.length === 2 && args[1] === IDS[0] ? { ...structuredClone(h.page), applicantIds: [IDS[0]], applicants: [] } : null;
+      if (func.name === 'readCurrentAppointment') return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027', applicantIds: [IDS[0]] };
+      throw new Error('Unexpected injection');
+    });
+    const next = await runBookingStage(h.d, state);
+    expect(next).toMatchObject({ status: 'running', stage: 'form', consecutiveFailures: 0, authentication: null });
+    expect(next.executor!.applicantIds).toEqual([IDS[0]]);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readPaidPage', 'readCurrentAppointment', 'readPaidPage']);
+    expect(h.mutations).toEqual([]);
+  });
+  it.each(['?confirmed_limit_message=0&commit=Continue', '?confirmed_limit_message=1&other=1'])('never infers the sole applicant on an appointment URL with any other query (%s)', async query => {
+    const h = harness('form'); const state = seeded('applicants');
+    state.lastCandidate = null;
+    state.group = { ...state.group!, applicantIds: [IDS[0]], dashboardPath: '/en-ca/niv/groups/99999999' };
+    state.executor = { ...state.executor!, applicantIds: [IDS[0]] };
+    h.d.getTab = async () => ({ id: 7, url: `${BASE}/appointment${query}` });
+    h.d.inject = vi.fn(async () => null);
+    const next = await runBookingStage(h.d, state);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readPaidPage']);
+    expect(next.consecutiveFailures).toBe(1);
+    expect(h.mutations).toEqual([]);
+  });
   it('reselects an equal date whose portal calendar state has not been loaded', async () => {
     const h = harness('form');
     h.page.calendarReady = false;
