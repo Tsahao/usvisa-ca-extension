@@ -37,7 +37,8 @@ export async function fetchTimesJson(schedulePath: string, center: number, date:
   const trusted = () => {
     const url = new URL(location.href);
     let ids = url.searchParams.getAll('applicants[]');
-    const bareQuery = (!url.search || ([...url.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && url.searchParams.get('confirmed_limit_message') === '1'));
+    const bareQuery = (!url.search || ([...url.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && url.searchParams.get('confirmed_limit_message') === '1' &&
+      url.searchParams.getAll('confirmed_limit_message').length === 1 && url.searchParams.getAll('commit').length <= 1));
     if (bareQuery && typeof implicitApplicantId === 'string' && /^[0-9]{1,32}$/.test(implicitApplicantId) &&
         Array.isArray(applicantIds) && applicantIds.length === 1 && applicantIds[0] === implicitApplicantId &&
         !document.querySelector('[name="applicants[]"]')) {

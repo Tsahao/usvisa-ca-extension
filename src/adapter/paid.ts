@@ -29,7 +29,8 @@ export function readPaidPage(scheduleId: string, implicitApplicantId: string | n
   // roster check; never infer a single applicant from missing controls alone.
   // The acknowledged limit warning lands the sole applicant on this form with
   // only its own GET parameters in the query; anything else stays explicit.
-  const bareQuery = (!url.search || ([...url.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && url.searchParams.get('confirmed_limit_message') === '1'));
+  const bareQuery = (!url.search || ([...url.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && url.searchParams.get('confirmed_limit_message') === '1' &&
+    url.searchParams.getAll('confirmed_limit_message').length === 1 && url.searchParams.getAll('commit').length <= 1));
   if (bareQuery && url.pathname === `${base}/appointment` && typeof implicitApplicantId === 'string' && /^[0-9]{1,32}$/.test(implicitApplicantId) &&
       !document.querySelector('[name="applicants[]"]')) {
     const forms = document.querySelectorAll<HTMLFormElement>('#appointment-form');
