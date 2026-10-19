@@ -78,6 +78,14 @@ describe('bounded date-change history', () => {
     expect(markHistoryBooking(booked, attempt(), 'Attempted', NOW)).toEqual(booked);
   });
 
+  it('preserves the consulate when marking a row booked', () => {
+    const original = observeHistory(emptyHistory(), reading('2026-11-19', -1000), NOW);
+    expect(original.entries[0].consulate).toBe('Halifax');
+    const booked = markHistoryBooking(markHistoryBooking(original, attempt(), 'Attempted', NOW), attempt(), 'Yes', NOW);
+    expect(booked.entries[0]).toMatchObject({ booked: 'Yes', consulate: 'Halifax', earliestDate: '2026-11-19' });
+    expect(historyRows(booked, NOW)[0]).toMatchObject({ booked: 'Yes', consulate: 'Halifax' });
+  });
+
   it('can promote a second real attempt on an unchanged date after the first failed', () => {
     const original = observeHistory(emptyHistory(), reading('2026-11-19', -2000), NOW);
     let state = markHistoryBooking(original, attempt(stamp(-1000)), 'Attempted', NOW);

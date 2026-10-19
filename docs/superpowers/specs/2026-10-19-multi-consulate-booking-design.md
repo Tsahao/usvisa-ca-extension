@@ -20,7 +20,9 @@ extension books Halifax.
   the same date go to the consulate listed first in the selection order.
 - The booking executor fills the form with the candidate's consulate, not a
   preference, and every downstream guard (form read, times fetch, submission
-  guard, confirmation intent, verification) agrees on that consulate.
+  guard, confirmation intent) agrees on that consulate. Verification compares
+  dates only, so these pre-submit guards are what prevent a wrong-consulate
+  booking.
 - Existing installs keep working with no re-entry: the saved single consulate
   becomes a one-element selection.
 - The panel shows what was found per consulate and which one is being booked.
@@ -55,9 +57,10 @@ extension books Halifax.
   when preferences change mid-run. The consulate selection is part of it.
 - `EngineState.lastCandidate` is persisted and validated by
   `validateEngineState` (`src/engine/workflow.ts`). Old saves must still load.
-- `ConfirmationIntent.consulate` already exists and is checked during
-  verification (`src/engine/verification.ts`) and history
-  (`src/engine/history.ts`).
+- `ConfirmationIntent.consulate` already exists and is consumed by history
+  (`src/engine/history.ts`); verification compares dates only (`verifyBooking`
+  in `src/domain/booking.ts`), so the pre-submit guards are what prevent a
+  wrong-consulate booking.
 - `PAID_EMPTY_COOLDOWN_AFTER = 4` empty results trigger a 30-minute cooldown
   (`src/domain/timing.ts`, `applyPollResult` in `src/engine/poll.ts`).
 
@@ -160,8 +163,13 @@ ever shorten one sweep).
 
 ### Verification and history
 
-`verification.ts` compares the confirmed appointment against
-`intent.consulate`; no change beyond the candidate now carrying the consulate.
+Verification (`verifyBooking` in `src/domain/booking.ts`, driven by
+`src/engine/verification.ts`) compares appointment dates only; it does not
+read `intent.consulate` and is unchanged. A wrong-consulate booking is
+prevented before submission: the form stage refuses a candidate whose
+consulate is unselected, and the final submission guard checks the form's
+facility against the candidate's consulate. `intent.consulate` is consumed by
+history.
 
 `history.ts` already stores one scope per consulate, but the rows it sends
 to the History screen carry no city, so with two or more consulates the
