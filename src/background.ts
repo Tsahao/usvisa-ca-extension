@@ -1,7 +1,7 @@
 import { platform, type InjectionResult, type Tab } from './platform';
 import { isBareAppointmentQuery, classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
-import { CONSULATES, earliestCandidate, selectedConsulates, validatePreferences } from './domain/dates';
+import { CONSULATES, earliestCandidateAcross, selectedConsulates, validatePreferences, type Consulate } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
 import { acceptNotification, monitorForScope, observeMonitorDate, observeSummary, resetBaseline, validateMonitorState } from './domain/monitor';
@@ -1793,12 +1793,12 @@ function queueEnginePoll(): void {
         };
         if (state.mode !== 'booking') return;
         const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
-        // TODO(task 6): poll every selected consulate, not just the first.
-        const consulate = selectedConsulates(prefs)?.[0];
+        // Every selected consulate is polled once per cycle, in selection order.
+        const consulates = selectedConsulates(prefs);
         const earliest = prefs?.earliest;
         const latest = prefs?.latest;
         const onlyEarlier = prefs?.onlyEarlier === true;
-        if (typeof consulate !== 'string' || !(consulate in CONSULATES)) {
+        if (consulates === null || consulates.length === 0) {
           await park();
           return;
         }
@@ -1919,41 +1919,55 @@ function queueEnginePoll(): void {
           return;
         }
         const schedulePath = `/en-ca/niv/schedule/${scheduleId}/appointment`;
-        let status = 0;
-        let body: unknown = null;
-        try {
-          const results = await platform.scripting.executeScript({
-            target: { tabId: reader.id },
-            func: fetchDaysJson,
-            args: [schedulePath, CONSULATES[consulate as keyof typeof CONSULATES]],
-          });
-          const result = results[0]?.result as { status?: unknown; body?: unknown } | undefined;
-          if (result && typeof result.status === 'number') {
-            status = result.status;
-            body = result.body;
+        // One days.json fetch per selected consulate, in order, on the same
+        // reader tab. The first denied reply re-authenticates immediately and
+        // leaves the remaining consulates unfetched for this cycle.
+        const replies: { consulate: Consulate; status: number; body: unknown }[] = [];
+        let denied = false;
+        for (const consulate of consulates) {
+          let status = 0;
+          let body: unknown = null;
+          try {
+            const results = await platform.scripting.executeScript({
+              target: { tabId: reader.id },
+              func: fetchDaysJson,
+              args: [schedulePath, CONSULATES[consulate]],
+            });
+            const result = results[0]?.result as { status?: unknown; body?: unknown } | undefined;
+            if (result && typeof result.status === 'number') {
+              status = result.status;
+              body = result.body;
+            }
+          } catch {
+            status = 0;
+            body = null;
           }
-        } catch {
-          status = 0;
-          body = null;
+          replies.push({ consulate, status, body });
+          if (mapHttpStatus(status) === 'denied') { denied = true; break; }
         }
-        const outcome = mapHttpStatus(status);
         if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
-        if (outcome === 'denied') {
+        if (denied) {
           noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
           const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
-        if (outcome === 'retryable') {
+        // Transport failures drop out; the cycle proceeds on the consulates
+        // that answered, and counts one retry only when none answered.
+        const answered = replies.filter(reply => mapHttpStatus(reply.status) !== 'retryable');
+        if (answered.length === 0) {
           const next = pollRetry(state, 'transport');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
-        let dates: string[];
+        const byConsulate: { consulate: Consulate; dates: string[] }[] = [];
         try {
-          dates = outcome === 'not-modified' ? [] : parseDaysPayload(body).map(entry => entry.date);
+          for (const reply of answered) {
+            const dates = mapHttpStatus(reply.status) === 'not-modified' ? [] : parseDaysPayload(reply.body).map(entry => entry.date);
+            byConsulate.push({ consulate: reply.consulate, dates });
+          }
         } catch {
           const next = pollRetry(state, 'reply-malformed');
           await saveEngineState(area, next);
@@ -1961,13 +1975,14 @@ function queueEnginePoll(): void {
           return;
         }
         const stamped = new Date().toISOString();
-        if (outcome === 'not-modified') {
+        if (answered.every(reply => mapHttpStatus(reply.status) === 'not-modified')) {
           notePollRecovered(state, 'not-modified');
-          const next = applyPollResult(state, { outcome, now: stamped, random: Math.random });
+          const next = applyPollResult(state, { outcome: 'not-modified', now: stamped, random: Math.random });
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
+        const dates = [...new Set(byConsulate.flatMap(entry => entry.dates))].sort();
         if (dates.length > 0) notePollRecovered(state, 'healthy');
         const applied = applyPollResult(state, {
           outcome: dates.length === 0 ? 'empty' : 'healthy',
@@ -1978,16 +1993,19 @@ function queueEnginePoll(): void {
           { mode: 'booking', outcome: 'empty', detail: 'empty-result', failures: applied.consecutiveFailures });
         // Counts-only poll footprint for supervised debugging: how many days
         // the portal returned, never which dates.
-        await area.set({ lastPollV1: { status, dayCount: dates.length, at: stamped } });
-        await area.set({ engineObservationV1: { runId: state.runId, mode: state.mode, checkedAt: stamped, dates, rows: [] } });
-        void dateHistory.observe(state, consulate, [...dates].sort()[0] ?? null, stamped);
-        const candidate =
-          dates.length === 0 ? null : earliestCandidate(
-            dates.filter(date => !state.executor?.skippedDates.some(entry => entry.date === date)), state.group.currentDate, windowPrefs);
+        await area.set({ lastPollV1: { status: 200, dayCount: dates.length, at: stamped } });
+        await area.set({ engineObservationV1: { runId: state.runId, mode: state.mode, checkedAt: stamped, dates, rows: [], byConsulate } });
+        for (const entry of byConsulate) void dateHistory.observe(state, entry.consulate, [...entry.dates].sort()[0] ?? null, stamped);
+        const skipped = state.executor?.skippedDates ?? [];
+        const candidate = dates.length === 0 ? null : earliestCandidateAcross(
+          byConsulate.map(entry => ({
+            consulate: entry.consulate,
+            dates: entry.dates.filter(date => !skipped.some(skip => skip.consulate === entry.consulate && skip.date === date)),
+          })), state.group.currentDate, windowPrefs);
         // Empty times exclude that date for this sweep; once every eligible
         // date is exhausted, the next paced poll starts a fresh sweep.
         if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [] };
-        const recorded = recordCandidate(applied, candidate === null ? null : { date: candidate, consulate }, stamped); // TODO(task 6): per-consulate candidates
+        const recorded = recordCandidate(applied, candidate, stamped);
         if (readAutoMode(prefs) === false) {
           // Auto Mode OFF is a monitor, not a dry run: no candidate field
           // changes, time requests, submit, confirmation, or booking intent.
@@ -2000,14 +2018,16 @@ function queueEnginePoll(): void {
           const scopeKey = `booking:${scheduleId}:${state.group.ivr}:${state.group.currentDate}:${policyKey(prefs)}`;
           const saved = (await area.get(['paidMonitorV1'])).paidMonitorV1;
           const monitor = monitorForScope(saved, scopeKey, true);
-          const { state: advanced, alertDue } = observeMonitorDate(monitor, candidate, {
+          const { state: advanced, alertDue } = observeMonitorDate(monitor, candidate?.date ?? null, {
             scopeKey, prefs: windowPrefs, rangeOnly: true, now: stamped,
           });
           await area.set({ paidMonitorV1: { scopeKey, monitor: advanced } });
           if (alertDue && !cancelledRuns.has(`${state.owner}:${state.runId}`)) {
             try {
               await platform.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png',
-                title: 'US Visa Scheduler for Canada', message: `New date available: ${alertDue}` });
+                title: 'US Visa Scheduler for Canada', message: candidate && candidate.date === alertDue
+                  ? `New date available: ${candidate.date} (${candidate.consulate})`
+                  : `New date available: ${alertDue}` });
               await area.set({ paidMonitorV1: { scopeKey, monitor: acceptNotification(advanced, alertDue) } });
             } catch { /* Keep delivery pending for the next healthy poll. */ }
           }

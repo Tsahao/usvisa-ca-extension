@@ -79,7 +79,7 @@ describe('cross-component review regressions', () => {
     expect(state()).toMatchObject({ status: 'running', stage: null, lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, intent: null, verification: null });
     expect(stored.engineObservationV1).toMatchObject({ mode: 'booking', dates: ['2026-11-19'] });
     expect(Date.parse(state().nextPollAt!) - Date.now()).toBeGreaterThanOrEqual(120_000);
-    expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19' }));
+    expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19 (Vancouver)' }));
     const nextPoll = async () => { vi.setSystemTime(new Date(state().nextPollAt!)); await fire(); };
     await nextPoll();
     expect(mock.notifications.create).toHaveBeenCalledTimes(1);

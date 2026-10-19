@@ -1735,6 +1735,135 @@ describe('read-only probe boundaries', () => {
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
 
+  describe('booking poll cycle across consulates', () => {
+    type DaysReply = { status: number; body?: unknown } | Error;
+    async function runCycle(replies: Record<number, DaysReply>, prefs: Record<string, unknown> = {}) {
+      const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
+      const now = new Date().toISOString();
+      stored.engineStateV1 = bindGroup(startRun(emptyEngineState(now), { mode: 'booking', owner: 'owner-token-01', runId: 'run-id-0001', now }), {
+        owner: 'owner-token-01', runId: 'run-id-0001', now,
+        binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null },
+      });
+      preparePaidPoll();
+      stored.uiPreferencesV1 = { consulates: ['Halifax', 'Toronto'], earliest: '2026-11-01', latest: '2026-12-31',
+        onlyEarlier: false, testMode: true, ...prefs };
+      chromeMock.tabs.query.mockResolvedValue([{ id: 9, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment' }]);
+      chromeMock.scripting.executeScript.mockImplementation(async (input: { func: { name: string }; args?: unknown[] }) => {
+        const name = input.func?.name ?? '';
+        if (name === 'readPaidPage') return [{ result: { scheduleId: '11111111', kind: 'form', applicantIds: ['77777777'] } }];
+        if (name === 'fetchDaysJson') {
+          const reply = replies[input.args![1] as number];
+          if (reply instanceof Error) throw reply;
+          if (!reply) throw new Error(`unexpected facility: ${String(input.args![1])}`);
+          return [{ result: reply }];
+        }
+        if (name === 'readSiteMaintenance') return [{ result: { maintenance: false } }];
+        throw new Error(`unexpected injection: ${name}`);
+      });
+      const before = JSON.stringify(stored.engineStateV1);
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(JSON.stringify(stored.engineStateV1)).not.toBe(before));
+      const daysCalls = chromeMock.scripting.executeScript.mock.calls
+        .filter((call: { [index: number]: { func: { name: string } } }) => call[0].func.name === 'fetchDaysJson') as { 0: { args: unknown[]; target: { tabId: number } } }[];
+      return { daysCalls, engine: stored.engineStateV1 as Record<string, any> };
+    }
+
+    it('polls every selected consulate and books the earliest across them', async () => {
+      const { daysCalls, engine } = await runCycle({
+        90: { status: 200, body: [{ date: '2026-11-20' }] },
+        94: { status: 200, body: [{ date: '2026-12-03' }] },
+      });
+      expect(daysCalls.map(call => call[0].args[1])).toEqual([90, 94]);
+      expect(daysCalls.every(call => call[0].target.tabId === 9)).toBe(true);
+      expect(stored.engineObservationV1).toMatchObject({ runId: 'run-id-0001', mode: 'booking', rows: [],
+        dates: ['2026-11-20', '2026-12-03'],
+        byConsulate: [{ consulate: 'Halifax', dates: ['2026-11-20'] }, { consulate: 'Toronto', dates: ['2026-12-03'] }] });
+      expect(stored.lastPollV1).toMatchObject({ status: 200, dayCount: 2 });
+      expect(engine).toMatchObject({ consecutiveFailures: 0, lastCandidate: { date: '2026-11-20', consulate: 'Halifax' } });
+      await vi.waitFor(() => expect(chromeMock.notifications.create).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'New date available: 2026-11-20 (Halifax)' })));
+      const log = JSON.stringify(stored.engineDiagnosticsV1 ?? {});
+      expect(log).not.toContain('Halifax');
+      expect(log).not.toContain('Toronto');
+      expect(log).not.toContain('2026-11-20');
+    });
+
+    it('skips a consulate\'s skipped date without hiding the same date elsewhere', async () => {
+      const replies = {
+        90: { status: 200, body: [{ date: '2026-11-20' }] },
+        94: { status: 200, body: [{ date: '2026-11-20' }, { date: '2026-12-03' }] },
+      };
+      // Seed a skipped Halifax date through a first cycle's state.
+      await runCycle(replies);
+      const seeded = stored.engineStateV1 as Record<string, any>;
+      seeded.executor.skippedDates = [{ consulate: 'Halifax', date: '2026-11-20' }];
+      seeded.nextPollAt = new Date(Date.now() - 1000).toISOString();
+      seeded.lastCandidate = null;
+      const before = JSON.stringify(seeded);
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(JSON.stringify(stored.engineStateV1)).not.toBe(before));
+      expect((stored.engineStateV1 as Record<string, any>).lastCandidate).toEqual({ date: '2026-11-20', consulate: 'Toronto' });
+    });
+
+    it('proceeds on answering consulates when one times out', async () => {
+      const { engine } = await runCycle({
+        90: { status: 0 },
+        94: { status: 200, body: [{ date: '2026-12-03' }] },
+      });
+      expect(engine).toMatchObject({ consecutiveFailures: 0, lastCandidate: { date: '2026-12-03', consulate: 'Toronto' } });
+      expect((stored.engineObservationV1 as { byConsulate: unknown }).byConsulate).toEqual([{ consulate: 'Toronto', dates: ['2026-12-03'] }]);
+      expect(stored.lastPollV1).toMatchObject({ status: 200, dayCount: 1 });
+    });
+
+    it('counts one failure when every consulate fails', async () => {
+      const { daysCalls, engine } = await runCycle({ 90: { status: 0 }, 94: new Error('synthetic transport failure') });
+      expect(daysCalls).toHaveLength(2);
+      expect(engine.consecutiveFailures).toBe(1);
+      expect(engine.lastCandidate).toBeNull();
+      expect(stored.engineObservationV1).toBeUndefined();
+      expect(stored.lastPollV1).toBeUndefined();
+    });
+
+    it('stops at the first denied consulate and re-authenticates', async () => {
+      const { daysCalls, engine } = await runCycle({ 90: { status: 401 }, 94: { status: 200, body: [{ date: '2026-12-03' }] } });
+      expect(daysCalls).toHaveLength(1);
+      expect(engine.authentication).toMatchObject({ purpose: 'renew' });
+      expect(stored.engineObservationV1).toBeUndefined();
+    });
+
+    it('re-authenticates on a later denied consulate without recording the earlier answer', async () => {
+      const { daysCalls, engine } = await runCycle({ 90: { status: 200, body: [{ date: '2026-11-20' }] }, 94: { status: 403 } });
+      expect(daysCalls).toHaveLength(2);
+      expect(engine).toMatchObject({ lastCandidate: null, authentication: { purpose: 'renew' } });
+      expect(stored.engineObservationV1).toBeUndefined();
+    });
+
+    it('treats a cycle as empty only when no consulate has dates', async () => {
+      const { engine } = await runCycle({ 90: { status: 200, body: [] }, 94: { status: 200, body: [] } });
+      expect(engine.consecutiveFailures).toBe(1); // poll-empty counts toward PAID_EMPTY_COOLDOWN_AFTER
+      expect(engine.lastCandidate).toBeNull();
+      expect(stored.engineObservationV1).toMatchObject({ dates: [], byConsulate: [{ consulate: 'Halifax', dates: [] }, { consulate: 'Toronto', dates: [] }] });
+    });
+
+    it('is healthy, not empty, when dates exist but none is eligible', async () => {
+      const { engine } = await runCycle({ 90: { status: 200, body: [{ date: '2027-02-01' }] }, 94: { status: 200, body: [] } });
+      expect(engine).toMatchObject({ consecutiveFailures: 0, lastCandidate: null });
+    });
+
+    it('treats a not-modified consulate as answering with no dates', async () => {
+      const { engine } = await runCycle({ 90: { status: 304 }, 94: { status: 200, body: [{ date: '2026-12-03' }] } });
+      expect(engine).toMatchObject({ consecutiveFailures: 0, lastCandidate: { date: '2026-12-03', consulate: 'Toronto' } });
+      expect((stored.engineObservationV1 as { byConsulate: unknown }).byConsulate).toEqual([
+        { consulate: 'Halifax', dates: [] }, { consulate: 'Toronto', dates: ['2026-12-03'] }]);
+    });
+
+    it('retries the whole cycle once on a malformed days body', async () => {
+      const { engine } = await runCycle({ 90: { status: 200, body: { nope: true } }, 94: { status: 200, body: [{ date: '2026-12-03' }] } });
+      expect(engine).toMatchObject({ consecutiveFailures: 1, lastCandidate: null });
+      expect(stored.engineObservationV1).toBeUndefined();
+    });
+  });
+
   it('persists bounded fixed-code diagnostics for a recovered poll failure without private values', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
