@@ -1,7 +1,7 @@
 import { platform, type InjectionResult, type Tab } from './platform';
 import { isBareAppointmentQuery, classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
-import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
+import { CONSULATES, earliestCandidate, selectedConsulates, validatePreferences } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
 import { acceptNotification, monitorForScope, observeMonitorDate, observeSummary, resetBaseline, validateMonitorState } from './domain/monitor';
@@ -559,7 +559,8 @@ async function prepareAlertScope(area: import('./engine/storage').StorageArea, s
   const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
   if (!prefs || preferencesError(prefs) || policyKey(prefs as unknown as Record<string, unknown>) !== state.policyKey)
     throw new Error('Configuration changed.');
-  const scopeKey = `alerts:${state.group.scheduleId}:${prefs.consulate}:any:${prefs.earliest}:${prefs.latest}`;
+  // TODO(task 8): scope the alerts monitor per selected consulate.
+  const scopeKey = `alerts:${state.group.scheduleId}:${selectedConsulates(prefs)?.[0]}:any:${prefs.earliest}:${prefs.latest}`;
   const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1;
   const monitor = monitorForScope(saved, scopeKey, true);
   await area.set({ unpaidMonitorV1: { scopeKey, monitor } });
@@ -1638,7 +1639,8 @@ function queueEnginePoll(): void {
             await syncEngineAlarm(engineAlarmAt(next));
           };
           const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
-          const consulate = prefs?.consulate;
+          // TODO(task 8): monitor every selected consulate, not just the first.
+          const consulate = selectedConsulates(prefs)?.[0];
           if (typeof consulate !== 'string' || !(consulate in CONSULATES)) {
             await park();
             return;
@@ -1791,7 +1793,8 @@ function queueEnginePoll(): void {
         };
         if (state.mode !== 'booking') return;
         const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
-        const consulate = prefs?.consulate;
+        // TODO(task 6): poll every selected consulate, not just the first.
+        const consulate = selectedConsulates(prefs)?.[0];
         const earliest = prefs?.earliest;
         const latest = prefs?.latest;
         const onlyEarlier = prefs?.onlyEarlier === true;

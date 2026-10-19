@@ -1,6 +1,7 @@
 import { platform } from '../platform';
 import { EMPTY_PREFERENCES, EMPTY_RUN, type Mode, type Preferences, type Run } from './model';
 import { readAutoMode } from '../domain/auto-mode';
+import { selectedConsulates } from '../domain/dates';
 
 const KEY = 'uiPreferencesV1';
 const TERMS_KEY = 'uiTermsVersion';
@@ -14,7 +15,12 @@ export async function loadUiState(includeSimulatedRun = true): Promise<{ prefere
   if (!isExtension) return { preferences: structuredClone(EMPTY_PREFERENCES), terms: '', run: { ...EMPTY_RUN }, lastMode: null };
   await platform.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
   const [local, session] = await Promise.all([platform.storage.local.get([KEY, TERMS_KEY, LAST_MODE_KEY]), platform.storage.session.get(RUN_KEY)]);
-  const raw = local[KEY];
+  let raw = local[KEY];
+  if (raw && typeof raw === 'object' && !('consulates' in raw)) {
+    // Legacy single `consulate` becomes the ordered selection ([] when unset or unknown).
+    const { consulate: _legacy, ...rest } = raw as Record<string, unknown>;
+    raw = { ...rest, consulates: selectedConsulates(raw) ?? [] };
+  }
   const saved = raw && typeof raw === 'object' ? { ...raw, autoMode: readAutoMode(raw) } as Preferences : undefined;
   const terms = local[TERMS_KEY];
   const run = includeSimulatedRun ? session[RUN_KEY] as Run | undefined : undefined;

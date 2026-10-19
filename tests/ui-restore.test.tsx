@@ -248,6 +248,18 @@ describe('paid/unpaid workflow retention', () => {
 
 });
 
+describe('saved consulate migration', () => {
+  it('migrates a saved single consulate and an unconfigured one', async () => {
+    const { consulates: _consulates, ...legacy } = DEMO_PREFERENCES;
+    stubExtension({ preferences: { ...legacy, consulate: 'Toronto' }, snapshot: idleSnapshot('booking') });
+    const { loadUiState } = await import('../src/ui/storage');
+    expect((await loadUiState()).preferences.consulates).toEqual(['Toronto']);
+    expect((await loadUiState()).preferences).not.toHaveProperty('consulate');
+    stubExtension({ preferences: { ...legacy, consulate: '' }, snapshot: idleSnapshot('booking') });
+    expect((await loadUiState()).preferences.consulates).toEqual([]);
+  });
+});
+
 describe('toolbar scroll background', () => {
   it('shares the panel background until content scrolls beneath it', async () => {
     stubExtension({ lastMode: 'booking', snapshot: idleSnapshot('booking') });

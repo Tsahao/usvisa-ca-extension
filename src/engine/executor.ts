@@ -1,4 +1,4 @@
-import { canBook, CONSULATES, validatePreferences } from '../domain/dates';
+import { canBook, CONSULATES, selectedConsulates, validatePreferences } from '../domain/dates';
 import { guardBooking } from '../domain/booking';
 import { readAutoMode } from '../domain/auto-mode';
 import { sameApplicants, validateApplicantIds } from '../domain/applicants';
@@ -57,11 +57,13 @@ type Prefs = {
 async function readPrefs(deps: ExecDeps): Promise<Prefs | null> {
   const raw = await deps.loadPrefs();
   const autoMode = readAutoMode(raw);
-  if (!raw || typeof raw.consulate !== 'string' || !Object.hasOwn(CONSULATES, raw.consulate) ||
+  // TODO(task 5): the form stage should honour every selected consulate.
+  const consulate = selectedConsulates(raw)?.[0];
+  if (!raw || !consulate ||
       typeof raw.earliest !== 'string' || typeof raw.latest !== 'string' || typeof raw.onlyEarlier !== 'boolean' || autoMode === null) return null;
   try { validatePreferences({ earliest: raw.earliest, latest: raw.latest, exclusions: [], onlyEarlier: raw.onlyEarlier }); }
   catch { return null; }
-  return { consulate: raw.consulate as Prefs['consulate'], earliest: raw.earliest, latest: raw.latest,
+  return { consulate, earliest: raw.earliest, latest: raw.latest,
     onlyEarlier: raw.onlyEarlier, autoMode, policyKey: policyKey(raw) };
 }
 

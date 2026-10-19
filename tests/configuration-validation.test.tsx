@@ -36,13 +36,13 @@ describe('Settings validation timing', () => {
     expectQuiet();
     expect(saveDisabled()).toBe(false);
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...EMPTY_PREFERENCES, email: 'synthetic@example.invalid', password: 'synthetic-password', consulate: 'Calgary', earliest: '2026-11-01', latest: '2027-12-31' });
+    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...EMPTY_PREFERENCES, email: 'synthetic@example.invalid', password: 'synthetic-password', consulates: ['Calgary'], earliest: '2026-11-01', latest: '2027-12-31' });
     expectQuiet();
   });
 
   it.each([
     ['Password', 'Enter your visa account password.'],
-    ['Consulate', 'Select a consulate.'],
+    ['Consulate', 'Select at least one consulate.'],
     ['Earliest Acceptable', 'Choose a valid inclusive date window.'],
     ['Latest Acceptable', 'Choose a valid inclusive date window.'],
   ])('only warns about the completed %s field and hides its warning on refocus', async (label, message) => {
@@ -139,6 +139,10 @@ describe('Settings validation timing', () => {
 });
 
 describe('shared preference validation', () => {
+  it('requires at least one consulate', () => {
+    expect(preferenceIssues({ ...DEMO_PREFERENCES, consulates: [] })).toContainEqual({ fields: ['consulates'], message: 'Select at least one consulate.' });
+    expect(preferenceIssues({ ...DEMO_PREFERENCES, consulates: ['Toronto', 'Halifax'] }).some(issue => issue.fields.includes('consulates'))).toBe(false);
+  });
   it.each([
     ['', ''], ['2026-02-30', '2027-01-01'], ['2027-01-01', '2026-11-01'],
     ['2026-11-01', '2026-11-01'], ['2026-11-01', '2027-01-01'],

@@ -1,4 +1,4 @@
-import { CONSULATE_ORDER, isIsoDate, type Consulate } from '../domain/dates';
+import { CONSULATE_ORDER, isIsoDate, selectedConsulates, type Consulate } from '../domain/dates';
 import { readAutoMode } from '../domain/auto-mode';
 
 export const TERMS_VERSION = 'ui-preview-1';
@@ -6,7 +6,7 @@ export const CITIES: Consulate[] = [...CONSULATE_ORDER];
 export type Mode = 'booking' | 'alerts';
 export type RunStatus = 'idle' | 'running' | 'success' | 'failure';
 export type Preferences = {
-  email: string; password: string; consulate: Consulate | ''; earliest: string; latest: string;
+  email: string; password: string; consulates: Consulate[]; earliest: string; latest: string;
   autoMode: boolean; onlyEarlier: boolean; interval: number;
   paidIvr: string; unpaidIvr: string;
 };
@@ -14,10 +14,10 @@ export type Run = { mode: Mode; status: RunStatus; lastChecked: string | null };
 export const DEFAULT_ADVANCED = {
   onlyEarlier: true, interval: 60, paidIvr: '', unpaidIvr: '',
 };
-export const EMPTY_PREFERENCES: Preferences = { email: '', password: '', consulate: '', earliest: '', latest: '', autoMode: true, ...DEFAULT_ADVANCED };
+export const EMPTY_PREFERENCES: Preferences = { email: '', password: '', consulates: [], earliest: '', latest: '', autoMode: true, ...DEFAULT_ADVANCED };
 export const DEMO_PREFERENCES: Preferences = {
   ...EMPTY_PREFERENCES, email: 'preview@example.invalid', password: 'synthetic-preview-password',
-  consulate: 'Vancouver', earliest: '2026-11-01', latest: '2027-12-31',
+  consulates: ['Vancouver'], earliest: '2026-11-01', latest: '2027-12-31',
 };
 export const DEMO_DATES: Record<Consulate, string | null> = {
   Calgary: '2026-12-21', Halifax: '2027-01-22', Montreal: '2026-12-03',
@@ -35,7 +35,7 @@ export function preferenceIssues(prefs: Preferences): PreferenceIssue[] {
   // No email-format gate by user decision: owners enter their own account
   // email, and a wrong address fails at sign-in instead of blocking setup.
   if (!prefs.password) issues.push({ fields: ['password'], message: 'Enter your visa account password.' });
-  if (!CITIES.includes(prefs.consulate as Consulate)) issues.push({ fields: ['consulate'], message: 'Select a consulate.' });
+  if (!selectedConsulates(prefs)?.length) issues.push({ fields: ['consulates'], message: 'Select at least one consulate.' });
   for (const field of ['earliest', 'latest'] as const) {
     if (!isIsoDate(prefs[field])) issues.push({ fields: [field], message: 'Choose a valid inclusive date window.' });
   }
