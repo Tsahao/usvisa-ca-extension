@@ -510,6 +510,64 @@ describe('paid executor', () => {
     expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).not.toContain('performAppointmentSubmission');
     expect(JSON.stringify(events)).not.toMatch(/Toronto|Vancouver|2026-11-19/);
   });
+  it('parks an unselected candidate before any field change', async () => {
+    // The form still shows another facility, so without the pre-check the
+    // stage would switch the facility before the final guard refused it.
+    const h = harness('form'); h.page.facilityId = 94; h.page.date = ''; h.page.time = '';
+    h.d.loadPrefs = async () => ({ ...PREFS, consulates: ['Toronto'] });
+    const events: DiagnosticEvent[] = [];
+    h.d.recordDiagnostic = event => { events.push(event); };
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next).toMatchObject({ status: 'verifying', intent: null });
+    expect(h.mutations).toEqual([]);
+    expect(h.checkpoints).toEqual([]);
+    const names = vi.mocked(h.d.inject).mock.calls.map(call => call[1].name);
+    expect(names).not.toContain('performPaidAction');
+    expect(names).not.toContain('fetchTimesJson');
+    expect(names).not.toContain('performAppointmentSubmission');
+    expect(events.filter(event => event.code === 'executor-park').at(-1)).toMatchObject({ detail: 'config-changed' });
+    expect(JSON.stringify(events)).not.toMatch(/Toronto|Vancouver|2026-11-19/);
+  });
+  it('skips the date when the slot vanishes during a consulate switch', async () => {
+    const h = harness('form'); h.page.facilityId = 94;
+    const original = h.d.inject;
+    h.d.inject = async (...args) => {
+      if (args[1].name === 'performPaidAction') {
+        h.mutations.push(args[2]![0] as PaidAction);
+        return { ok: false, reason: 'facility-date-unavailable' };
+      }
+      return original(...args);
+    };
+    const events: DiagnosticEvent[] = [];
+    h.d.recordDiagnostic = event => { events.push(event); };
+    const state = seeded('form');
+    state.executor!.skippedDates = [{ consulate: 'Toronto', date: '2026-11-19' }];
+    const next = validateEngineState(await runBookingStage(h.d, state));
+    expect(h.mutations.map(m => m.action)).toEqual(['facility']);
+    expect(next).toMatchObject({ status: 'running', stage: null, lastCandidate: null, intent: null,
+      executor: { targetTime: null, actionPending: false,
+        skippedDates: [{ consulate: 'Toronto', date: '2026-11-19' }, { consulate: 'Vancouver', date: '2026-11-19' }] } });
+    expect(JSON.stringify(events)).not.toMatch(/Toronto|Vancouver|2026-11-19/);
+  });
+  it('dedupes the skipped pair when the slot vanishes again', async () => {
+    const h = harness('form'); h.page.facilityId = 94;
+    const original = h.d.inject;
+    h.d.inject = async (...args) => args[1].name === 'performPaidAction'
+      ? { ok: false, reason: 'facility-date-unavailable' } : original(...args);
+    const state = seeded('form');
+    state.executor!.skippedDates = [{ consulate: 'Vancouver', date: '2026-11-19' }];
+    const next = await runBookingStage(h.d, state);
+    expect(next).toMatchObject({ status: 'running', stage: null, lastCandidate: null });
+    expect(next.executor!.skippedDates).toEqual([{ consulate: 'Vancouver', date: '2026-11-19' }]);
+  });
+  it('still parks on any other facility refusal', async () => {
+    const h = harness('form'); h.page.facilityId = 94;
+    const original = h.d.inject;
+    h.d.inject = async (...args) => args[1].name === 'performPaidAction'
+      ? { ok: false, reason: 'facility-load-failed' } : original(...args);
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next).toMatchObject({ status: 'verifying' });
+  });
   it('refuses preferences changing between the read and mutation', async () => {
     const h = harness('form');
     h.page.time = '';

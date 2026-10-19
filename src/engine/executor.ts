@@ -297,6 +297,17 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     let result: ActResult;
     try { result = await inject(performPaidAction, [implicitApplicantId ? { ...request, implicitApplicantId } : request]) as ActResult; }
     catch { return park(); }
+    if (result && result.ok === false && result.reason === 'facility-date-unavailable' && request.action === 'facility' &&
+        !state.intent && state.lastCandidate) {
+      // The slot vanished while the form switched consulates: skip this
+      // consulate's date for the sweep and keep polling, like empty times.
+      const { consulate, date } = state.lastCandidate;
+      return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
+        stage: null, lastCandidate: null,
+        executor: { ...state.executor!, actionPending: false, targetTime: null,
+          skippedDates: [...state.executor!.skippedDates.filter(entry => !(entry.consulate === consulate && entry.date === date)),
+            { consulate, date }] } };
+    }
     if (!result || result.ok !== true) return park();
     state = { ...state, executor: { ...state.executor!, actionPending: false } };
     return pace(result.advanced === false ? state.stage as BookingStage : nextStage);
@@ -392,6 +403,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
           nextPollAt: deps.nowIso(), stage: null, executor: { ...state.executor!, targetTime: null } };
       }
       const consulate = state.lastCandidate!.consulate;
+      // A candidate whose consulate is no longer selected never reaches a
+      // field change; the final guard would refuse it anyway.
+      if (!prefs.consulates.includes(consulate)) return park('config-changed');
       const facilityId = CONSULATES[consulate];
       const date = state.lastCandidate!.date;
       const fields = { ...request, applicantIds: ids, facilityId, date };
