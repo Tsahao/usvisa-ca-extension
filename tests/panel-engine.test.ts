@@ -16,6 +16,14 @@ describe('worker-backed product data', () => {
     expect(JSON.stringify(result)).not.toContain(state.runId);
     expect(JSON.stringify(result)).not.toContain(state.owner);
   });
+  it('exposes validated per-consulate observations', () => {
+    const same = { runId: state.runId, mode: 'booking', checkedAt: NOW, dates: ['2026-11-20'], rows: [] };
+    expect(panelSnapshot(state, { ...same, byConsulate: [{ consulate: 'Halifax', dates: ['2026-11-20'] }] }, undefined).byConsulate).toEqual([{ consulate: 'Halifax', dates: ['2026-11-20'] }]);
+    expect(panelSnapshot(state, { ...same, byConsulate: [{ consulate: 'Paris', dates: [] }] }, undefined).checkedAt).toBeNull();
+    expect(panelSnapshot(state, { ...same, byConsulate: [{ consulate: 'Halifax', dates: ['x'] }] }, undefined).checkedAt).toBeNull();
+    expect(panelSnapshot(state, { ...same, byConsulate: [{ consulate: 'Halifax', dates: [] }, { consulate: 'Halifax', dates: [] }] }, undefined).checkedAt).toBeNull();
+    expect(panelSnapshot(state, same, undefined).byConsulate).toEqual([]);
+  });
   it('reports review without inventing booked success from a dry-run candidate', () => {
     expect(panelSnapshot({ ...state, status: 'verifying', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' } }, null, null)).toMatchObject({ status: 'idle', reviewRequired: true, confirmedDate: null });
     expect(panelSnapshot({ ...state, status: 'stopped' }, null, { runId: 'old-run-0001', date: '2026-11-19' }).status).toBe('idle');

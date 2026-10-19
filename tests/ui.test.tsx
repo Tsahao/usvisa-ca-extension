@@ -98,6 +98,22 @@ describe('Figma interface behavior', () => {
     expect(within(list).getByText('Vancouver')).toBeDefined();
   });
 
+  it('labels the earliest date with its consulate and lists selected consulates', async () => {
+    const user = await preview();
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
+    await user.type(screen.getByLabelText('Password'), 'synthetic-password');
+    await user.click(screen.getByRole('checkbox', { name: 'Toronto' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Halifax' }));
+    await user.type(screen.getByLabelText('Earliest Acceptable'), '2026-11-01');
+    await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await user.click(await screen.findByRole('button', { name: 'Start preview' }));
+    expect(screen.getByText('Nov 26, 2026 · Toronto')).toBeDefined();
+    const list = screen.getByLabelText('Selected consulate dates');
+    expect(within(list).getAllByRole('listitem').map(li => li.textContent)).toEqual(['HalifaxJan 22, 2027', 'TorontoNov 26, 2026']);
+  });
+
   it.each(['Scheduling Visa fee paid', 'View dates Visa fee unpaid'])('opens and starts %s without terms acknowledgement', async entry => {
     const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Fill synthetic preferences' }));
