@@ -7,11 +7,20 @@ or the official scheduling provider.
 
 ## Features
 
-- **Book:** monitor a paid group's availability and book an eligible appointment
-  using your selected consulate, date window and earlier-only preference.
+- **Book:** monitor a paid group's availability across the consulates you
+  select and reschedule to the earliest eligible date among them, within your
+  date window and earlier-only preference. Ties go to a fixed city order, the
+  chosen date's own consulate is the one booked, and unselected consulates are
+  never booked.
 - **Alerts:** monitor an unpaid group's availability across seven consulates;
-  desktop notifications apply to the selected consulate. This mode never pays
-  or books.
+  you get one desktop notification per selected consulate whose date changes,
+  such as `New date available: {date} ({consulate})`. This mode never pays or
+  books.
+- **Multiple consulates:** pick any set in preferences. The panel lists each
+  selected consulate with its date, and View Logs history names the consulate.
+  Each check reads every selected consulate, so with more than two selected,
+  consider a longer checking interval. Existing single-consulate settings
+  migrate automatically.
 - **Auto Mode:** a visible **Login and preferences** setting, defaulting **ON**.
   In Book, ON automatically books a matching slot; OFF keeps refreshing
   availability and updating the panel, and sends a desktop notification for a
