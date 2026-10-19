@@ -4,7 +4,7 @@ import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, 
 import { CONSULATES, earliestCandidateAcross, selectedConsulates, validatePreferences, type Consulate } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
-import { acceptNotification, monitorForScope, observeMonitorDate, observeSummary, resetBaseline, validateMonitorState } from './domain/monitor';
+import { acceptNotification, monitorForScope, monitorsForScope, observeMonitorDate, observeSummary, resetBaseline, type MonitorSlot } from './domain/monitor';
 import { mapHttpStatus, pollDelaySeconds } from './domain/timing';
 import { isSameGroupUrl } from './domain/trust';
 import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from './adapter/reads';
@@ -559,11 +559,12 @@ async function prepareAlertScope(area: import('./engine/storage').StorageArea, s
   const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
   if (!prefs || preferencesError(prefs) || policyKey(prefs as unknown as Record<string, unknown>) !== state.policyKey)
     throw new Error('Configuration changed.');
-  // TODO(task 8): scope the alerts monitor per selected consulate.
-  const scopeKey = `alerts:${state.group.scheduleId}:${selectedConsulates(prefs)?.[0]}:any:${prefs.earliest}:${prefs.latest}`;
+  const consulates = selectedConsulates(prefs);
+  if (!consulates?.length) throw new Error('Configuration changed.');
+  const scopeKey = `alerts:${state.group.scheduleId}:${consulates.join(',')}:any:${prefs.earliest}:${prefs.latest}`;
   const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1;
-  const monitor = monitorForScope(saved, scopeKey, true);
-  await area.set({ unpaidMonitorV1: { scopeKey, monitor } });
+  const slot: MonitorSlot = { scopeKey, monitors: monitorsForScope(saved, scopeKey, consulates, true) };
+  await area.set({ unpaidMonitorV1: slot });
 }
 
 async function attemptRestart(area: import('./engine/storage').StorageArea, state: import('./engine/workflow').EngineState) {
@@ -1273,18 +1274,19 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1 as
-          | { scopeKey?: unknown; monitor?: unknown }
+          | { scopeKey?: unknown; monitors?: unknown }
           | undefined;
-        if (!saved) {
+        if (!saved || typeof saved.scopeKey !== 'string') {
           respond({ ok: false });
           return;
         }
-        const monitor = validateMonitorState(saved.monitor);
-        if (saved.scopeKey !== monitor.scopeKey) {
-          respond({ ok: false });
-          return;
-        }
-        await area.set({ unpaidMonitorV1: { scopeKey: saved.scopeKey, monitor: resetBaseline(monitor) } });
+        // Validates the whole slot under its own scope (a legacy or malformed
+        // slot throws) and resets every stored monitor.
+        const consulates = Object.keys((saved.monitors ?? {}) as object) as Consulate[];
+        const current = monitorsForScope(saved, saved.scopeKey, consulates);
+        const monitors: MonitorSlot['monitors'] = {};
+        for (const consulate of consulates) monitors[consulate] = resetBaseline(current[consulate]!);
+        await area.set({ unpaidMonitorV1: { scopeKey: saved.scopeKey, monitors } satisfies MonitorSlot });
         respond({ ok: true });
       } catch {
         respond({ ok: false });
@@ -1355,7 +1357,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           get: (keys: string[]) => platform.storage.local.get(keys),
           set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
-        const saved = await area.get([ENGINE_KEY, 'unpaidMonitorV1', 'lastPollV1']);
+        const saved = await area.get([ENGINE_KEY, 'unpaidMonitorV1', 'lastPollV1', 'uiPreferencesV1']);
         const state = saved[ENGINE_KEY] as
           | {
               status?: unknown;
@@ -1367,9 +1369,10 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
               stage?: unknown;
             }
           | undefined;
-        const slot = saved.unpaidMonitorV1 as
-          | { monitor?: { alert?: { pending?: unknown; delivered?: unknown }; baseline?: unknown; lastHealthyAt?: unknown } }
-          | undefined;
+        type ProbeMonitor = { alert?: { pending?: unknown; delivered?: unknown }; baseline?: unknown; lastHealthyAt?: unknown };
+        const slot = saved.unpaidMonitorV1 as { monitors?: Partial<Record<Consulate, ProbeMonitor>> } | undefined;
+        const first = selectedConsulates(saved.uiPreferencesV1)?.[0];
+        const monitor = first && slot?.monitors && typeof slot.monitors === 'object' ? slot.monitors[first] : undefined;
         const poll = saved.lastPollV1 as { status?: unknown; dayCount?: unknown; at?: unknown } | undefined;
         respond({
           ok: true,
@@ -1382,10 +1385,10 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           stage: state?.stage ?? null,
           lastPollStatus: typeof poll?.status === 'number' ? poll.status : null,
           lastPollDays: typeof poll?.dayCount === 'number' ? poll.dayCount : null,
-          monitorPending: slot?.monitor?.alert?.pending ?? null,
-          monitorDelivered: slot?.monitor?.alert?.delivered ?? null,
-          monitorBaseline: slot?.monitor?.baseline ?? null,
-          lastHealthyAt: slot?.monitor?.lastHealthyAt ?? null,
+          monitorPending: monitor?.alert?.pending ?? null,
+          monitorDelivered: monitor?.alert?.delivered ?? null,
+          monitorBaseline: monitor?.baseline ?? null,
+          lastHealthyAt: monitor?.lastHealthyAt ?? null,
         });
       } catch {
         respond({ ok: false });
@@ -1639,9 +1642,8 @@ function queueEnginePoll(): void {
             await syncEngineAlarm(engineAlarmAt(next));
           };
           const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
-          // TODO(task 8): monitor every selected consulate, not just the first.
-          const consulate = selectedConsulates(prefs)?.[0];
-          if (typeof consulate !== 'string' || !(consulate in CONSULATES)) {
+          const consulates = selectedConsulates(prefs);
+          if (!consulates?.length) {
             await park();
             return;
           }
@@ -1722,35 +1724,42 @@ function queueEnginePoll(): void {
               await saveEngineState(area, state);
               noteDiagnostic('payment-inspection-resolved', { mode: state.mode });
             }
-            const scopeKey = `alerts:${scheduleId}:${consulate}:any:${windowPrefs.earliest}:${windowPrefs.latest}`;
-            const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1 as
-              | { scopeKey?: unknown; monitor?: unknown }
-              | undefined;
-            let monitor;
+            const scopeKey = `alerts:${scheduleId}:${consulates.join(',')}:any:${windowPrefs.earliest}:${windowPrefs.latest}`;
+            const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1;
+            let monitors: MonitorSlot['monitors'];
             try {
-              monitor = monitorForScope(saved, scopeKey);
+              monitors = monitorsForScope(saved, scopeKey, consulates);
             } catch { await park(); return; }
-            const { state: advanced, alertDue } = observeSummary(monitor, reading, {
-              scopeKey,
-              consulate: consulate as keyof typeof CONSULATES,
-              prefs: windowPrefs,
-              rangeOnly: false,
-              now: stamped,
-            });
-            await area.set({ unpaidMonitorV1: { scopeKey, monitor: advanced } });
+            // Observe every selected consulate before any write: a missing
+            // row throws here and takes the malformed-summary path below.
+            const observed = consulates.map(consulate => ({
+              consulate,
+              ...observeSummary(monitors[consulate]!, reading, {
+                scopeKey: `${scopeKey}:${consulate}`,
+                consulate,
+                prefs: windowPrefs,
+                rangeOnly: false,
+                now: stamped,
+              }),
+            }));
+            for (const { consulate, state: advanced } of observed) monitors = { ...monitors, [consulate]: advanced };
+            await area.set({ unpaidMonitorV1: { scopeKey, monitors } satisfies MonitorSlot });
             await area.set({ engineObservationV1: { runId: state.runId, mode: state.mode, checkedAt: stamped, dates: [], rows: reading.rows } });
-            void dateHistory.observe(state, consulate, reading.rows.find(row => row.city === consulate)?.date ?? null, stamped);
+            for (const { consulate } of observed)
+              void dateHistory.observe(state, consulate, reading.rows.find(row => row.city === consulate)?.date ?? null, stamped);
             analytics?.activated(state, reading.rows.length);
-            if (alertDue) {
+            for (const { consulate, alertDue } of observed) {
+              if (!alertDue) continue;
               if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
               // Acceptance records creation only, never proof of delivery.
               await platform.notifications.create({
                 type: 'basic',
                 iconUrl: 'icons/icon128.png',
                 title: 'US Visa Scheduler for Canada',
-                message: `New date available: ${alertDue}`,
+                message: `New date available: ${alertDue} (${consulate})`,
               });
-              await area.set({ unpaidMonitorV1: { scopeKey, monitor: acceptNotification(advanced, alertDue) } });
+              monitors = { ...monitors, [consulate]: acceptNotification(monitors[consulate]!, alertDue) };
+              await area.set({ unpaidMonitorV1: { scopeKey, monitors } satisfies MonitorSlot });
             }
             notePollRecovered(state, 'healthy');
             const next = applyPollResult(state, { outcome: 'healthy', now: stamped, random: Math.random });

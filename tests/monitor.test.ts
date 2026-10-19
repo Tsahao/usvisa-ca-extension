@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CONSULATES, type Consulate, type DatePreferences } from '../src/domain/dates';
-import { acceptNotification, initialMonitor, observeSummary, resetBaseline, validateMonitorState } from '../src/domain/monitor';
+import { acceptNotification, initialMonitor, monitorsForScope, observeSummary, resetBaseline, validateMonitorState } from '../src/domain/monitor';
 import { SUMMARY_HEADING } from '../src/domain/summary';
 
 const CITIES = Object.keys(CONSULATES) as Consulate[];
@@ -191,5 +191,22 @@ describe('unpaid monitoring', () => {
     expect(validateMonitorState(JSON.parse(JSON.stringify(monitor)))).toEqual(monitor);
     for (const bad of [null, {}, { scopeKey: '', monitor: {} }, { scopeKey: 'scope-1' }, { scopeKey: 'scope-1', monitor: { alert: {} } }])
       expect(() => validateMonitorState(bad)).toThrow();
+  });
+});
+
+describe('per-consulate summary monitors', () => {
+  it('tracks each selected consulate independently from one reading', () => {
+    const consulates: Consulate[] = ['Halifax', 'Toronto'];
+    let monitors = monitorsForScope(undefined, 'scope-m', consulates);
+    const observe = (dates: Record<string, string | null>, now: string) => consulates.map(c => {
+      const { state, alertDue } = observeSummary(monitors[c]!, reading(dates), { scopeKey: `scope-m:${c}`, consulate: c, prefs: PREFS, rangeOnly: false, now });
+      monitors = { ...monitors, [c]: alertDue ? acceptNotification(state, alertDue) : state };
+      return alertDue;
+    });
+    expect(observe({ Halifax: '2026-11-20', Toronto: '2026-11-25' }, NOW)).toEqual(['2026-11-20', '2026-11-25']);
+    expect(observe({ Halifax: '2026-11-18', Toronto: '2026-11-25' }, LATER)).toEqual(['2026-11-18', null]);
+    expect(monitors.Halifax!.alert.delivered).toBe('2026-11-18');
+    expect(monitors.Toronto!.alert.delivered).toBe('2026-11-25');
+    expect(monitorsForScope(JSON.parse(JSON.stringify({ scopeKey: 'scope-m', monitors })), 'scope-m', consulates)).toEqual(monitors);
   });
 });

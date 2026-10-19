@@ -133,7 +133,7 @@ describe('cross-component review regressions', () => {
     mock.scripting.executeScript.mockResolvedValue([{ result: { ...summary, rows: summary.rows.map(row =>
       row.city === 'Vancouver' ? { ...row, text: 'November 19, 2026' } : row) } }]);
     await fire();
-    expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19' }));
+    expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19 (Vancouver)' }));
     expect(state()).toMatchObject({ mode: 'alerts', status: 'running', stage: null, intent: null, executor: null });
     expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => input.func.name === 'readSummaryRaw')).toBe(true);
   });
@@ -177,7 +177,10 @@ describe('cross-component review regressions', () => {
     vi.setSystemTime(new Date(state().nextPollAt!)); await fire();
     expect(state().status).toBe('running');
     expect(stored.unpaidMonitorV1.scopeKey).not.toBe(oldScope);
-    expect(stored.unpaidMonitorV1.monitor.baseline).toBeNull();
+    const city = change === 'consulate' ? 'Toronto' : 'Vancouver';
+    expect(Object.keys(stored.unpaidMonitorV1.monitors)).toEqual([city]);
+    expect(stored.unpaidMonitorV1.monitors[city].scopeKey).toBe(`${stored.unpaidMonitorV1.scopeKey}:${city}`);
+    expect(stored.unpaidMonitorV1.monitors[city].baseline).toBeNull();
     expect(stored.engineObservationV1.runId).toBe(state().runId);
   });
 
@@ -192,7 +195,8 @@ describe('cross-component review regressions', () => {
     expect(state().authentication).toBeNull();
     expect(state().status).toBe('running');
     expect(stored.unpaidMonitorV1.scopeKey).toContain(':Vancouver:');
-    expect(stored.unpaidMonitorV1.monitor.baseline).toBeNull();
+    expect(stored.unpaidMonitorV1.monitor).toBeUndefined();
+    expect(stored.unpaidMonitorV1.monitors.Vancouver.baseline).toBeNull();
   });
 
   it('reschedules a due poll after a transient preferences-storage exception', async () => {

@@ -145,6 +145,24 @@ describe('read-only probe boundaries', () => {
     expect(JSON.stringify(respond.mock.calls)).not.toContain('33333333');
   });
 
+  it('replaces a legacy single-monitor slot with fresh per-consulate monitors on Start', async () => {
+    stored.uiPreferencesV1 = { email: 'synthetic@example.invalid', password: 'synthetic-password', consulates: ['Vancouver', 'Halifax'], earliest: '2026-11-01', latest: '2026-12-31',
+      onlyEarlier: true, testMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '44444444' };
+    const scopeKey = 'alerts:33333333:Halifax,Vancouver:any:2026-11-01:2026-12-31';
+    stored.unpaidMonitorV1 = { scopeKey, monitor: { scopeKey, alert: { observed: '2026-11-19', delivered: '2026-11-19', pending: false }, baseline: '2026-11-19', lastHealthyAt: new Date().toISOString() } };
+    chromeMock.tabs.query.mockResolvedValue([{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups' }]);
+    chromeMock.tabs.get.mockResolvedValue({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups' });
+    chromeMock.scripting.executeScript.mockResolvedValue([{ result: {
+      groups: [{ scheduleId: '11111111', ivr: '22222222', paymentStatus: 'paid' }, { scheduleId: '33333333', ivr: '44444444', paymentStatus: 'unpaid' }],
+    } }]);
+    const respond = vi.fn();
+    message({ type: 'PANEL_START', mode: 'alerts' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, respond);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith(expect.objectContaining({ ok: true })));
+    expect(stored.engineStateV1).toMatchObject({ status: 'running', mode: 'alerts', group: { scheduleId: '33333333', kind: 'unpaid' } });
+    const fresh = (consulate: string) => ({ scopeKey: `${scopeKey}:${consulate}`, alert: { delivered: null, pending: false }, baseline: null, lastHealthyAt: null });
+    expect(stored.unpaidMonitorV1).toEqual({ scopeKey, monitors: { Halifax: fresh('Halifax'), Vancouver: fresh('Vancouver') } });
+  });
+
   it('schedules a fast first alerts read instead of waiting a full cycle', async () => {
     stored.uiPreferencesV1 = { email: 'synthetic@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31',
       onlyEarlier: true, testMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '44444444' };
@@ -1037,20 +1055,31 @@ describe('read-only probe boundaries', () => {
     const now = new Date().toISOString();
     stored.unpaidMonitorV1 = {
       scopeKey: 'scope-1',
-      monitor: {
-        scopeKey: 'scope-1',
-        alert: { observed: '2026-11-19', delivered: '2026-11-19', pending: false },
-        baseline: '2026-11-19',
-        lastHealthyAt: now,
+      monitors: {
+        Toronto: {
+          scopeKey: 'scope-1:Toronto',
+          alert: { observed: '2026-11-19', delivered: '2026-11-19', pending: false },
+          baseline: '2026-11-19',
+          lastHealthyAt: now,
+        },
+        Vancouver: {
+          scopeKey: 'scope-1:Vancouver',
+          alert: { observed: '2026-11-25', delivered: null, pending: true },
+          baseline: '2026-11-25',
+          lastHealthyAt: now,
+        },
       },
     };
     const reset = vi.fn();
     message({ type: 'PROBE_RESET' }, { id: 'synthetic-extension', url: probe }, reset);
     await vi.waitFor(() => expect(reset).toHaveBeenCalledWith({ ok: true }));
     expect(reset).toHaveBeenCalledTimes(1);
-    expect(stored.unpaidMonitorV1).toMatchObject({
+    expect(stored.unpaidMonitorV1).toEqual({
       scopeKey: 'scope-1',
-      monitor: { alert: { pending: false }, baseline: null },
+      monitors: {
+        Toronto: { scopeKey: 'scope-1:Toronto', alert: { delivered: null, pending: false }, baseline: null, lastHealthyAt: now },
+        Vancouver: { scopeKey: 'scope-1:Vancouver', alert: { delivered: null, pending: false }, baseline: null, lastHealthyAt: now },
+      },
     });
     expect(stored.engineStateV1).toBeUndefined();
     const website = vi.fn();
@@ -1076,15 +1105,20 @@ describe('read-only probe boundaries', () => {
         }),
       ),
     );
+    stored.uiPreferencesV1 = { consulates: ['Vancouver', 'Toronto'], earliest: '2026-11-01', latest: '2026-12-31' };
     stored.unpaidMonitorV1 = {
-      scopeKey: 'alerts:33333333:Vancouver:any:2026-11-01:2026-12-31',
-      monitor: { scopeKey: 'x', alert: { observed: '2026-11-19', delivered: null, pending: true }, baseline: null, lastHealthyAt: now },
+      scopeKey: 'alerts:33333333:Toronto,Vancouver:any:2026-11-01:2026-12-31',
+      monitors: {
+        Toronto: { scopeKey: 'alerts:33333333:Toronto,Vancouver:any:2026-11-01:2026-12-31:Toronto', alert: { observed: '2026-11-19', delivered: null, pending: true }, baseline: null, lastHealthyAt: now },
+        Vancouver: { scopeKey: 'alerts:33333333:Toronto,Vancouver:any:2026-11-01:2026-12-31:Vancouver', alert: { observed: '2026-11-21', delivered: '2026-11-21', pending: false }, baseline: '2026-11-21', lastHealthyAt: now },
+      },
     };
     const status = vi.fn();
     message({ type: 'PROBE_STATUS' }, { id: 'synthetic-extension', url: probe }, status);
     await vi.waitFor(() =>
       expect(status).toHaveBeenCalledWith(
-        expect.objectContaining({ ok: true, status: 'running', mode: 'alerts', groupKind: 'unpaid', monitorPending: true }),
+        expect.objectContaining({ ok: true, status: 'running', mode: 'alerts', groupKind: 'unpaid', monitorPending: true,
+          monitorDelivered: null, monitorBaseline: null, lastHealthyAt: now }),
       ),
     );
     expect(JSON.stringify(status.mock.calls)).not.toContain('33333333');
@@ -1293,13 +1327,110 @@ describe('read-only probe boundaries', () => {
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(chromeMock.notifications.create).toHaveBeenCalled());
     expect(chromeMock.notifications.create.mock.calls[0][0]).toMatchObject({ type: 'basic', title: 'US Visa Scheduler for Canada' });
-    expect(chromeMock.notifications.create.mock.calls[0][0].message).toContain('2026-11-19');
+    expect(chromeMock.notifications.create.mock.calls[0][0].message).toBe('New date available: 2026-11-19 (Vancouver)');
     expect((stored.engineStateV1 as { nextPollAt: string }).nextPollAt).not.toBeNull();
-    const saved = stored.unpaidMonitorV1 as { scopeKey: string; monitor: { alert: { delivered: string } } };
-    expect(saved.monitor.alert.delivered).toBe('2026-11-19');
+    const saved = stored.unpaidMonitorV1 as { scopeKey: string; monitors: { Vancouver: { alert: { delivered: string } } } };
+    expect(saved.scopeKey).toBe('alerts:33333333:Vancouver:any:2026-11-01:2026-12-31');
+    expect(Object.keys(saved.monitors)).toEqual(['Vancouver']);
+    expect(saved.monitors.Vancouver.alert.delivered).toBe('2026-11-19');
     const history = vi.fn();
     message({ type: 'PANEL_HISTORY' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/panel.html' }, history);
     await vi.waitFor(() => expect(history).toHaveBeenCalledWith({ ok: true, rows: [expect.objectContaining({ earliestDate: '2026-11-19', booked: 'No' })] }));
+  });
+
+  describe('multi-consulate alerts', () => {
+    const CITIES = ['Calgary', 'Halifax', 'Montreal', 'Ottawa', 'Quebec City', 'Toronto', 'Vancouver'];
+    const SCOPE = 'alerts:33333333:Halifax,Toronto:any:2026-11-01:2026-12-31';
+    async function bindAlerts(consulates: unknown) {
+      const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
+      const now = new Date().toISOString();
+      stored.engineStateV1 = JSON.parse(JSON.stringify(bindGroup(
+        startRun(emptyEngineState(now), { mode: 'alerts', owner: 'owner-token-01', runId: 'run-id-0001', now }),
+        { owner: 'owner-token-01', runId: 'run-id-0001', now, binding: { scheduleId: '33333333', ivr: '44444444', kind: 'unpaid', currentDate: null } },
+      )));
+      stored.uiPreferencesV1 = { consulates, earliest: '2026-11-01', latest: '2026-12-31' };
+      chromeMock.tabs.query.mockResolvedValue([{ id: 5, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment' }]);
+      return now;
+    }
+    function summary(dates: Record<string, string>, cities = CITIES) {
+      chromeMock.scripting.executeScript.mockResolvedValue([{ result: {
+        headingFound: true, rows: cities.map(city => ({ city, text: dates[city] ?? 'No Appointments Available' })),
+      } }]);
+    }
+
+    it('notifies per consulate whose summary date changed', async () => {
+      const now = await bindAlerts(['Toronto', 'Halifax']);
+      stored.unpaidMonitorV1 = { scopeKey: SCOPE, monitors: {
+        Halifax: { scopeKey: `${SCOPE}:Halifax`, alert: { observed: '2026-11-20', delivered: '2026-11-20', pending: false }, baseline: '2026-11-20', lastHealthyAt: now },
+        Toronto: { scopeKey: `${SCOPE}:Toronto`, alert: { observed: null, delivered: null, pending: false }, baseline: null, lastHealthyAt: now },
+      } };
+      summary({ Halifax: 'November 18, 2026' });
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect((stored.unpaidMonitorV1 as any).monitors.Halifax.alert.delivered).toBe('2026-11-18'));
+      expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(1);
+      expect(chromeMock.notifications.create.mock.calls.map((call: unknown[]) => (call[0] as { message: string }).message)).toEqual(['New date available: 2026-11-18 (Halifax)']);
+      expect((stored.unpaidMonitorV1 as any).monitors.Halifax.alert.delivered).toBe('2026-11-18');
+      expect((stored.unpaidMonitorV1 as any).monitors.Toronto.alert.delivered).toBeNull();
+      expect((stored.unpaidMonitorV1 as any).scopeKey).toBe(SCOPE);
+    });
+
+    it('notifies every changed consulate in order from one summary read and creates missing monitors fresh', async () => {
+      await bindAlerts(['Toronto', 'Halifax']);
+      stored.unpaidMonitorV1 = { scopeKey: SCOPE, monitors: {} };
+      summary({ Halifax: 'November 18, 2026', Toronto: 'December 2, 2026', Vancouver: 'November 5, 2026' });
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(chromeMock.notifications.create).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect((stored.unpaidMonitorV1 as any).monitors.Toronto.alert.delivered).toBe('2026-12-02'));
+      expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(1);
+      expect(chromeMock.notifications.create.mock.calls.map((call: unknown[]) => (call[0] as { message: string }).message)).toEqual([
+        'New date available: 2026-11-18 (Halifax)', 'New date available: 2026-12-02 (Toronto)']);
+      const slot = stored.unpaidMonitorV1 as any;
+      expect(Object.keys(slot.monitors).sort()).toEqual(['Halifax', 'Toronto']);
+      expect(slot.monitors.Halifax).toMatchObject({ scopeKey: `${SCOPE}:Halifax`, baseline: '2026-11-18', alert: { delivered: '2026-11-18', pending: false } });
+      expect(slot.monitors.Toronto).toMatchObject({ scopeKey: `${SCOPE}:Toronto`, baseline: '2026-12-02', alert: { delivered: '2026-12-02', pending: false } });
+      expect(JSON.stringify(stored.engineDiagnosticsV1 ?? null)).not.toMatch(/Halifax|Toronto|2026-11-18|2026-12-02/);
+    });
+
+    it.each([[[]], [['Atlantis']], [null]])('parks an empty or invalid selection (%j) without reading', async consulates => {
+      await bindAlerts(consulates);
+      summary({ Halifax: 'November 18, 2026' });
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying', nextPollAt: null }));
+      expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
+      expect(chromeMock.notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('parks on a legacy single-monitor slot outside Start and leaves it untouched', async () => {
+      const now = await bindAlerts(['Halifax', 'Toronto']);
+      const legacy = { scopeKey: SCOPE, monitor: { scopeKey: SCOPE, alert: { observed: null, delivered: null, pending: false }, baseline: null, lastHealthyAt: now } };
+      stored.unpaidMonitorV1 = legacy;
+      summary({ Halifax: 'November 18, 2026' });
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying', consecutiveFailures: 0, nextPollAt: null }));
+      expect(chromeMock.notifications.create).not.toHaveBeenCalled();
+      expect(stored.unpaidMonitorV1).toEqual(legacy);
+    });
+
+    it('parks when the stored slot belongs to a different consulate selection', async () => {
+      const now = await bindAlerts(['Halifax', 'Toronto']);
+      const other = { scopeKey: 'alerts:33333333:Halifax:any:2026-11-01:2026-12-31', monitors: {
+        Halifax: { scopeKey: 'alerts:33333333:Halifax:any:2026-11-01:2026-12-31:Halifax', alert: { observed: null, delivered: null, pending: false }, baseline: null, lastHealthyAt: now } } };
+      stored.unpaidMonitorV1 = other;
+      summary({ Halifax: 'November 18, 2026' });
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying', nextPollAt: null }));
+      expect(chromeMock.notifications.create).not.toHaveBeenCalled();
+      expect(stored.unpaidMonitorV1).toEqual(other);
+    });
+
+    it('treats a summary missing a selected row as a malformed read', async () => {
+      await bindAlerts(['Calgary', 'Toronto']);
+      summary({ Toronto: 'November 18, 2026' }, CITIES.filter(city => city !== 'Calgary'));
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ consecutiveFailures: 1 }));
+      expect(chromeMock.notifications.create).not.toHaveBeenCalled();
+      expect(stored.unpaidMonitorV1).toBeUndefined();
+    });
   });
 
   it('restricts history reads to the product panel and ignores supplied observations/outcomes', async () => {
@@ -1452,7 +1583,8 @@ describe('read-only probe boundaries', () => {
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
 
-  it.each([null, { scopeKey: 'foreign-scope', monitor: {} }])('parks corrupt unpaid monitor state without notification or retry (%s)', async monitor => {
+  it.each([null, { scopeKey: 'foreign-scope', monitor: {} }, { scopeKey: 'foreign-scope', monitors: {} },
+    { scopeKey: 'alerts:33333333:Vancouver:any:2026-11-01:2026-12-31', monitors: { Vancouver: { scopeKey: 'wrong', alert: {}, baseline: null, lastHealthyAt: null } } }])('parks corrupt unpaid monitor state without notification or retry (%s)', async monitor => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
     stored.engineStateV1 = bindGroup(startRun(emptyEngineState(now), { mode: 'alerts', owner: 'owner-token-01', runId: 'run-id-0001', now }), {
