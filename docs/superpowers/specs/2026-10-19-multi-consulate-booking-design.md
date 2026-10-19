@@ -27,9 +27,9 @@ extension books Halifax.
 
 ## Non-goals
 
-- Alerts mode gets no multi-consulate behaviour. It already reads the
-  seven-city summary for unpaid groups and notifies on one city. See
-  "Alerts mode" below for how it reads the new preference shape.
+- Alerts mode does not gain booking. It reads the seven-city summary for
+  unpaid groups and only notifies; see "Alerts mode" for its multi-consulate
+  change detection.
 - No preference ordering among consulates beyond the tie-break. The user asked
   for "earliest wins".
 - No change to the warning, applicants or dashboard stages. They are
@@ -176,14 +176,41 @@ is updated to say history rows name the consulate.
 
 ### Alerts mode
 
-Alerts keeps single-city semantics. Everywhere Alerts reads
-`prefs.consulate` today (the alerts loop's park check, the unpaid monitor
-scope key, `observeSummary`, `dateHistory.observe`, the Alerts panel header
-and its "Other consulate dates" list), it uses
-`selectedConsulates(prefs)[0]`, the first selected consulate in `CITIES`
-order. The shared preference form therefore serves both modes with one
-checkbox group; `preferenceIssues` requires at least one consulate for both.
-`monitor.ts`, `unpaidMonitorV1` and the alerts scope key shape are unchanged.
+Alerts watches every selected consulate. The summary page already lists all
+seven cities in one read, so the request footprint does not change; only
+change detection and notification become per-consulate.
+
+- Scope: the alerts scope key embeds the ordered selection,
+  `alerts:{scheduleId}:{consulates.join(',')}:any:{earliest}:{latest}`.
+  `prepareAlertScope` and the alerts loop derive it from
+  `selectedConsulates(prefs)`; a changed selection is a changed policy and
+  parks the run as today.
+- Storage: `unpaidMonitorV1` becomes
+  `{ scopeKey, monitors: Partial<Record<Consulate, MonitorState>> }`, one
+  `MonitorState` per selected consulate, each with its own scope key
+  `${scopeKey}:${consulate}`. A new `monitorsForScope(saved, scopeKey,
+  consulates, freshStart)` in `src/domain/monitor.ts` validates the slot,
+  returns the per-consulate monitors, and treats the old single-`monitor`
+  shape as an unknown scope (fresh start on Start, park otherwise), exactly
+  as a changed scope key is treated today. `observeSummary` and
+  `observeMonitorDate` are unchanged and are called once per consulate.
+- Notification: each consulate whose alert is due produces its own
+  notification, "New date available: {date} ({consulate})", in `CITIES`
+  order, and `acceptNotification` is applied to that consulate's monitor.
+  Delivery of one does not block the others.
+- History: `dateHistory.observe` is called once per selected consulate with
+  that consulate's summary date.
+- Probe and panel plumbing that read `unpaidMonitorV1.monitor.*`
+  (`src/background.ts` probe response: `monitorPending`,
+  `monitorDelivered`, `monitorBaseline`, `lastHealthyAt`) report the first
+  selected consulate's monitor; these are developer diagnostics only.
+- Panel (Alerts): the stats block header becomes "Selected consulates" with
+  one row per selected consulate and its summary date; the "Other consulate
+  dates" list shows the unselected ones. `Earliest Available` for Alerts is
+  the earliest date among selected consulates, labelled with its consulate.
+
+The shared preference form serves both modes with one checkbox group;
+`preferenceIssues` requires at least one consulate for both.
 
 ### Panel
 
@@ -221,7 +248,8 @@ cycle level. Diagnostics must never carry consulate names (existing rule).
 - Empty-cooldown counting at cycle level.
 - Per-consulate `skippedDates`.
 - Panel layout for the per-consulate rows.
-- Alerts mode uses the first selected consulate rather than its own field.
+- Alerts keeps one monitor per selected consulate in a single storage slot
+  and sends one notification per consulate.
 - History rows gain a consulate label, with the privacy text updated.
 - Old string candidates and skipped dates are cleared, not migrated.
 
@@ -229,9 +257,11 @@ cycle level. Diagnostics must never carry consulate names (existing rule).
 
 - Unit tests: `earliestCandidateAcross` ordering and tie-break; preference
   migration both shapes; `policyKey` changes when the selection changes;
-  `validateEngineState` migrates string candidates and skipped dates; the
+  `validateEngineState` clears string candidates and skipped dates; the
   poll cycle outcome table above; executor books the candidate's consulate
-  and refuses an unselected facility.
+  and refuses an unselected facility; `monitorsForScope` validation,
+  old-shape handling and per-consulate alert delivery; history rows carry
+  and display the consulate.
 - Existing suite stays green.
 - Manual: with Toronto and Halifax selected and a window that only Halifax
   satisfies in the demo data, the panel shows Halifax as the candidate and the
