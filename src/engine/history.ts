@@ -52,7 +52,7 @@ export function createDateHistory(deps: { area: StorageArea; now: () => string; 
       return bestEffort(async () => {
         const scopeHash = await hash(scope);
         const previous = await load();
-        await write(observeHistory(previous, { scope: scopeHash, earliestDate, checkedAt }, deps.now()), previous);
+        await write(observeHistory(previous, { scope: scopeHash, earliestDate, checkedAt, consulate: scope.consulate }, deps.now()), previous);
       });
     },
     attempted: (state: EngineState) => booking(state, 'Attempted'),

@@ -1,7 +1,7 @@
 import { platform } from '../platform';
 import { useEffect, useState, type UIEvent } from 'react';
 import { HISTORY_KEY, HISTORY_TTL_MS, type HistoryRow } from '../domain/history';
-import { formatDate } from './model';
+import { NO_VALUE, cityLabel, formatDate } from './model';
 import local from './History.module.css';
 const EMPTY_ROWS: HistoryRow[] = [];
 
@@ -45,10 +45,10 @@ export function History({ live, previewRows = EMPTY_ROWS, trackScroll }: { live:
       : rows === null ? <p className={local.message} role="status">Loading date history…</p>
       : visible.length === 0 ? <p className={local.message}>No available dates are recorded</p>
       : <table className={local.table} aria-label="Date change history">
-        <thead><tr><th scope="col">Checked</th><th scope="col">Earliest Date</th><th scope="col">Booked</th></tr></thead>
+        <thead><tr><th scope="col">Checked</th><th scope="col">Consulate</th><th scope="col">Earliest Date</th><th scope="col">Booked</th></tr></thead>
         <tbody>{visible.map(row => <tr key={row.id}>
           <td><time dateTime={row.checkedAt} title={new Date(row.checkedAt).toLocaleString()}>{new Date(row.checkedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</time></td>
-          <td>{formatDate(row.earliestDate)}</td><td>{row.booked}</td>
+          <td>{row.consulate ? cityLabel(row.consulate) : NO_VALUE}</td><td>{formatDate(row.earliestDate)}</td><td>{row.booked}</td>
         </tr>)}</tbody>
       </table>}
   </section>;

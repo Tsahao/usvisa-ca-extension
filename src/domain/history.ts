@@ -1,11 +1,11 @@
-import { isIsoDate } from './dates';
+import { CONSULATES, isIsoDate, type Consulate } from './dates';
 
 export const HISTORY_KEY = 'dateHistoryV1';
 export const HISTORY_ALARM = 'dateHistoryExpiry';
 export const HISTORY_TTL_MS = 24 * 60 * 60 * 1000;
 export const HISTORY_LIMIT = 100;
 export type BookingResult = 'No' | 'Attempted' | 'Yes';
-export type HistoryRow = { id: string; checkedAt: string; earliestDate: string; booked: BookingResult };
+export type HistoryRow = { id: string; checkedAt: string; earliestDate: string; booked: BookingResult; consulate?: Consulate };
 export type HistoryEntry = HistoryRow & { scope: string; attempt: string | null };
 type Baseline = { scope: string; date: string | null; checkedAt: string };
 export type DateHistory = { version: 1; entries: HistoryEntry[]; baselines: Baseline[] };
@@ -14,6 +14,7 @@ export function emptyHistory(): DateHistory { return { version: 1, entries: [], 
 const digest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const timestamp = (value: unknown): value is string => typeof value === 'string' &&
   Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+const consulateKey = (value: unknown): value is Consulate => typeof value === 'string' && Object.hasOwn(CONSULATES, value);
 const date = (value: unknown): value is string => typeof value === 'string' && isIsoDate(value);
 
 // Reconstruct only the allowlisted fields. History never retains raw portal
@@ -26,10 +27,12 @@ export function validateHistory(raw: unknown): DateHistory {
   const entries = value.entries.map(entry => {
     if (!entry || !digest(entry.scope) || !timestamp(entry.checkedAt) || !date(entry.earliestDate) ||
         entry.id !== `${entry.scope}:${entry.checkedAt}` || !['No', 'Attempted', 'Yes'].includes(entry.booked) ||
-        !(entry.attempt === null || digest(entry.attempt)) || (entry.booked !== 'No' && entry.attempt === null))
+        !(entry.attempt === null || digest(entry.attempt)) || (entry.booked !== 'No' && entry.attempt === null) ||
+        !(entry.consulate === undefined || consulateKey(entry.consulate)))
       throw new Error('Invalid date history.');
     return { id: entry.id, scope: entry.scope, checkedAt: entry.checkedAt,
-      earliestDate: entry.earliestDate, booked: entry.booked, attempt: entry.attempt };
+      earliestDate: entry.earliestDate, booked: entry.booked, attempt: entry.attempt,
+      ...(entry.consulate === undefined ? {} : { consulate: entry.consulate }) };
   });
   const baselines = value.baselines.map(baseline => {
     if (!baseline || !digest(baseline.scope) || !timestamp(baseline.checkedAt) ||
@@ -50,17 +53,17 @@ export function pruneHistory(history: DateHistory, now: string): DateHistory {
     baselines: history.baselines.filter(retained).sort(newest).slice(0, HISTORY_LIMIT) };
 }
 
-export function observeHistory(history: DateHistory, reading: { scope: string; earliestDate: string | null; checkedAt: string }, now: string): DateHistory {
+export function observeHistory(history: DateHistory, reading: { scope: string; earliestDate: string | null; checkedAt: string; consulate: Consulate }, now: string): DateHistory {
   const clean = pruneHistory(history, now);
   if (!digest(reading.scope) || !timestamp(reading.checkedAt) || Date.parse(reading.checkedAt) > Date.parse(now) ||
       Date.parse(reading.checkedAt) <= Date.parse(now) - HISTORY_TTL_MS ||
-      !(reading.earliestDate === null || date(reading.earliestDate))) throw new Error('Invalid history reading.');
+      !(reading.earliestDate === null || date(reading.earliestDate)) || !consulateKey(reading.consulate)) throw new Error('Invalid history reading.');
   const previous = clean.baselines.find(item => item.scope === reading.scope);
   if (previous && Date.parse(previous.checkedAt) >= Date.parse(reading.checkedAt)) return clean;
   const changed = !previous || previous.date !== reading.earliestDate;
   const entry: HistoryEntry | null = changed && reading.earliestDate !== null
     ? { id: `${reading.scope}:${reading.checkedAt}`, scope: reading.scope, checkedAt: reading.checkedAt,
-      earliestDate: reading.earliestDate, booked: 'No', attempt: null } : null;
+      earliestDate: reading.earliestDate, booked: 'No', attempt: null, consulate: reading.consulate } : null;
   return pruneHistory({ version: 1, entries: entry ? [entry, ...clean.entries] : clean.entries,
     baselines: [{ scope: reading.scope, date: reading.earliestDate, checkedAt: reading.checkedAt },
       ...clean.baselines.filter(item => item.scope !== reading.scope)].slice(0, HISTORY_LIMIT) }, now);
@@ -80,7 +83,8 @@ export function markHistoryBooking(history: DateHistory, event: { scope: string;
 }
 
 export function historyRows(history: DateHistory, now: string): HistoryRow[] {
-  return pruneHistory(history, now).entries.map(({ id, checkedAt, earliestDate, booked }) => ({ id, checkedAt, earliestDate, booked }));
+  return pruneHistory(history, now).entries.map(({ id, checkedAt, earliestDate, booked, consulate }) =>
+    ({ id, checkedAt, earliestDate, booked, ...(consulate === undefined ? {} : { consulate }) }));
 }
 
 export function historyExpiry(history: DateHistory): string | null {

@@ -37,7 +37,7 @@ or the official scheduling provider.
 - Optional tips through a separate Stripe checkout.
 - **View Logs:** Settings → Advanced shows selected-consulate earliest-date
   changes from Book and Alerts, newest first, with No/Attempted/Yes booking
-  outcomes. History is local and limited to 24 hours or 100 rows.
+  outcomes. History is local and limited to 24 hours or 100 rows. Date history rows record which consulate each date was seen at.
 
 Automation can change an existing appointment and may be restricted by the
 portal's terms. Availability, booking and notification delivery are not

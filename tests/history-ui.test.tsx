@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { History } from '../src/ui/History';
+import { NO_VALUE } from '../src/ui/model';
 import { HISTORY_KEY, HISTORY_TTL_MS } from '../src/domain/history';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -42,5 +43,18 @@ describe('read-only live history view', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(screen.queryByRole('table')).toBeNull();
     expect(screen.getByText('No available dates are recorded')).not.toBeNull();
+  });
+
+  it('shows the consulate column, with a placeholder for rows that predate it', () => {
+    const checkedAt = new Date().toISOString();
+    const rows = [
+      { id: 'row-1', checkedAt, earliestDate: '2026-11-19', booked: 'No' as const, consulate: 'Halifax' as const },
+      { id: 'row-2', checkedAt, earliestDate: '2026-11-20', booked: 'No' as const },
+    ];
+    render(<History live={false} previewRows={rows} trackScroll={() => {}} />);
+    const headers = screen.getAllByRole('columnheader').map(header => header.textContent);
+    expect(headers).toEqual(['Checked', 'Consulate', 'Earliest Date', 'Booked']);
+    expect(screen.getByRole('cell', { name: 'Halifax' })).not.toBeNull();
+    expect(screen.getByRole('cell', { name: NO_VALUE })).not.toBeNull();
   });
 });
