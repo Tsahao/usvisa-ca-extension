@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { classifyRoute } from '../src/domain/routes';
-import { canBook, earliestCandidate, earliestCandidateAcross, selectedConsulates, isIsoDate, parseLongDateUs, type DatePreferences } from '../src/domain/dates';
+import { classifyRoute, isBareAppointmentQuery } from '../src/domain/routes';
+import { CONSULATES, CONSULATE_ORDER, canBook, earliestCandidate, earliestCandidateAcross, selectedConsulates, isIsoDate, parseLongDateUs, type DatePreferences } from '../src/domain/dates';
 import { emptyAlertState, notificationAccepted, observeDate } from '../src/domain/alerts';
-import { DEFAULT_ADVANCED, EMPTY_PREFERENCES } from '../src/ui/model';
+import { CITIES, DEFAULT_ADVANCED, EMPTY_PREFERENCES } from '../src/ui/model';
 
 const prefs: DatePreferences = {
   earliest: '2026-11-01', latest: '2026-12-31',
@@ -12,6 +12,27 @@ describe('auto mode default', () => {
   it('ships ON for fresh preferences and is not an advanced setting', () => {
     expect(DEFAULT_ADVANCED).not.toHaveProperty('autoMode');
     expect(EMPTY_PREFERENCES.autoMode).toBe(true);
+  });
+});
+describe('consulate tables', () => {
+  it('keeps the order, facility map and UI city list in parity', () => {
+    expect([...CONSULATE_ORDER].sort()).toEqual(Object.keys(CONSULATES).sort());
+    expect(CITIES).toEqual([...CONSULATE_ORDER]);
+  });
+});
+describe('bare appointment query', () => {
+  const at = (query: string) => new URL(`https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment${query}`);
+  it.each([
+    ['', true],
+    ['?confirmed_limit_message=1&commit=Continue', true],
+    ['?commit=Continue', false],
+    ['?confirmed_limit_message=0&commit=Continue', false],
+    ['?confirmed_limit_message=1&confirmed_limit_message=1&commit=Continue', false],
+    ['?confirmed_limit_message=1&commit=Continue&commit=Continue', false],
+    ['?confirmed_limit_message=1&other=1', false],
+    ['?applicants[]=1', false],
+  ])('classifies %j as %s', (query, expected) => {
+    expect(isBareAppointmentQuery(at(query))).toBe(expected);
   });
 });
 describe('dashboard prose dates', () => {
@@ -61,6 +82,13 @@ describe('booking policy', () => {
     expect(canBook('2026-12-02', '2026-12-01', prefs)).toBe(false);
     expect(canBook('2026-12-02', '2026-12-01', { ...prefs, onlyEarlier: false })).toBe(true);
     expect(canBook('2026-12-02', 'invalid', prefs)).toBe(false);
+  });
+  it('never books the current date, even with earlier-only off', () => {
+    expect(canBook('2026-12-01', '2026-12-01', { ...prefs, onlyEarlier: false })).toBe(false);
+    expect(canBook('2026-12-01', '2026-12-01', prefs)).toBe(false);
+    expect(earliestCandidate(['2026-12-01', '2026-12-02'], '2026-12-01', { ...prefs, onlyEarlier: false })).toBe('2026-12-02');
+    expect(earliestCandidateAcross([{ consulate: 'Toronto', dates: ['2026-12-01'] }, { consulate: 'Vancouver', dates: ['2026-12-03'] }],
+      '2026-12-01', { ...prefs, onlyEarlier: false })).toEqual({ consulate: 'Vancouver', date: '2026-12-03' });
   });
   it('finds the earliest eligible candidate across the full list', () => {
     expect(earliestCandidate(['2026-12-30', '2026-10-01', '2026-11-11', '2026-11-16'], null, prefs)).toBe('2026-11-16');

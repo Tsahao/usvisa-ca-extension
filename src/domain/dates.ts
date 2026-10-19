@@ -59,7 +59,10 @@ export function inWindow(value: string, prefs: DatePreferences): boolean {
 
 export function canBook(value: string, currentDate: string | null, prefs: DatePreferences): boolean {
   if (currentDate !== null && !isIsoDate(currentDate)) return false;
-  return inWindow(value, prefs) && (!prefs.onlyEarlier || currentDate === null || value < currentDate);
+  // The current date is never a move, whatever the earlier-only setting: at
+  // another consulate it would be a pointless swap that verification (dates
+  // only) cannot distinguish from no change.
+  return inWindow(value, prefs) && value !== currentDate && (!prefs.onlyEarlier || currentDate === null || value < currentDate);
 }
 
 export function earliestCandidate(dates: string[], currentDate: string | null, prefs: DatePreferences): string | null {
