@@ -1391,6 +1391,20 @@ describe('read-only probe boundaries', () => {
       expect(JSON.stringify(stored.engineDiagnosticsV1 ?? null)).not.toMatch(/Halifax|Toronto|2026-11-18|2026-12-02/);
     });
 
+    it('keeps notifying later consulates when an earlier notification fails', async () => {
+      await bindAlerts(['Toronto', 'Halifax']);
+      stored.unpaidMonitorV1 = { scopeKey: SCOPE, monitors: {} };
+      summary({ Halifax: 'November 18, 2026', Toronto: 'December 2, 2026' });
+      chromeMock.notifications.create.mockRejectedValueOnce(new Error('synthetic notification failure'));
+      alarmed({ name: 'enginePoll' });
+      await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ consecutiveFailures: 1 }));
+      expect(chromeMock.notifications.create.mock.calls.map((call: unknown[]) => (call[0] as { message: string }).message)).toEqual([
+        'New date available: 2026-11-18 (Halifax)', 'New date available: 2026-12-02 (Toronto)']);
+      const slot = stored.unpaidMonitorV1 as any;
+      expect(slot.monitors.Halifax.alert).toMatchObject({ observed: '2026-11-18', delivered: null, pending: true });
+      expect(slot.monitors.Toronto.alert).toMatchObject({ observed: '2026-12-02', delivered: '2026-12-02', pending: false });
+    });
+
     it.each([[[]], [['Atlantis']], [null]])('parks an empty or invalid selection (%j) without reading', async consulates => {
       await bindAlerts(consulates);
       summary({ Halifax: 'November 18, 2026' });

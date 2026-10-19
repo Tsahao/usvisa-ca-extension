@@ -1748,18 +1748,30 @@ function queueEnginePoll(): void {
             for (const { consulate } of observed)
               void dateHistory.observe(state, consulate, reading.rows.find(row => row.city === consulate)?.date ?? null, stamped);
             analytics?.activated(state, reading.rows.length);
+            // Each consulate's delivery is independent: a failed creation
+            // leaves that monitor pending (re-owed next cycle) without
+            // blocking the others, then the cycle takes the retry path.
+            let deliveryFailed = false;
             for (const { consulate, alertDue } of observed) {
               if (!alertDue) continue;
               if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
-              // Acceptance records creation only, never proof of delivery.
-              await platform.notifications.create({
-                type: 'basic',
-                iconUrl: 'icons/icon128.png',
-                title: 'US Visa Scheduler for Canada',
-                message: `New date available: ${alertDue} (${consulate})`,
-              });
-              monitors = { ...monitors, [consulate]: acceptNotification(monitors[consulate]!, alertDue) };
-              await area.set({ unpaidMonitorV1: { scopeKey, monitors } satisfies MonitorSlot });
+              try {
+                // Acceptance records creation only, never proof of delivery.
+                await platform.notifications.create({
+                  type: 'basic',
+                  iconUrl: 'icons/icon128.png',
+                  title: 'US Visa Scheduler for Canada',
+                  message: `New date available: ${alertDue} (${consulate})`,
+                });
+                monitors = { ...monitors, [consulate]: acceptNotification(monitors[consulate]!, alertDue) };
+                await area.set({ unpaidMonitorV1: { scopeKey, monitors } satisfies MonitorSlot });
+              } catch {
+                deliveryFailed = true;
+              }
+            }
+            if (deliveryFailed) {
+              await failSoft();
+              return;
             }
             notePollRecovered(state, 'healthy');
             const next = applyPollResult(state, { outcome: 'healthy', now: stamped, random: Math.random });
