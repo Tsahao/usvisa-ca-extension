@@ -2003,8 +2003,30 @@ describe('read-only probe boundaries', () => {
         { consulate: 'Halifax', dates: [] }, { consulate: 'Toronto', dates: ['2026-12-03'] }]);
     });
 
-    it('retries the whole cycle once on a malformed days body', async () => {
+    it('drops a consulate with a malformed days body and proceeds on the others', async () => {
       const { engine } = await runCycle({ 90: { status: 200, body: { nope: true } }, 94: { status: 200, body: [{ date: '2026-12-03' }] } });
+      expect(engine).toMatchObject({ consecutiveFailures: 0, lastCandidate: { date: '2026-12-03', consulate: 'Toronto' } });
+      expect((stored.engineObservationV1 as { byConsulate: unknown }).byConsulate).toEqual([{ consulate: 'Toronto', dates: ['2026-12-03'] }]);
+      expect(stored.lastPollV1).toMatchObject({ status: 200, dayCount: 1 });
+    });
+
+    it('drops a consulate with a null days body', async () => {
+      const { engine } = await runCycle({ 90: { status: 200, body: [{ date: '2026-11-20' }] }, 94: { status: 200, body: null } });
+      expect(engine).toMatchObject({ consecutiveFailures: 0, lastCandidate: { date: '2026-11-20', consulate: 'Halifax' } });
+      expect((stored.engineObservationV1 as { byConsulate: unknown }).byConsulate).toEqual([{ consulate: 'Halifax', dates: ['2026-11-20'] }]);
+    });
+
+    it('retries the cycle once when every consulate returns a malformed days body', async () => {
+      const { engine } = await runCycle({ 90: { status: 200, body: { nope: true } }, 94: { status: 200, body: null } });
+      expect(engine).toMatchObject({ consecutiveFailures: 1, lastCandidate: null });
+      expect(stored.engineObservationV1).toBeUndefined();
+      expect(stored.lastPollV1).toBeUndefined();
+      const log = stored.engineDiagnosticsV1 as { entries: { code: string; detail?: string }[] } | undefined;
+      expect(log?.entries.filter(entry => entry.code === 'poll-retry').at(-1)).toMatchObject({ detail: 'reply-malformed' });
+    });
+
+    it('treats a mix of transport failures and malformed bodies as one malformed retry', async () => {
+      const { engine } = await runCycle({ 90: { status: 0 }, 94: { status: 200, body: { nope: true } } });
       expect(engine).toMatchObject({ consecutiveFailures: 1, lastCandidate: null });
       expect(stored.engineObservationV1).toBeUndefined();
     });

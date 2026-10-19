@@ -1983,20 +1983,29 @@ function queueEnginePoll(): void {
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
+        // Each consulate's 200 body is parsed on its own: a malformed body
+        // drops that consulate exactly like a transport failure (absent from
+        // byConsulate, not counted). Only when no consulate yields a valid
+        // payload does the cycle count one 'reply-malformed' retry; a mix of
+        // transport failures and malformed bodies lands here too, since at
+        // least one consulate answered with an unusable body.
         const byConsulate: { consulate: Consulate; dates: string[] }[] = [];
-        try {
-          for (const reply of answered) {
+        const usable: typeof answered = [];
+        for (const reply of answered) {
+          try {
             const dates = mapHttpStatus(reply.status) === 'not-modified' ? [] : parseDaysPayload(reply.body).map(entry => entry.date);
             byConsulate.push({ consulate: reply.consulate, dates });
-          }
-        } catch {
+            usable.push(reply);
+          } catch { /* Dropped from the answering set. */ }
+        }
+        if (usable.length === 0) {
           const next = pollRetry(state, 'reply-malformed');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
         const stamped = new Date().toISOString();
-        if (answered.every(reply => mapHttpStatus(reply.status) === 'not-modified')) {
+        if (usable.every(reply => mapHttpStatus(reply.status) === 'not-modified')) {
           notePollRecovered(state, 'not-modified');
           const next = applyPollResult(state, { outcome: 'not-modified', now: stamped, random: Math.random });
           await saveEngineState(area, next);
