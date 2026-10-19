@@ -66,10 +66,17 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
     ? preferences.consulates.map(consulate => ({ consulate, dates: DEMO_DATES[consulate] ? [DEMO_DATES[consulate] as string] : [] }))
     : data?.byConsulate ?? [];
   const consulateEarliest = (city: Consulate) => earliestObserved(byConsulate.find(entry => entry.consulate === city)?.dates ?? []);
-  let earliestHit: { consulate: Consulate; date: string } | null = null;
-  for (const entry of byConsulate) { const date = earliestObserved(entry.dates); if (date && (!earliestHit || date < earliestHit.date)) earliestHit = { consulate: entry.consulate, date }; }
-  // TODO(task 9): the Alerts panel lists all selections.
-  const cityDate = (city: Consulate | '') => simulated ? DEMO_DATES[city || 'Vancouver'] : data?.rows.find(row => row.city === city)?.date ?? null;
+  const cityDate = (city: Consulate) => simulated ? DEMO_DATES[city] ?? null : data?.rows.find(row => row.city === city)?.date ?? null;
+  // Earliest date across candidates; ties keep the first (CITIES order for Alerts).
+  const earliestAcross = (entries: { consulate: Consulate; date: string | null }[]) => {
+    let hit: { consulate: Consulate; date: string } | null = null;
+    for (const entry of entries) { const date = entry.date ? earliestObserved([entry.date]) : null; if (date && (!hit || date < hit.date)) hit = { consulate: entry.consulate, date }; }
+    return hit;
+  };
+  const selected = CITIES.filter(city => preferences.consulates.includes(city));
+  const earliestHit = run.mode === 'booking'
+    ? earliestAcross(byConsulate.map(entry => ({ consulate: entry.consulate, date: earliestObserved(entry.dates) })))
+    : earliestAcross(selected.map(consulate => ({ consulate, date: cityDate(consulate) })));
   const successMessage = { title: 'Appointment booked', detail: formatDate(simulated ? candidate : data?.confirmedDate ?? null), footer: 'Start again to look for an earlier date' };
   const message = title ? { title, detail: 'Check configurations', footer: 'Tap to retry' } : run.status === 'success' ? successMessage : null;
   const retrying = title !== null && !active;
@@ -84,11 +91,14 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
       </div> : <p className={styles.bookedDate}>{message.detail}</p>}
       {!title && run.status === 'success' && run.mode === 'booking' && <button className={`${styles.secondary} ${styles.coffeeLink}`} onClick={openCoffee}>Buy me a coffee?</button>}
     </div> : <>
-      <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : cityLabel(preferences.consulates[0] ?? '')}</h2><p>{!hasData ? NO_VALUE : run.mode === 'booking' ? (earliestHit ? `${formatDate(earliestHit.date)} · ${cityLabel(earliestHit.consulate)}` : NO_VALUE) : formatDate(cityDate(preferences.consulates[0] ?? ''))}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? NO_VALUE}</p></div></div>
+      <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : 'Selected consulates'}</h2><p>{!hasData ? NO_VALUE : earliestHit ? `${formatDate(earliestHit.date)} · ${cityLabel(earliestHit.consulate)}` : NO_VALUE}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? NO_VALUE}</p></div></div>
       {run.mode === 'booking' ? <>
         <Calendar key={simulated ? 'preview' : observed ?? 'empty'} available={hasData ? availability : []} initialMonth={simulated ? '2026-12' : observed?.slice(0, 7) ?? new Date().toISOString().slice(0, 7)} />
         <div className={`${styles.group} ${styles.consulates}`} role="list" aria-label="Selected consulate dates">{CITIES.filter(city => preferences.consulates.includes(city)).map(city => <div className={styles.row} role="listitem" key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData && consulateEarliest(city) ? formatDate(consulateEarliest(city)) : NO_VALUE}</span></div>)}</div>
-      </> : <div className={`${styles.group} ${styles.consulates}`} aria-label="Other consulate dates">{CITIES.filter(city => city !== preferences.consulates[0]).map(city => <div className={styles.row} key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : NO_VALUE}</span></div>)}</div>}
+      </> : <>
+        <div className={`${styles.group} ${styles.consulates}`} role="list" aria-label="Selected consulate dates">{selected.map(city => <div className={styles.row} role="listitem" key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : NO_VALUE}</span></div>)}</div>
+        <div className={`${styles.group} ${styles.consulates}`} role="list" aria-label="Other consulate dates">{CITIES.filter(city => !preferences.consulates.includes(city)).map(city => <div className={styles.row} role="listitem" key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : NO_VALUE}</span></div>)}</div>
+      </>}
     </>}
     </div>
     <button className={`${styles.runButton} ${active || title ? styles.red : styles.green}`} aria-label={`${active ? 'Stop' : run.status === 'idle' && !retrying ? 'Start' : 'Retry'}${simulated ? ' preview' : ''}`} onClick={() => void change(active ? 'idle' : 'running')}>

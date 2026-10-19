@@ -91,7 +91,7 @@ describe('Figma interface behavior', () => {
     await screen.findByRole('button', { name: 'Start preview' });
     await user.click(screen.getByRole('button', { name: 'Alerts' }));
     await user.click(screen.getByRole('button', { name: 'Start preview' }));
-    expect(screen.getByRole('heading', { name: 'Calgary' })).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Selected consulates' })).toBeDefined();
     const list = screen.getByLabelText('Other consulate dates');
     expect(list.children.length).toBe(6);
     expect(within(list).queryByText('Calgary')).toBeNull();
@@ -112,6 +112,25 @@ describe('Figma interface behavior', () => {
     expect(screen.getByText('Nov 26, 2026 · Toronto')).toBeDefined();
     const list = screen.getByLabelText('Selected consulate dates');
     expect(within(list).getAllByRole('listitem').map(li => li.textContent)).toEqual(['HalifaxJan 22, 2027', 'TorontoNov 26, 2026']);
+  });
+
+  it('splits alerts rows into selected and other consulates', async () => {
+    const user = await preview();
+    await user.click(screen.getByRole('button', { name: 'Open configuration' }));
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
+    await user.type(screen.getByLabelText('Password'), 'synthetic-password');
+    await user.click(screen.getByRole('checkbox', { name: 'Toronto' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Halifax' }));
+    await user.type(screen.getByLabelText('Earliest Acceptable'), '2026-11-01');
+    await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByRole('button', { name: 'Start preview' });
+    await user.click(screen.getByRole('button', { name: 'Alerts' }));
+    await user.click(screen.getByRole('button', { name: 'Start preview' }));
+    expect(screen.getByRole('heading', { name: 'Selected consulates' })).toBeDefined();
+    expect(within(screen.getByLabelText('Selected consulate dates')).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(screen.getByLabelText('Other consulate dates')).getAllByRole('listitem')).toHaveLength(5);
+    expect(screen.getByText('Nov 26, 2026 · Toronto')).toBeDefined();
   });
 
   it.each(['Scheduling Visa fee paid', 'View dates Visa fee unpaid'])('opens and starts %s without terms acknowledgement', async entry => {
