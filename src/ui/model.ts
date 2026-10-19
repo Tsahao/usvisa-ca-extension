@@ -1,8 +1,8 @@
-import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
+import { CONSULATE_ORDER, isIsoDate, type Consulate } from '../domain/dates';
 import { readAutoMode } from '../domain/auto-mode';
 
 export const TERMS_VERSION = 'ui-preview-1';
-export const CITIES = Object.keys(CONSULATES) as Consulate[];
+export const CITIES: Consulate[] = [...CONSULATE_ORDER];
 export type Mode = 'booking' | 'alerts';
 export type RunStatus = 'idle' | 'running' | 'success' | 'failure';
 export type Preferences = {

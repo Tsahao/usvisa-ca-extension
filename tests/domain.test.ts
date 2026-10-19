@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyRoute } from '../src/domain/routes';
-import { canBook, earliestCandidate, isIsoDate, parseLongDateUs, type DatePreferences } from '../src/domain/dates';
+import { canBook, earliestCandidate, earliestCandidateAcross, selectedConsulates, isIsoDate, parseLongDateUs, type DatePreferences } from '../src/domain/dates';
 import { emptyAlertState, notificationAccepted, observeDate } from '../src/domain/alerts';
 import { DEFAULT_ADVANCED, EMPTY_PREFERENCES } from '../src/ui/model';
 
@@ -103,5 +103,30 @@ describe('selected-consulate alert transitions', () => {
     const state = observeDate(emptyAlertState(), '2026-11-20', prefs, true);
     expect(() => observeDate(state, 'tomorrow', prefs, true)).toThrow();
     expect(state.observed).toBe('2026-11-20');
+  });
+});
+
+describe('consulate selections', () => {
+  it('orders, dedupes and migrates selections', () => {
+    expect(selectedConsulates({ consulates: ['Toronto', 'Halifax', 'Toronto'] })).toEqual(['Halifax', 'Toronto']);
+    expect(selectedConsulates({ consulate: 'Toronto' })).toEqual(['Toronto']);
+    expect(selectedConsulates({ consulate: '' })).toEqual([]);
+    expect(selectedConsulates({ consulates: [] })).toEqual([]);
+    expect(selectedConsulates({ consulates: ['Paris'] })).toBeNull();
+    expect(selectedConsulates({})).toBeNull();
+    expect(selectedConsulates(undefined)).toBeNull();
+  });
+  it('picks the earliest eligible date across consulates, ties by order', () => {
+    const prefs = { earliest: '2026-11-01', latest: '2026-12-31', exclusions: [], onlyEarlier: true };
+    expect(earliestCandidateAcross([
+      { consulate: 'Toronto', dates: ['2026-12-03', '2027-01-04'] },
+      { consulate: 'Halifax', dates: ['2026-11-20'] },
+    ], '2028-04-18', prefs)).toEqual({ date: '2026-11-20', consulate: 'Halifax' });
+    expect(earliestCandidateAcross([
+      { consulate: 'Toronto', dates: ['2026-11-20'] },
+      { consulate: 'Halifax', dates: ['2026-11-20'] },
+    ], '2028-04-18', prefs)).toEqual({ date: '2026-11-20', consulate: 'Toronto' });
+    expect(earliestCandidateAcross([{ consulate: 'Toronto', dates: ['2027-01-04'] }], '2028-04-18', prefs)).toBeNull();
+    expect(earliestCandidateAcross([], '2028-04-18', prefs)).toBeNull();
   });
 });
