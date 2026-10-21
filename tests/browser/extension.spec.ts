@@ -59,7 +59,8 @@ test('packaged extension local preferences, isolated frame and browser restart',
         rows: ['Calgary', 'Halifax', 'Montreal', 'Ottawa', 'Quebec', 'Toronto', 'Vancouver'].map(city => ({ city, date: city === 'Vancouver' ? '2026-11-20' : null })),
       } });
     });
-    await expect(frame.getByText('Nov 20, 2026', { exact: true })).toBeVisible();
+    await expect(frame.getByRole('heading', { name: 'Vancouver', exact: true }).locator('..').locator('p')).toHaveText('Nov 20, 2026');
+    await expect(frame.getByRole('list', { name: 'Consulate dates', exact: true }).getByRole('listitem').filter({ hasText: 'Vancouver' })).toHaveText('VancouverNov 20, 2026');
     await host.evaluate(mountPanel, `chrome-extension://${extensionId}/panel.html?embedded=1`);
     await expect(host.locator('iframe')).toBeHidden();
     await host.evaluate(mountPanel, `chrome-extension://${extensionId}/panel.html?embedded=1`);

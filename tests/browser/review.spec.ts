@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { bindGroup, emptyEngineState, startRun, type EngineState } from '../../src/engine/workflow';
 import { policyKey } from '../../src/engine/lifecycle';
-import type { MonitorState } from '../../src/domain/monitor';
+import type { MonitorSlot } from '../../src/domain/monitor';
 import type { Preferences } from '../../src/ui/model';
 
 const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01',
@@ -98,8 +98,10 @@ for (const scenario of ['gateway', 'settling', 'restart', 'alert-scope'] as cons
         await panel.getByRole('button', { name: 'Start', exact: true }).click();
         await expect(host).toHaveURL('https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment');
         await expect.poll(() => panel.evaluate(async () => ((await chrome.storage.local.get('engineObservationV1')).engineObservationV1 as { mode?: string } | undefined)?.mode)).toBe('alerts');
-        const slot = await panel.evaluate(async () => (await chrome.storage.local.get('unpaidMonitorV1')).unpaidMonitorV1 as { scopeKey: string; monitor: MonitorState });
-        expect(slot.scopeKey).toContain(':Toronto:'); expect(slot.monitor.baseline).toBeNull();
+        const slot = await panel.evaluate(async () => (await chrome.storage.local.get('unpaidMonitorV1')).unpaidMonitorV1 as MonitorSlot);
+        expect(slot.scopeKey).toContain(':Toronto:');
+        expect(Object.keys(slot.monitors)).toEqual(['Toronto']);
+        expect(slot.monitors.Toronto).toMatchObject({ scopeKey: `${slot.scopeKey}:Toronto`, baseline: null });
         await expect(panel.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
         expect(posts).toBe(0);
       }
