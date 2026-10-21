@@ -1,6 +1,7 @@
 // Timing and failure-budget core for steps 4–6. Pure and synthetic-only:
 // no live reads, no actions. Budgets follow the parity contract with one
 // live calibration: session age defaults to 60 minutes (observed), not 90.
+import { selectedConsulates } from './dates';
 
 export const POLL_INTERVAL_S = 60;
 export const POLL_JITTER_S = 30;
@@ -16,6 +17,12 @@ export const SETUP_FAILURE_COOLDOWN_AFTER = 10;
 // wake) with the durable alarm as the suspension fallback.
 export const VERIFICATION_READ_GAP_S = 2;
 export const STAGE_PACE_S = 30;
+
+// One 30-second allowance per selected consulate, in either workflow. An
+// empty/invalid selection is rejected separately; keep its input floor at 30s.
+export function minimumPollIntervalSeconds(preferences: unknown): number {
+  return Math.max(1, selectedConsulates(preferences)?.length ?? 0) * 30;
+}
 
 export type HttpOutcome = 'ok' | 'not-modified' | 'retryable' | 'denied';
 

@@ -16,11 +16,17 @@ or the official scheduling provider.
   you get one desktop notification per selected consulate whose date changes,
   such as `New date available: {date} ({consulate})`. This mode never pays or
   books.
-- **Multiple consulates:** pick any set in preferences. The panel lists each
-  selected consulate with its date, and View Logs history names the consulate.
-  Each check reads every selected consulate, so with more than two selected,
-  consider a longer checking interval. Existing single-consulate settings
-  migrate automatically.
+- **Multiple consulates:** pick one or more cities from the checkmark menu in
+  preferences. Book combines selected cities' dates in one calendar. Alerts
+  lists all seven cities and shows the earliest date among your selections.
+  View Logs history names the city alongside each date.
+  The minimum checking interval is 30 seconds per selected consulate (for
+  example, two cities require at least 60 seconds). Automatic increases remember
+  the previous interval and reduce back toward it as cities are deselected.
+  Manually editing the interval replaces that remembered choice; the current
+  minimum still applies.
+  This memory survives saving and reopening Settings. Existing single-consulate
+  settings migrate automatically.
 - **Auto Mode:** a visible **Login and preferences** setting, defaulting **ON**.
   In Book, ON automatically books a matching slot; OFF keeps refreshing
   availability and updating the panel, and sends a desktop notification for a

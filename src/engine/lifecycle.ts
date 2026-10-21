@@ -1,4 +1,4 @@
-import { SESSION_AGE_MINUTES } from '../domain/timing';
+import { minimumPollIntervalSeconds, SESSION_AGE_MINUTES } from '../domain/timing';
 import { parkForReview, type EngineState } from './workflow';
 import { readAutoMode } from '../domain/auto-mode';
 import { selectedConsulates } from '../domain/dates';
@@ -19,7 +19,9 @@ export function reviewLifecycle(state: EngineState, preferences: Record<string, 
   const elapsed = state.startedAt === null ? Infinity : Date.parse(now) - Date.parse(state.startedAt);
   const key = policyKey(preferences);
   const interval = preferences?.interval ?? 60;
-  if (!Number.isInteger(interval) || (interval as number) < 30 || (interval as number) > 86400) return parkForReview(state, now);
+  const minimumInterval = minimumPollIntervalSeconds(preferences);
+  if (!Number.isInteger(interval) || (interval as number) < minimumInterval || (interval as number) > 86400 ||
+      (state.policyKey !== null && state.pollIntervalS < minimumInterval)) return parkForReview(state, now);
   if (elapsed < 0 || elapsed >= SESSION_AGE_MINUTES * 60_000 || (state.policyKey !== null && state.policyKey !== key))
     return parkForReview(state, now);
   return state.policyKey === null ? { ...state, policyKey: key, pollIntervalS: interval as number, updatedAt: now } : state;

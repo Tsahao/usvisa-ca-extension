@@ -34,7 +34,8 @@ test('Settings waits for field completion instead of warning ahead of the user',
   await expect(alert).toHaveCount(0);
   await page.getByLabel('Password', { exact: true }).fill('synthetic-password');
   await expect(alert).toHaveCount(0);
-  await page.getByLabel('Consulate', { exact: true }).selectOption('Calgary');
+  await page.getByRole('button', { name: 'Consulate', exact: true }).click();
+  await page.getByRole('menuitemcheckbox', { name: 'Calgary' }).click();
   await expect(alert).toHaveCount(0);
   await page.getByLabel('Earliest Acceptable').fill('2026-11-01');
   await page.getByLabel('Latest Acceptable').focus();
@@ -136,7 +137,7 @@ test('Figma screens, assets and responsive panel', async ({ page }) => {
   await page.getByRole('button', { name: 'Stop preview' }).click();
   await page.getByLabel('Preview workflow').selectOption('alerts');
   await page.getByLabel('Preview scenario').selectOption('running');
-  await expect(page.getByLabel('Other consulate dates').locator(':scope > div')).toHaveCount(6);
+  await expect(page.getByLabel('Consulate dates').locator(':scope > div')).toHaveCount(7);
   await expect(page.getByRole('heading', { name: 'Vancouver', exact: true })).toBeVisible();
   await capture('alerts');
   for (const status of ['success', 'failure:generic']) {

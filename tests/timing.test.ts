@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CONSULATE_ORDER } from '../src/domain/dates';
 import {
   cooldownUntilSeconds,
   COOLDOWN_S,
@@ -6,6 +7,7 @@ import {
   failureRetryDelaySeconds,
   isSessionStale,
   mapHttpStatus,
+  minimumPollIntervalSeconds,
   PAID_EMPTY_COOLDOWN_AFTER,
   pollDelaySeconds,
   refundFailures,
@@ -14,6 +16,15 @@ import {
 } from '../src/domain/timing';
 
 describe('timing and failure budgets', () => {
+  it.each([1, 2, 3, 4, 5, 6, 7])('requires 30 seconds per selected consulate (%s)', count => {
+    expect(minimumPollIntervalSeconds({ consulates: CONSULATE_ORDER.slice(0, count) })).toBe(count * 30);
+  });
+  it('counts unique selections, supports legacy preferences, and keeps a 30-second empty input floor', () => {
+    expect(minimumPollIntervalSeconds({ consulates: ['Calgary', 'Calgary', 'Toronto'] })).toBe(60);
+    expect(minimumPollIntervalSeconds({ consulate: 'Vancouver' })).toBe(30);
+    expect(minimumPollIntervalSeconds({ consulates: [] })).toBe(30);
+    expect(minimumPollIntervalSeconds(undefined)).toBe(30);
+  });
   it('allows a 30-second minimum with unchanged jitter for healthy polls and retries', () => {
     expect(pollDelaySeconds(() => 0, 30)).toBe(30);
     expect(pollDelaySeconds(() => 0.9999, 30)).toBe(60);

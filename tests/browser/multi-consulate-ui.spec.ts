@@ -1,0 +1,54 @@
+import { expect, test } from '@playwright/test';
+
+test('Figma multi-consulate controls retain the fixed workflow layout', async ({ page }) => {
+  await page.goto('/');
+  const panel = page.getByRole('region', { name: 'US Visa Scheduler for Canada' });
+  await page.getByRole('button', { name: 'Fill synthetic preferences' }).click();
+  await page.getByRole('button', { name: 'Open configuration' }).click();
+  const selector = panel.getByRole('button', { name: 'Consulate', exact: true });
+  await selector.click();
+  await panel.getByRole('menuitemcheckbox', { name: 'Vancouver' }).click();
+  await expect(selector).toHaveText('Select');
+  await expect(panel.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  const cities = ['Calgary', 'Halifax', 'Ottawa', 'Toronto', 'Vancouver', 'Montreal', 'Quebec City'];
+  for (const city of cities) {
+    await panel.getByRole('menuitemcheckbox', { name: city, exact: true }).click();
+    await expect(panel.getByRole('menu')).toBeVisible();
+  }
+  await expect(selector).toHaveText('7 Selected');
+  await expect(selector).not.toHaveAttribute('title');
+  await expect(panel.getByRole('menuitemcheckbox', { checked: true })).toHaveCount(7);
+  await page.keyboard.press('Escape');
+  await expect(selector).toBeFocused();
+  await panel.getByRole('button', { name: 'Advanced', exact: true }).click();
+  const interval = panel.getByLabel('Checking interval (s)');
+  await expect(interval).toHaveAttribute('min', '210');
+  await expect(interval).toHaveValue('210');
+  await interval.fill('209');
+  await expect(panel.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await panel.getByRole('button', { name: 'Reset Advanced' }).click();
+  await expect(interval).toHaveValue('210');
+  await panel.getByRole('button', { name: 'Save', exact: true }).click();
+  await panel.getByRole('button', { name: 'Start preview' }).click();
+  const calendar = panel.getByLabel('Appointment availability calendar');
+  const scroll = calendar.locator('..');
+  await expect(scroll).toHaveCSS('overflow-y', 'hidden');
+  expect(await scroll.evaluate(node => node.scrollHeight - node.clientHeight)).toBe(0);
+  await expect(panel.getByRole('list')).toHaveCount(0);
+  await expect(panel.getByRole('heading', { name: 'Earliest Available' }).locator('..')).toHaveText('Earliest AvailableNov 26, 2026');
+  await panel.getByRole('button', { name: 'Stop preview' }).click();
+  await panel.getByRole('button', { name: 'Alerts', exact: true }).click();
+  await panel.getByRole('button', { name: 'Start preview' }).click();
+  const list = panel.getByRole('list', { name: 'Consulate dates' });
+  await expect(list.getByRole('listitem').locator('span:first-child')).toHaveText(cities);
+  expect(await list.locator('..').evaluate(node => node.scrollHeight - node.clientHeight)).toBe(0);
+  await expect(panel.getByRole('heading', { name: 'Earliest in selected' }).locator('..')).toHaveText('Earliest in selectedNov 19, 2026');
+  expect((await list.boundingBox())!.y + (await list.boundingBox())!.height).toBeLessThan((await panel.getByRole('button', { name: 'Stop preview' }).boundingBox())!.y);
+  await page.getByLabel('Preview date history').selectOption('history');
+  await panel.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Consulate', exact: true })).toBeDisabled();
+  await panel.getByRole('button', { name: 'Advanced', exact: true }).click();
+  await panel.getByRole('button', { name: 'View Logs' }).click();
+  const rows = panel.getByRole('table', { name: 'Date change history' }).getByRole('row');
+  expect(await rows.evaluateAll(rows => rows.every(row => row.children.length === 3 && row.getBoundingClientRect().height === 44 && Array.from(row.children).every(cell => cell.scrollWidth <= cell.clientWidth)))).toBe(true);
+});

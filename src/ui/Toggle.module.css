@@ -1,0 +1,7 @@
+/* Figma 55:60970 / mini switch: 36×16 track, 21×13 capsule thumb.
+   Keep geometry here so onboarding and every Settings toggle stay identical. */
+.control { appearance: none; display: block; flex: 0 0 36px; width: 36px; height: 16px; margin: 0; padding: 0; border: 0; border-radius: 100px; background: rgba(0, 0, 0, 0.085); position: relative; cursor: pointer; transition: background-color .15s; }
+.control::after { content: ''; position: absolute; width: 21px; height: 13px; left: 2px; top: 1.5px; border-radius: 100px; background: #fff; box-shadow: 0 3px 36px rgba(0, 0, 0, 0.05); }
+.control:checked { background: #0088ff; }
+.control:checked::after { left: 13px; }
+.control:disabled { cursor: default; }

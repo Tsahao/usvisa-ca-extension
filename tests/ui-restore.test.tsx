@@ -36,6 +36,57 @@ const idleSnapshot = (mode: string): Record<string, unknown> =>
   ({ mode, status: 'idle', reviewRequired: false, dates: [], rows: [], checkedAt: null, currentDate: null, confirmedDate: null });
 
 describe('paid/unpaid workflow retention', () => {
+  it.each([false, true])('preserves automatic interval memory across save/reopen and honors a later manual edit (%s)', async manual => {
+    const { localState } = stubExtension({ snapshot: idleSnapshot('booking') });
+    const { App } = await import('../src/ui/App');
+    const user = userEvent.setup();
+    const first = render(<App />);
+    await screen.findByRole('button', { name: 'Start' });
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(localState.uiPreferencesV1).toMatchObject({ interval: 90, intervalBeforeAutoIncrease: 60 });
+    first.unmount();
+    render(<App />);
+    await screen.findByRole('button', { name: 'Start' });
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    const interval = screen.getByLabelText('Checking interval (s)') as HTMLInputElement;
+    expect(interval.value).toBe('90');
+    if (manual) {
+      await user.clear(interval);
+      await user.type(interval, '120');
+    }
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    expect(interval.value).toBe(manual ? '120' : '60');
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(localState.uiPreferencesV1).toMatchObject({ interval: manual ? 120 : 60 });
+    expect(localState.uiPreferencesV1).not.toHaveProperty('intervalBeforeAutoIncrease');
+  });
+
+  it('shows the union of selected-consulate dates in one live calendar with a date-only earliest', async () => {
+    stubExtension({ preferences: { ...DEMO_PREFERENCES, consulates: ['Calgary', 'Vancouver'] }, snapshot: {
+      ...idleSnapshot('booking'), status: 'running', checkedAt: '2026-10-21T12:00:00Z',
+      dates: ['2027-01-01', '2027-01-02'], byConsulate: [
+        { consulate: 'Vancouver', dates: ['2027-01-01'] },
+        { consulate: 'Calgary', dates: ['2027-01-01', '2027-01-02'] },
+      ],
+    } });
+    const { App } = await import('../src/ui/App');
+    render(<App />);
+    await screen.findByRole('button', { name: 'Stop' });
+    const calendar = screen.getByLabelText('Appointment availability calendar');
+    expect(within(calendar).getByLabelText('2027-01-01, available')).not.toBeNull();
+    expect(within(calendar).getByLabelText('2027-01-02, available')).not.toBeNull();
+    expect(screen.getByRole('heading', { name: 'Earliest Available' }).parentElement?.lastChild?.textContent).toBe('Jan 1, 2027');
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
   it.each([true, false])('migrates saved Test Mode %s to inverse Auto Mode and saves only the new preference', async testMode => {
     const { autoMode: _autoMode, ...legacy } = DEMO_PREFERENCES;
     const { localState } = stubExtension({ preferences: { ...legacy, testMode }, snapshot: idleSnapshot('booking') });

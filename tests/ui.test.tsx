@@ -84,53 +84,61 @@ describe('Figma interface behavior', () => {
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
-    await user.click(screen.getByRole('checkbox', { name: 'Calgary' }));
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
     await user.type(screen.getByLabelText('Earliest Acceptable'), '2026-11-01');
     await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await screen.findByRole('button', { name: 'Start preview' });
     await user.click(screen.getByRole('button', { name: 'Alerts' }));
     await user.click(screen.getByRole('button', { name: 'Start preview' }));
-    expect(screen.getByRole('heading', { name: 'Selected consulates' })).toBeDefined();
-    const list = screen.getByLabelText('Other consulate dates');
-    expect(list.children.length).toBe(6);
-    expect(within(list).queryByText('Calgary')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Calgary' })).toBeDefined();
+    const list = screen.getByLabelText('Consulate dates');
+    expect(list.children.length).toBe(7);
+    expect(within(list).getByText('Calgary')).toBeDefined();
     expect(within(list).getByText('Vancouver')).toBeDefined();
   });
 
-  it('labels the earliest date with its consulate and lists selected consulates', async () => {
+  it('shows a date-only booking statistic and one combined calendar without a consulate list', async () => {
     const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
-    await user.click(screen.getByRole('checkbox', { name: 'Toronto' }));
-    await user.click(screen.getByRole('checkbox', { name: 'Halifax' }));
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Toronto' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
     await user.type(screen.getByLabelText('Earliest Acceptable'), '2026-11-01');
     await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await user.click(await screen.findByRole('button', { name: 'Start preview' }));
-    expect(screen.getByText('Nov 26, 2026 · Toronto')).toBeDefined();
-    const list = screen.getByLabelText('Selected consulate dates');
-    expect(within(list).getAllByRole('listitem').map(li => li.textContent)).toEqual(['HalifaxJan 22, 2027', 'TorontoNov 26, 2026']);
+    expect(screen.getByText('Nov 26, 2026')).toBeDefined();
+    expect(screen.queryByRole('list')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Previous month' }));
+    expect(screen.getByLabelText('2026-11-26, available')).toBeDefined();
+    await user.click(screen.getByRole('button', { name: 'Next month' }));
+    await user.click(screen.getByRole('button', { name: 'Next month' }));
+    expect(screen.getByLabelText('2027-01-22, available')).toBeDefined();
   });
 
-  it('splits alerts rows into selected and other consulates', async () => {
+  it('shows all seven alerts rows in Figma order and a date-only earliest in selected', async () => {
     const user = await preview();
     await user.click(screen.getByRole('button', { name: 'Open configuration' }));
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'preview@example.invalid');
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
-    await user.click(screen.getByRole('checkbox', { name: 'Toronto' }));
-    await user.click(screen.getByRole('checkbox', { name: 'Halifax' }));
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Toronto' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
     await user.type(screen.getByLabelText('Earliest Acceptable'), '2026-11-01');
     await user.type(screen.getByLabelText('Latest Acceptable'), '2027-12-31');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await screen.findByRole('button', { name: 'Start preview' });
     await user.click(screen.getByRole('button', { name: 'Alerts' }));
     await user.click(screen.getByRole('button', { name: 'Start preview' }));
-    expect(screen.getByRole('heading', { name: 'Selected consulates' })).toBeDefined();
-    expect(within(screen.getByLabelText('Selected consulate dates')).getAllByRole('listitem')).toHaveLength(2);
-    expect(within(screen.getByLabelText('Other consulate dates')).getAllByRole('listitem')).toHaveLength(5);
-    expect(screen.getByText('Nov 26, 2026 · Toronto')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Earliest in selected' })).toBeDefined();
+    const rows = within(screen.getByLabelText('Consulate dates')).getAllByRole('listitem');
+    expect(rows.map(row => row.firstChild?.textContent)).toEqual(['Calgary', 'Halifax', 'Ottawa', 'Toronto', 'Vancouver', 'Montreal', 'Quebec City']);
+    const earliest = screen.getByRole('heading', { name: 'Earliest in selected' }).parentElement!;
+    expect(earliest.lastChild?.textContent).toBe('Nov 26, 2026');
   });
 
   it.each(['Scheduling Visa fee paid', 'View dates Visa fee unpaid'])('opens and starts %s without terms acknowledgement', async entry => {

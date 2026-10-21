@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
-import { preferenceIssues, type Preferences } from './model';
+import { preferenceIssues, updatePreference, withMinimumInterval, type Preferences } from './model';
 import { PreferenceFields } from './PreferenceFields';
 import panel from './Panel.module.css';
 import styles from './HomeScreen.module.css';
@@ -11,13 +11,13 @@ export function HomeScreen({ preferences, signIn, openTerms, active = false }: {
   openTerms: () => void;
   active?: boolean;
 }) {
-  const [draft, setDraft] = useState(() => structuredClone(preferences));
+  const [draft, setDraft] = useState(() => withMinimumInterval(structuredClone(preferences)));
   const [saving, setSaving] = useState(false);
   const submitting = useRef(false);
   const [error, setError] = useState('');
   const [completed, setCompleted] = useState<Partial<Record<keyof Preferences, boolean>>>({});
   const [focused, setFocused] = useState<keyof Preferences | null>(null);
-  useEffect(() => { setDraft(structuredClone(preferences)); setCompleted({}); setFocused(null); setError(''); }, [preferences]);
+  useEffect(() => { setDraft(withMinimumInterval(structuredClone(preferences))); setCompleted({}); setFocused(null); setError(''); }, [preferences]);
   const issues = preferenceIssues(draft);
   const invalid = !draft.email.trim() || issues.length > 0;
   const visibleIssue = issues.find(issue => issue.fields.every(field => completed[field] && focused !== field));
@@ -25,7 +25,7 @@ export function HomeScreen({ preferences, signIn, openTerms, active = false }: {
     onFocus: () => setFocused(field),
     onBlur: () => { setFocused(null); setCompleted(current => ({ ...current, [field]: true })); },
   });
-  const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => setDraft(current => ({ ...current, [key]: value }));
+  const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => setDraft(current => updatePreference(current, key, value));
   const submit = async () => {
     if (invalid || active || submitting.current) return;
     submitting.current = true; setSaving(true); setError('');
