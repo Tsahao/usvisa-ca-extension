@@ -8,9 +8,11 @@ import {
   setNextPoll,
   startRun,
   stopRun,
+  bindGroup,
   validateEngineState,
   type ConfirmationIntent,
 } from '../src/engine/workflow';
+import { recordCandidate } from '../src/engine/poll';
 import { validateEngineMessage } from '../src/engine/messages';
 import { loadEngineState, saveEngineState } from '../src/engine/storage';
 
@@ -113,7 +115,7 @@ describe('resumable engine', () => {
     expect(resolveVerification(verifying, { owner: OTHER, runId: RUN, outcome: 'previous-continue', now: LATER })).toEqual(
       verifying,
     );
-    const continued = resolveVerification({ ...verifying, stage: 'done', lastCandidate: '2026-12-01' }, {
+    const continued = resolveVerification({ ...verifying, stage: 'done', lastCandidate: { date: '2026-12-01', consulate: 'Vancouver' } }, {
       owner: OWNER,
       runId: RUN,
       outcome: 'previous-continue',
@@ -220,5 +222,29 @@ describe('resumable engine', () => {
       },
     };
     await expect(saveEngineState(failing, state)).rejects.toThrow();
+  });
+
+  it('clears legacy string candidates and validates consulate candidates', () => {
+    const saved = JSON.parse(JSON.stringify(emptyEngineState(NOW)));
+    const executor = { tabId: 7, applicantIds: null, targetTime: null, actionPending: false };
+    expect(validateEngineState({ ...saved, lastCandidate: '2026-11-19' }).lastCandidate).toBeNull();
+    expect(validateEngineState({ ...saved, lastCandidate: { date: '2026-11-19', consulate: 'Halifax' } }).lastCandidate)
+      .toEqual({ date: '2026-11-19', consulate: 'Halifax' });
+    expect(() => validateEngineState({ ...saved, lastCandidate: { date: '2026-11-19', consulate: 'Paris' } })).toThrow('Invalid engine state.');
+    expect(() => validateEngineState({ ...saved, lastCandidate: { date: 'nope', consulate: 'Halifax' } })).toThrow('Invalid engine state.');
+    expect(validateEngineState({ ...saved, executor: { ...executor, skippedDates: ['2026-11-19', { consulate: 'Toronto', date: '2026-11-20' }] } })
+      .executor!.skippedDates).toEqual([{ consulate: 'Toronto', date: '2026-11-20' }]);
+    expect(() => validateEngineState({ ...saved, executor: { ...executor, skippedDates: [{ consulate: 'Toronto', date: '2026-11-20' }, { consulate: 'Toronto', date: '2026-11-20' }] } }))
+      .toThrow('Invalid executor state.');
+    expect(() => validateEngineState({ ...saved, executor: { ...executor, skippedDates: [{ consulate: 'Paris', date: '2026-11-20' }] } }))
+      .toThrow('Invalid executor state.');
+  });
+
+  it('records consulate candidates only while running', () => {
+    const started = startRun(emptyEngineState(NOW), { mode: 'booking', owner: OWNER, runId: RUN, now: NOW });
+    const running = bindGroup(started, { owner: OWNER, runId: RUN, binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null }, now: NOW });
+    expect(recordCandidate(running, { date: '2026-11-19', consulate: 'Halifax' }, NOW).lastCandidate).toEqual({ date: '2026-11-19', consulate: 'Halifax' });
+    expect(() => recordCandidate(running, { date: '2026-11-19', consulate: 'Paris' as never }, NOW)).toThrow('Invalid candidate consulate.');
+    expect(() => recordCandidate(running, { date: 'bad', consulate: 'Halifax' }, NOW)).toThrow('Invalid candidate date.');
   });
 });

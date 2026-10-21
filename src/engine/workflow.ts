@@ -2,7 +2,7 @@ import { isPanelCommandErrorMessage } from './start-errors';
 import { isAuthenticationFailureReason, type AuthenticationFailureReason } from '../domain/diagnostics';
 import { emptyAlertState, type AlertState } from '../domain/alerts';
 import { validateApplicantIds } from '../domain/applicants';
-import { isIsoDate } from '../domain/dates';
+import { CONSULATES, isIsoDate, type Consulate, type ConsulateCandidate } from '../domain/dates';
 import { validateGroupBinding, type GroupBinding } from '../domain/groups';
 import { isDashboardFeatures, type DashboardDiscovery } from '../domain/features';
 
@@ -64,7 +64,7 @@ export type ExecutorState = {
   tabId: number;
   applicantIds: string[] | null;
   targetTime: string | null;
-  skippedDates: string[];
+  skippedDates: { consulate: Consulate; date: string }[];
   actionPending: boolean;
   loadingSince?: string;
 };
@@ -101,7 +101,7 @@ export type EngineState = {
   group: GroupBinding | null;
   consecutiveFailures: number;
   cooldownUntil: string | null;
-  lastCandidate: string | null;
+  lastCandidate: ConsulateCandidate | null;
   stage: string | null;
   executor: ExecutorState | null;
   monitorTabId: number | null;
@@ -275,8 +275,15 @@ export function validateEngineState(value: unknown): EngineState {
     throw new Error('Invalid engine state.');
   const cooldownUntil = state.cooldownUntil === undefined || state.cooldownUntil === null ? null : state.cooldownUntil;
   if (cooldownUntil !== null && !isIsoDateTime(cooldownUntil)) throw new Error('Invalid engine state.');
-  const lastCandidate = state.lastCandidate === undefined || state.lastCandidate === null ? null : state.lastCandidate;
-  if (lastCandidate !== null && !isIsoDate(lastCandidate as string)) throw new Error('Invalid engine state.');
+  // A legacy save stored the candidate as a bare date with no consulate; it
+  // cannot be acted on safely, so it is cleared and rediscovered by polling.
+  let lastCandidate: ConsulateCandidate | null = null;
+  if (state.lastCandidate !== undefined && state.lastCandidate !== null && typeof state.lastCandidate !== 'string') {
+    const candidate = state.lastCandidate as Partial<ConsulateCandidate>;
+    if (typeof candidate !== 'object' || typeof candidate.date !== 'string' || !isIsoDate(candidate.date) ||
+        typeof candidate.consulate !== 'string' || !Object.hasOwn(CONSULATES, candidate.consulate)) throw new Error('Invalid engine state.');
+    lastCandidate = { date: candidate.date, consulate: candidate.consulate };
+  } else if (typeof state.lastCandidate === 'string') lastCandidate = null;
   const stage = state.stage === undefined || state.stage === null ? null : state.stage;
   if (stage !== null && !['actions', 'warning', 'applicants', 'form', 'confirm', 'done'].includes(stage as string))
     throw new Error('Invalid engine state.');
@@ -288,11 +295,15 @@ export function validateEngineState(value: unknown): EngineState {
     if (!Number.isSafeInteger(value.tabId) || value.tabId < 0 || typeof value.actionPending !== 'boolean' ||
         !(value.targetTime === null || (typeof value.targetTime === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value.targetTime))))
       throw new Error('Invalid executor state.');
-    const skippedDates = value.skippedDates ?? [];
+    const rawSkipped: unknown = value.skippedDates ?? [];
     if (value.loadingSince !== undefined && !isIsoDateTime(value.loadingSince)) throw new Error('Invalid executor loading state.');
-    if (!Array.isArray(skippedDates) || skippedDates.length > 3660 || !skippedDates.every(isIsoDate) ||
-        new Set(skippedDates).size !== skippedDates.length) throw new Error('Invalid executor state.');
-    executor = { skippedDates: [...skippedDates], tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,
+    if (!Array.isArray(rawSkipped) || rawSkipped.length > 3660) throw new Error('Invalid executor state.');
+    // Legacy string entries have no consulate; drop them.
+    const skippedDates = rawSkipped.filter(entry => typeof entry !== 'string') as { consulate: Consulate; date: string }[];
+    if (!skippedDates.every(entry => entry !== null && typeof entry === 'object' && typeof entry.date === 'string' && isIsoDate(entry.date) &&
+          typeof entry.consulate === 'string' && Object.hasOwn(CONSULATES, entry.consulate)) ||
+        new Set(skippedDates.map(entry => `${entry.consulate}|${entry.date}`)).size !== skippedDates.length) throw new Error('Invalid executor state.');
+    executor = { skippedDates: skippedDates.map(({ consulate, date }) => ({ consulate, date })), tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,
       ...(value.loadingSince === undefined ? {} : { loadingSince: value.loadingSince }),
       applicantIds: value.applicantIds === null ? null : validateApplicantIds(value.applicantIds) };
   }
@@ -344,7 +355,7 @@ export function validateEngineState(value: unknown): EngineState {
     group,
     consecutiveFailures: consecutiveFailures as number,
     cooldownUntil: cooldownUntil as string | null,
-    lastCandidate: lastCandidate as string | null,
+    lastCandidate,
     stage: stage as string | null,
     executor,
     monitorTabId: monitorTabId as number | null,

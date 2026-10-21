@@ -1,4 +1,4 @@
-import { CONSULATES, isIsoDate } from '../domain/dates';
+import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
 import { validateSummaryReading } from '../domain/summary';
 import { panelFailureKind, type PanelFailureKind } from './panel-errors';
 import type { EngineState } from './workflow';
@@ -7,6 +7,7 @@ import type { DashboardFeatures } from '../domain/features';
 export type PanelSnapshot = {
   mode: 'booking' | 'alerts'; status: 'idle' | 'running' | 'success' | 'failure'; reviewRequired: boolean;
   dates: string[]; rows: { city: keyof typeof CONSULATES; date: string | null }[];
+  byConsulate: { consulate: Consulate; dates: string[] }[];
   checkedAt: string | null; currentDate: string | null; confirmedDate: string | null;
   manualAuthentication?: boolean;
   reviewMessage?: string;
@@ -19,7 +20,7 @@ export type PanelSnapshot = {
 
 export function panelSnapshot(state: EngineState | null, raw: unknown, success: unknown): PanelSnapshot {
   const snapshot: PanelSnapshot = { mode: state?.mode ?? 'booking', status: state?.status === 'running' || state?.verification?.nextReadAt || state?.authentication ? 'running' : 'idle',
-    reviewRequired: state?.status === 'verifying' || state?.manualAuthentication === true || !!state?.authenticationError || !!state?.verificationError, dates: [], rows: [], checkedAt: null, currentDate: state?.group?.currentDate ?? null, confirmedDate: null,
+    reviewRequired: state?.status === 'verifying' || state?.manualAuthentication === true || !!state?.authenticationError || !!state?.verificationError, dates: [], rows: [], byConsulate: [], checkedAt: null, currentDate: state?.group?.currentDate ?? null, confirmedDate: null,
     ...(state?.manualAuthentication ? { manualAuthentication: true } : {}) };
   if (state?.restartFailed) snapshot.restartFailed = true;
   if (state?.discovery?.features) snapshot.availableModes = state.discovery.features;
@@ -50,7 +51,19 @@ export function panelSnapshot(state: EngineState | null, raw: unknown, success: 
   try {
     if (state.mode === 'booking') {
       if (!Array.isArray(observation.dates) || !observation.dates.every(isIsoDate)) return snapshot;
+      const byConsulate = observation.byConsulate === undefined ? [] : observation.byConsulate;
+      if (!Array.isArray(byConsulate)) return snapshot;
+      const seen = new Set<string>();
+      const entries: PanelSnapshot['byConsulate'] = [];
+      for (const entry of byConsulate as unknown[]) {
+        const item = entry as { consulate?: unknown; dates?: unknown } | null;
+        if (!item || typeof item !== 'object' || typeof item.consulate !== 'string' || !Object.hasOwn(CONSULATES, item.consulate) || seen.has(item.consulate)
+          || !Array.isArray(item.dates) || !item.dates.every(isIsoDate)) return snapshot;
+        seen.add(item.consulate);
+        entries.push({ consulate: item.consulate as Consulate, dates: [...new Set(item.dates)] as string[] });
+      }
       snapshot.dates = [...new Set(observation.dates)] as string[];
+      snapshot.byConsulate = entries;
     } else snapshot.rows = validateSummaryReading({ heading: 'First Available Appointments', rows: observation.rows }).rows;
     snapshot.checkedAt = observation.checkedAt;
   } catch { return snapshot; }

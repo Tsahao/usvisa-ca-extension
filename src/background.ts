@@ -1,10 +1,10 @@
 import { platform, type InjectionResult, type Tab } from './platform';
 import { isBareAppointmentQuery, classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
-import { CONSULATES, earliestCandidate, validatePreferences } from './domain/dates';
+import { CONSULATES, earliestCandidateAcross, selectedConsulates, validatePreferences, type Consulate } from './domain/dates';
 import { parseDaysPayload } from './domain/availability';
 import { normalizeSummaryRaw } from './domain/summary';
-import { acceptNotification, monitorForScope, observeMonitorDate, observeSummary, resetBaseline, validateMonitorState } from './domain/monitor';
+import { acceptNotification, monitorForScope, monitorsForScope, observeMonitorDate, observeSummary, resetBaseline, type MonitorSlot } from './domain/monitor';
 import { mapHttpStatus, pollDelaySeconds } from './domain/timing';
 import { isSameGroupUrl } from './domain/trust';
 import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from './adapter/reads';
@@ -559,10 +559,12 @@ async function prepareAlertScope(area: import('./engine/storage').StorageArea, s
   const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
   if (!prefs || preferencesError(prefs) || policyKey(prefs as unknown as Record<string, unknown>) !== state.policyKey)
     throw new Error('Configuration changed.');
-  const scopeKey = `alerts:${state.group.scheduleId}:${prefs.consulate}:any:${prefs.earliest}:${prefs.latest}`;
+  const consulates = selectedConsulates(prefs);
+  if (!consulates?.length) throw new Error('Configuration changed.');
+  const scopeKey = `alerts:${state.group.scheduleId}:${consulates.join(',')}:any:${prefs.earliest}:${prefs.latest}`;
   const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1;
-  const monitor = monitorForScope(saved, scopeKey, true);
-  await area.set({ unpaidMonitorV1: { scopeKey, monitor } });
+  const slot: MonitorSlot = { scopeKey, monitors: monitorsForScope(saved, scopeKey, consulates, true) };
+  await area.set({ unpaidMonitorV1: slot });
 }
 
 async function attemptRestart(area: import('./engine/storage').StorageArea, state: import('./engine/workflow').EngineState) {
@@ -1272,18 +1274,19 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
         const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1 as
-          | { scopeKey?: unknown; monitor?: unknown }
+          | { scopeKey?: unknown; monitors?: unknown }
           | undefined;
-        if (!saved) {
+        if (!saved || typeof saved.scopeKey !== 'string') {
           respond({ ok: false });
           return;
         }
-        const monitor = validateMonitorState(saved.monitor);
-        if (saved.scopeKey !== monitor.scopeKey) {
-          respond({ ok: false });
-          return;
-        }
-        await area.set({ unpaidMonitorV1: { scopeKey: saved.scopeKey, monitor: resetBaseline(monitor) } });
+        // Validates the whole slot under its own scope (a legacy or malformed
+        // slot throws) and resets every stored monitor.
+        const consulates = Object.keys((saved.monitors ?? {}) as object) as Consulate[];
+        const current = monitorsForScope(saved, saved.scopeKey, consulates);
+        const monitors: MonitorSlot['monitors'] = {};
+        for (const consulate of consulates) monitors[consulate] = resetBaseline(current[consulate]!);
+        await area.set({ unpaidMonitorV1: { scopeKey: saved.scopeKey, monitors } satisfies MonitorSlot });
         respond({ ok: true });
       } catch {
         respond({ ok: false });
@@ -1354,7 +1357,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           get: (keys: string[]) => platform.storage.local.get(keys),
           set: (values: Record<string, unknown>) => platform.storage.local.set(values),
         };
-        const saved = await area.get([ENGINE_KEY, 'unpaidMonitorV1', 'lastPollV1']);
+        const saved = await area.get([ENGINE_KEY, 'unpaidMonitorV1', 'lastPollV1', 'uiPreferencesV1']);
         const state = saved[ENGINE_KEY] as
           | {
               status?: unknown;
@@ -1366,9 +1369,10 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
               stage?: unknown;
             }
           | undefined;
-        const slot = saved.unpaidMonitorV1 as
-          | { monitor?: { alert?: { pending?: unknown; delivered?: unknown }; baseline?: unknown; lastHealthyAt?: unknown } }
-          | undefined;
+        type ProbeMonitor = { alert?: { pending?: unknown; delivered?: unknown }; baseline?: unknown; lastHealthyAt?: unknown };
+        const slot = saved.unpaidMonitorV1 as { monitors?: Partial<Record<Consulate, ProbeMonitor>> } | undefined;
+        const first = selectedConsulates(saved.uiPreferencesV1)?.[0];
+        const monitor = first && slot?.monitors && typeof slot.monitors === 'object' ? slot.monitors[first] : undefined;
         const poll = saved.lastPollV1 as { status?: unknown; dayCount?: unknown; at?: unknown } | undefined;
         respond({
           ok: true,
@@ -1381,10 +1385,10 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           stage: state?.stage ?? null,
           lastPollStatus: typeof poll?.status === 'number' ? poll.status : null,
           lastPollDays: typeof poll?.dayCount === 'number' ? poll.dayCount : null,
-          monitorPending: slot?.monitor?.alert?.pending ?? null,
-          monitorDelivered: slot?.monitor?.alert?.delivered ?? null,
-          monitorBaseline: slot?.monitor?.baseline ?? null,
-          lastHealthyAt: slot?.monitor?.lastHealthyAt ?? null,
+          monitorPending: monitor?.alert?.pending ?? null,
+          monitorDelivered: monitor?.alert?.delivered ?? null,
+          monitorBaseline: monitor?.baseline ?? null,
+          lastHealthyAt: monitor?.lastHealthyAt ?? null,
         });
       } catch {
         respond({ ok: false });
@@ -1638,8 +1642,8 @@ function queueEnginePoll(): void {
             await syncEngineAlarm(engineAlarmAt(next));
           };
           const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
-          const consulate = prefs?.consulate;
-          if (typeof consulate !== 'string' || !(consulate in CONSULATES)) {
+          const consulates = selectedConsulates(prefs);
+          if (!consulates?.length) {
             await park();
             return;
           }
@@ -1720,35 +1724,54 @@ function queueEnginePoll(): void {
               await saveEngineState(area, state);
               noteDiagnostic('payment-inspection-resolved', { mode: state.mode });
             }
-            const scopeKey = `alerts:${scheduleId}:${consulate}:any:${windowPrefs.earliest}:${windowPrefs.latest}`;
-            const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1 as
-              | { scopeKey?: unknown; monitor?: unknown }
-              | undefined;
-            let monitor;
+            const scopeKey = `alerts:${scheduleId}:${consulates.join(',')}:any:${windowPrefs.earliest}:${windowPrefs.latest}`;
+            const saved = (await area.get(['unpaidMonitorV1'])).unpaidMonitorV1;
+            let monitors: MonitorSlot['monitors'];
             try {
-              monitor = monitorForScope(saved, scopeKey);
+              monitors = monitorsForScope(saved, scopeKey, consulates);
             } catch { await park(); return; }
-            const { state: advanced, alertDue } = observeSummary(monitor, reading, {
-              scopeKey,
-              consulate: consulate as keyof typeof CONSULATES,
-              prefs: windowPrefs,
-              rangeOnly: false,
-              now: stamped,
-            });
-            await area.set({ unpaidMonitorV1: { scopeKey, monitor: advanced } });
+            // Observe every selected consulate before any write: a missing
+            // row throws here and takes the malformed-summary path below.
+            const observed = consulates.map(consulate => ({
+              consulate,
+              ...observeSummary(monitors[consulate]!, reading, {
+                scopeKey: `${scopeKey}:${consulate}`,
+                consulate,
+                prefs: windowPrefs,
+                rangeOnly: false,
+                now: stamped,
+              }),
+            }));
+            for (const { consulate, state: advanced } of observed) monitors = { ...monitors, [consulate]: advanced };
+            await area.set({ unpaidMonitorV1: { scopeKey, monitors } satisfies MonitorSlot });
             await area.set({ engineObservationV1: { runId: state.runId, mode: state.mode, checkedAt: stamped, dates: [], rows: reading.rows } });
-            void dateHistory.observe(state, consulate, reading.rows.find(row => row.city === consulate)?.date ?? null, stamped);
+            for (const { consulate } of observed)
+              void dateHistory.observe(state, consulate, reading.rows.find(row => row.city === consulate)?.date ?? null, stamped);
             analytics?.activated(state, reading.rows.length);
-            if (alertDue) {
+            // Each consulate's delivery is independent: a failed creation
+            // leaves that monitor pending (re-owed next cycle) without
+            // blocking the others, then the cycle takes the retry path.
+            let deliveryFailed = false;
+            for (const { consulate, alertDue } of observed) {
+              if (!alertDue) continue;
               if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
-              // Acceptance records creation only, never proof of delivery.
-              await platform.notifications.create({
-                type: 'basic',
-                iconUrl: 'icons/icon128.png',
-                title: 'US Visa Scheduler for Canada',
-                message: `New date available: ${alertDue}`,
-              });
-              await area.set({ unpaidMonitorV1: { scopeKey, monitor: acceptNotification(advanced, alertDue) } });
+              try {
+                // Acceptance records creation only, never proof of delivery.
+                await platform.notifications.create({
+                  type: 'basic',
+                  iconUrl: 'icons/icon128.png',
+                  title: 'US Visa Scheduler for Canada',
+                  message: `New date available: ${alertDue} (${consulate})`,
+                });
+                monitors = { ...monitors, [consulate]: acceptNotification(monitors[consulate]!, alertDue) };
+                await area.set({ unpaidMonitorV1: { scopeKey, monitors } satisfies MonitorSlot });
+              } catch {
+                deliveryFailed = true;
+              }
+            }
+            if (deliveryFailed) {
+              await failSoft();
+              return;
             }
             notePollRecovered(state, 'healthy');
             const next = applyPollResult(state, { outcome: 'healthy', now: stamped, random: Math.random });
@@ -1791,11 +1814,12 @@ function queueEnginePoll(): void {
         };
         if (state.mode !== 'booking') return;
         const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
-        const consulate = prefs?.consulate;
+        // Every selected consulate is polled once per cycle, in selection order.
+        const consulates = selectedConsulates(prefs);
         const earliest = prefs?.earliest;
         const latest = prefs?.latest;
         const onlyEarlier = prefs?.onlyEarlier === true;
-        if (typeof consulate !== 'string' || !(consulate in CONSULATES)) {
+        if (consulates === null || consulates.length === 0) {
           await park();
           return;
         }
@@ -1916,55 +1940,79 @@ function queueEnginePoll(): void {
           return;
         }
         const schedulePath = `/en-ca/niv/schedule/${scheduleId}/appointment`;
-        let status = 0;
-        let body: unknown = null;
-        try {
-          const results = await platform.scripting.executeScript({
-            target: { tabId: reader.id },
-            func: fetchDaysJson,
-            args: [schedulePath, CONSULATES[consulate as keyof typeof CONSULATES]],
-          });
-          const result = results[0]?.result as { status?: unknown; body?: unknown } | undefined;
-          if (result && typeof result.status === 'number') {
-            status = result.status;
-            body = result.body;
+        // One days.json fetch per selected consulate, in order, on the same
+        // reader tab. The first denied reply re-authenticates immediately and
+        // leaves the remaining consulates unfetched for this cycle.
+        const replies: { consulate: Consulate; status: number; body: unknown }[] = [];
+        let denied = false;
+        for (const consulate of consulates) {
+          let status = 0;
+          let body: unknown = null;
+          try {
+            const results = await platform.scripting.executeScript({
+              target: { tabId: reader.id },
+              func: fetchDaysJson,
+              args: [schedulePath, CONSULATES[consulate]],
+            });
+            const result = results[0]?.result as { status?: unknown; body?: unknown } | undefined;
+            if (result && typeof result.status === 'number') {
+              status = result.status;
+              body = result.body;
+            }
+          } catch {
+            status = 0;
+            body = null;
           }
-        } catch {
-          status = 0;
-          body = null;
+          replies.push({ consulate, status, body });
+          if (mapHttpStatus(status) === 'denied') { denied = true; break; }
         }
-        const outcome = mapHttpStatus(status);
         if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
-        if (outcome === 'denied') {
+        if (denied) {
           noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
           const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
-        if (outcome === 'retryable') {
+        // Transport failures drop out; the cycle proceeds on the consulates
+        // that answered, and counts one retry only when none answered.
+        const answered = replies.filter(reply => mapHttpStatus(reply.status) !== 'retryable');
+        if (answered.length === 0) {
           const next = pollRetry(state, 'transport');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
-        let dates: string[];
-        try {
-          dates = outcome === 'not-modified' ? [] : parseDaysPayload(body).map(entry => entry.date);
-        } catch {
+        // Each consulate's 200 body is parsed on its own: a malformed body
+        // drops that consulate exactly like a transport failure (absent from
+        // byConsulate, not counted). Only when no consulate yields a valid
+        // payload does the cycle count one 'reply-malformed' retry; a mix of
+        // transport failures and malformed bodies lands here too, since at
+        // least one consulate answered with an unusable body.
+        const byConsulate: { consulate: Consulate; dates: string[] }[] = [];
+        const usable: typeof answered = [];
+        for (const reply of answered) {
+          try {
+            const dates = mapHttpStatus(reply.status) === 'not-modified' ? [] : parseDaysPayload(reply.body).map(entry => entry.date);
+            byConsulate.push({ consulate: reply.consulate, dates });
+            usable.push(reply);
+          } catch { /* Dropped from the answering set. */ }
+        }
+        if (usable.length === 0) {
           const next = pollRetry(state, 'reply-malformed');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
         const stamped = new Date().toISOString();
-        if (outcome === 'not-modified') {
+        if (usable.every(reply => mapHttpStatus(reply.status) === 'not-modified')) {
           notePollRecovered(state, 'not-modified');
-          const next = applyPollResult(state, { outcome, now: stamped, random: Math.random });
+          const next = applyPollResult(state, { outcome: 'not-modified', now: stamped, random: Math.random });
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
+        const dates = [...new Set(byConsulate.flatMap(entry => entry.dates))].sort();
         if (dates.length > 0) notePollRecovered(state, 'healthy');
         const applied = applyPollResult(state, {
           outcome: dates.length === 0 ? 'empty' : 'healthy',
@@ -1975,12 +2023,15 @@ function queueEnginePoll(): void {
           { mode: 'booking', outcome: 'empty', detail: 'empty-result', failures: applied.consecutiveFailures });
         // Counts-only poll footprint for supervised debugging: how many days
         // the portal returned, never which dates.
-        await area.set({ lastPollV1: { status, dayCount: dates.length, at: stamped } });
-        await area.set({ engineObservationV1: { runId: state.runId, mode: state.mode, checkedAt: stamped, dates, rows: [] } });
-        void dateHistory.observe(state, consulate, [...dates].sort()[0] ?? null, stamped);
-        const candidate =
-          dates.length === 0 ? null : earliestCandidate(
-            dates.filter(date => !state.executor?.skippedDates.includes(date)), state.group.currentDate, windowPrefs);
+        await area.set({ lastPollV1: { status: 200, dayCount: dates.length, at: stamped } });
+        await area.set({ engineObservationV1: { runId: state.runId, mode: state.mode, checkedAt: stamped, dates, rows: [], byConsulate } });
+        for (const entry of byConsulate) void dateHistory.observe(state, entry.consulate, [...entry.dates].sort()[0] ?? null, stamped);
+        const skipped = state.executor?.skippedDates ?? [];
+        const candidate = dates.length === 0 ? null : earliestCandidateAcross(
+          byConsulate.map(entry => ({
+            consulate: entry.consulate,
+            dates: entry.dates.filter(date => !skipped.some(skip => skip.consulate === entry.consulate && skip.date === date)),
+          })), state.group.currentDate, windowPrefs);
         // Empty times exclude that date for this sweep; once every eligible
         // date is exhausted, the next paced poll starts a fresh sweep.
         if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [] };
@@ -1997,14 +2048,16 @@ function queueEnginePoll(): void {
           const scopeKey = `booking:${scheduleId}:${state.group.ivr}:${state.group.currentDate}:${policyKey(prefs)}`;
           const saved = (await area.get(['paidMonitorV1'])).paidMonitorV1;
           const monitor = monitorForScope(saved, scopeKey, true);
-          const { state: advanced, alertDue } = observeMonitorDate(monitor, candidate, {
+          const { state: advanced, alertDue } = observeMonitorDate(monitor, candidate?.date ?? null, {
             scopeKey, prefs: windowPrefs, rangeOnly: true, now: stamped,
           });
           await area.set({ paidMonitorV1: { scopeKey, monitor: advanced } });
           if (alertDue && !cancelledRuns.has(`${state.owner}:${state.runId}`)) {
             try {
               await platform.notifications.create({ type: 'basic', iconUrl: 'icons/icon128.png',
-                title: 'US Visa Scheduler for Canada', message: `New date available: ${alertDue}` });
+                title: 'US Visa Scheduler for Canada', message: candidate && candidate.date === alertDue
+                  ? `New date available: ${candidate.date} (${candidate.consulate})`
+                  : `New date available: ${alertDue}` });
               await area.set({ paidMonitorV1: { scopeKey, monitor: acceptNotification(advanced, alertDue) } });
             } catch { /* Keep delivery pending for the next healthy poll. */ }
           }

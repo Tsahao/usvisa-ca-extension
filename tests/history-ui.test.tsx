@@ -2,21 +2,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { History } from '../src/ui/History';
+import { NO_VALUE } from '../src/ui/model';
 import { HISTORY_KEY, HISTORY_TTL_MS } from '../src/domain/history';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('read-only live history view', () => {
   it('loads local rows, refreshes on history changes, and unsubscribes without workflow commands', async () => {
-    const rows = [{ id: 'row-1', checkedAt: new Date().toISOString(), earliestDate: '2026-11-19', booked: 'Attempted' }];
+    const rows = [{ id: 'row-1', checkedAt: new Date().toISOString(), earliestDate: '2026-11-19', booked: 'Attempted', consulate: 'Vancouver' }];
     const sendMessage = vi.fn().mockResolvedValue({ ok: true, rows });
     let changed: (changes: Record<string, unknown>, area: string) => void = () => {};
     const removeListener = vi.fn();
     vi.stubGlobal('chrome', { runtime: { sendMessage }, storage: { onChanged: { addListener: (listener: typeof changed) => { changed = listener; }, removeListener } } });
     const { unmount } = render(<History live trackScroll={() => {}} />);
-    expect(await screen.findByText('Attempted')).not.toBeNull();
-    rows[0].booked = 'Yes';
+    expect(await screen.findByText('Vancouver')).not.toBeNull();
+    rows[0].earliestDate = '2026-11-20';
     act(() => changed({ [HISTORY_KEY]: {} }, 'local'));
-    expect(await screen.findByText('Yes')).not.toBeNull();
+    expect(await screen.findByText('Nov 20, 2026')).not.toBeNull();
     act(() => changed({ engineStateV1: {} }, 'local'));
     expect(sendMessage.mock.calls).toEqual([[{ type: 'PANEL_HISTORY' }], [{ type: 'PANEL_HISTORY' }]]);
     unmount();
@@ -42,5 +43,19 @@ describe('read-only live history view', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(screen.queryByRole('table')).toBeNull();
     expect(screen.getByText('No available dates are recorded')).not.toBeNull();
+  });
+
+  it('shows the consulate column, with a placeholder for rows that predate it', () => {
+    const checkedAt = new Date().toISOString();
+    const rows = [
+      { id: 'row-1', checkedAt, earliestDate: '2026-11-19', booked: 'No' as const, consulate: 'Halifax' as const },
+      { id: 'row-2', checkedAt, earliestDate: '2026-11-20', booked: 'No' as const },
+    ];
+    render(<History live={false} previewRows={rows} trackScroll={() => {}} />);
+    const headers = screen.getAllByRole('columnheader').map(header => header.textContent);
+    expect(headers).toEqual(['Checked', 'Earliest Date', 'City']);
+    expect(screen.queryByRole('columnheader', { name: 'Booked' })).toBeNull();
+    expect(screen.getByRole('cell', { name: 'Halifax' })).not.toBeNull();
+    expect(screen.getByRole('cell', { name: NO_VALUE })).not.toBeNull();
   });
 });

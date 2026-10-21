@@ -1,5 +1,5 @@
 import { emptyAlertState, notificationAccepted, observeDate, type AlertState } from './alerts';
-import { isIsoDate, type Consulate, type DatePreferences } from './dates';
+import { CONSULATE_ORDER, isIsoDate, type Consulate, type DatePreferences } from './dates';
 import { selectedDate, validateSummaryReading } from './summary';
 export type MonitorState = {
   scopeKey: string;
@@ -92,4 +92,41 @@ export function monitorForScope(saved: unknown, scopeKey: string, freshStart = f
   if (monitor.scopeKey === scopeKey) return monitor;
   if (!freshStart) throw new Error('Monitor scope changed.');
   return initialMonitor(scopeKey);
+}
+
+// Alerts keep one monitor per selected consulate under one slot scope. Each
+// monitor's own key is `${scopeKey}:${consulate}` so observations stay bound
+// to both the selection and the city. The legacy single-monitor slot counts
+// as a changed scope: fresh on a validated Start, parked otherwise.
+export type MonitorSlot = { scopeKey: string; monitors: Partial<Record<Consulate, MonitorState>> };
+
+export function monitorsForScope(
+  saved: unknown, scopeKey: string, consulates: Consulate[], freshStart = false,
+): Partial<Record<Consulate, MonitorState>> {
+  const fresh = (existing: Partial<Record<Consulate, MonitorState>> = {}) => {
+    const monitors: Partial<Record<Consulate, MonitorState>> = {};
+    for (const consulate of consulates) monitors[consulate] = existing[consulate] ?? initialMonitor(`${scopeKey}:${consulate}`);
+    return monitors;
+  };
+  if (saved === undefined) return fresh();
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('Invalid monitor slot.');
+  const slot = saved as Record<string, unknown>;
+  if (typeof slot.scopeKey !== 'string' || slot.scopeKey.length === 0) throw new Error('Invalid monitor slot.');
+  if (!('monitors' in slot) && 'monitor' in slot) {
+    if (!freshStart) throw new Error('Monitor scope changed.');
+    return fresh();
+  }
+  const raw = slot.monitors;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('Invalid monitor slot.');
+  const stored: Partial<Record<Consulate, MonitorState>> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (!CONSULATE_ORDER.includes(name as Consulate)) throw new Error('Invalid monitor slot.');
+    let monitor: MonitorState;
+    try { monitor = validateMonitorState(value); } catch { throw new Error('Invalid monitor slot.'); }
+    if (monitor.scopeKey !== `${slot.scopeKey}:${name}`) throw new Error('Invalid monitor slot.');
+    stored[name as Consulate] = monitor;
+  }
+  if (slot.scopeKey === scopeKey) return fresh(stored);
+  if (!freshStart) throw new Error('Monitor scope changed.');
+  return fresh();
 }

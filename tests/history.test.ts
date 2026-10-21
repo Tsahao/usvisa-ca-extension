@@ -8,10 +8,19 @@ const NOW = '2026-10-16T18:00:00.000Z';
 const SCOPE = 'a'.repeat(64);
 const ATTEMPT = 'b'.repeat(64);
 const stamp = (offset: number) => new Date(Date.parse(NOW) + offset).toISOString();
-const reading = (earliestDate: string | null, offset = 0, scope = SCOPE) => ({ scope, earliestDate, checkedAt: stamp(offset) });
+const reading = (earliestDate: string | null, offset = 0, scope = SCOPE) => ({ scope, earliestDate, checkedAt: stamp(offset), consulate: 'Halifax' as const });
 const attempt = (createdAt = NOW) => ({ scope: SCOPE, targetDate: '2026-11-19', createdAt, attempt: ATTEMPT });
 
 describe('bounded date-change history', () => {
+  it('stores and validates the consulate on history rows', () => {
+    const next = observeHistory(emptyHistory(), { scope: SCOPE, earliestDate: '2026-11-20', checkedAt: NOW, consulate: 'Halifax' }, NOW);
+    expect(next.entries[0].consulate).toBe('Halifax');
+    expect(historyRows(next, NOW)[0].consulate).toBe('Halifax');
+    expect(validateHistory({ ...next, entries: [{ ...next.entries[0], consulate: undefined }] }).entries[0].consulate).toBeUndefined();
+    expect(() => validateHistory({ ...next, entries: [{ ...next.entries[0], consulate: 'Paris' }] })).toThrow();
+    expect(() => validateHistory({ ...next, entries: [{ ...next.entries[0], consulate: 'toString' }] })).toThrow();
+  });
+
   it('records first availability and changes in both directions, independently of booking eligibility', () => {
     let state = observeHistory(emptyHistory(), reading(null, -4000), NOW);
     expect(state.entries).toEqual([]);
@@ -69,6 +78,14 @@ describe('bounded date-change history', () => {
     expect(markHistoryBooking(booked, attempt(), 'Attempted', NOW)).toEqual(booked);
   });
 
+  it('preserves the consulate when marking a row booked', () => {
+    const original = observeHistory(emptyHistory(), reading('2026-11-19', -1000), NOW);
+    expect(original.entries[0].consulate).toBe('Halifax');
+    const booked = markHistoryBooking(markHistoryBooking(original, attempt(), 'Attempted', NOW), attempt(), 'Yes', NOW);
+    expect(booked.entries[0]).toMatchObject({ booked: 'Yes', consulate: 'Halifax', earliestDate: '2026-11-19' });
+    expect(historyRows(booked, NOW)[0]).toMatchObject({ booked: 'Yes', consulate: 'Halifax' });
+  });
+
   it('can promote a second real attempt on an unchanged date after the first failed', () => {
     const original = observeHistory(emptyHistory(), reading('2026-11-19', -2000), NOW);
     let state = markHistoryBooking(original, attempt(stamp(-1000)), 'Attempted', NOW);
@@ -96,7 +113,7 @@ describe('bounded date-change history', () => {
     const state = observeHistory(emptyHistory(), reading('2026-11-19'), NOW);
     const dirty = { ...state, secret: 'must-not-survive', entries: state.entries.map(row => ({ ...row, secret: 'must-not-survive' })) };
     expect(JSON.stringify(validateHistory(dirty))).not.toContain('must-not-survive');
-    expect(Object.keys(historyRows(state, NOW)[0])).toEqual(['id', 'checkedAt', 'earliestDate', 'booked']);
+    expect(Object.keys(historyRows(state, NOW)[0])).toEqual(['id', 'checkedAt', 'earliestDate', 'booked', 'consulate']);
   });
 });
 
@@ -124,7 +141,8 @@ describe('independent local history recording', () => {
     expect(await store.read()).toEqual([expect.objectContaining({ earliestDate: '2026-11-19', booked: 'Yes' })]);
     expect(await h.build().read()).toEqual(await store.read());
     const serialized = JSON.stringify(h.stored);
-    for (const privateValue of ['11111111', '22222222', '77777777', 'synthetic-run', 'Vancouver']) expect(serialized).not.toContain(privateValue);
+    for (const privateValue of ['11111111', '22222222', '77777777', 'synthetic-run']) expect(serialized).not.toContain(privateValue);
+    expect((h.stored[HISTORY_KEY] as DateHistory).entries[0].consulate).toBe('Vancouver');
     expect(h.schedule).toHaveBeenLastCalledWith(stamp(HISTORY_TTL_MS - 1000));
   });
 

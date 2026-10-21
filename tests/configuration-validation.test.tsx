@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useState } from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Configuration } from '../src/ui/Configuration';
-import { DEMO_PREFERENCES, EMPTY_PREFERENCES, preferenceIssues, preferencesError } from '../src/ui/model';
-import { validatePreferences } from '../src/domain/dates';
+import { PreferenceFields } from '../src/ui/PreferenceFields';
+import { DEMO_PREFERENCES, EMPTY_PREFERENCES, preferenceIssues, preferencesError, updatePreference } from '../src/ui/model';
+import { CONSULATE_ORDER, validatePreferences } from '../src/domain/dates';
 
 afterEach(cleanup);
 
@@ -17,6 +19,69 @@ function expectQuiet() { expect(screen.queryByRole('alert')).toBeNull(); }
 function saveDisabled() { return (screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled; }
 
 describe('Settings validation timing', () => {
+  it('raises the interval only when needed as selections grow, and keeps Reset Advanced above the minimum', async () => {
+    const { user, props } = setup({ ...DEMO_PREFERENCES, interval: 30 });
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    const interval = screen.getByLabelText('Checking interval (s)') as HTMLInputElement;
+    expect(interval.min).toBe('30');
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    expect(interval.min).toBe('60');
+    expect(interval.value).toBe('60');
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    expect(interval.min).toBe('90');
+    expect(interval.value).toBe('90');
+    expect(screen.getByRole('button', { name: 'Consulate' }).title).toBe('');
+    await user.keyboard('{Escape}');
+    fireEvent.change(interval, { target: { value: '89' } });
+    expect(saveDisabled()).toBe(true);
+    await user.click(interval);
+    await user.click(screen.getByLabelText('Email'));
+    expect(screen.getByRole('alert').textContent).toBe('Checking interval must be a whole number from 90 to 86400 seconds.');
+    await user.click(screen.getByRole('button', { name: 'Reset Advanced' }));
+    expect(interval.value).toBe('90');
+    expect(saveDisabled()).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    expect(interval.min).toBe('60');
+    expect(interval.value).toBe('60');
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...DEMO_PREFERENCES, consulates: ['Calgary', 'Vancouver'], interval: 60 });
+  });
+
+  it.each([false, true])('reverses an automatic increase unless the interval was manually overwritten (%s)', async manual => {
+    const { user, props } = setup(DEMO_PREFERENCES);
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    const interval = screen.getByLabelText('Checking interval (s)') as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    expect(interval.value).toBe('90');
+    await user.keyboard('{Escape}');
+    if (manual) {
+      // Retyping the same auto-raised number still expresses a manual choice.
+      await user.clear(interval);
+      await user.type(interval, '90');
+    }
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    expect(interval.value).toBe(manual ? '90' : '60');
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    expect(interval.value).toBe(manual ? '90' : '60');
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...DEMO_PREFERENCES, interval: manual ? 90 : 60 });
+  });
+
+  it('raises an old below-minimum interval in the draft without changing saved preferences', async () => {
+    const saved = { ...DEMO_PREFERENCES, consulates: [...CONSULATE_ORDER], interval: 60 };
+    const { user, props } = setup(saved);
+    await user.click(screen.getByRole('button', { name: 'Advanced' }));
+    expect((screen.getByLabelText('Checking interval (s)') as HTMLInputElement).value).toBe('210');
+    expect(saved.interval).toBe(60);
+    expect(props.save).not.toHaveBeenCalled();
+  });
   it('allows saving a 30-second checking interval', async () => {
     const { user, props } = setup(DEMO_PREFERENCES);
     await user.click(screen.getByRole('button', { name: 'Advanced' }));
@@ -37,7 +102,8 @@ describe('Settings validation timing', () => {
     expectQuiet();
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
     expectQuiet();
-    await user.selectOptions(screen.getByLabelText('Consulate'), 'Calgary');
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
     expectQuiet();
     await user.click(screen.getByLabelText('Earliest Acceptable'));
     fireEvent.change(screen.getByLabelText('Earliest Acceptable'), { target: { value: '2026-11-01' } });
@@ -48,13 +114,12 @@ describe('Settings validation timing', () => {
     expectQuiet();
     expect(saveDisabled()).toBe(false);
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...EMPTY_PREFERENCES, email: 'synthetic@example.invalid', password: 'synthetic-password', consulate: 'Calgary', earliest: '2026-11-01', latest: '2027-12-31' });
+    expect(props.save).toHaveBeenCalledExactlyOnceWith({ ...EMPTY_PREFERENCES, email: 'synthetic@example.invalid', password: 'synthetic-password', consulates: ['Calgary'], earliest: '2026-11-01', latest: '2027-12-31' });
     expectQuiet();
   });
 
   it.each([
     ['Password', 'Enter your visa account password.'],
-    ['Consulate', 'Select a consulate.'],
     ['Earliest Acceptable', 'Choose a valid inclusive date window.'],
     ['Latest Acceptable', 'Choose a valid inclusive date window.'],
   ])('only warns about the completed %s field and hides its warning on refocus', async (label, message) => {
@@ -66,6 +131,50 @@ describe('Settings validation timing', () => {
     await user.click(screen.getByLabelText(label));
     expectQuiet();
     expect(saveDisabled()).toBe(true);
+  });
+
+  it('warns about an emptied consulate group only after focus leaves it', async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    expectQuiet();
+    await user.click(screen.getByRole('heading', { name: 'Login and preferences' }));
+    expect(screen.getByRole('alert').textContent).toBe('Select at least one consulate.');
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    expectQuiet();
+  });
+
+  it('keeps the checkmark menu open while selecting and stores the canonical order', async () => {
+    let latestDraft = { ...EMPTY_PREFERENCES };
+    function Harness() {
+      const [draft, setDraft] = useState(EMPTY_PREFERENCES);
+      latestDraft = draft;
+      return <PreferenceFields draft={draft} update={(key, value) => setDraft(current => updatePreference(current, key, value))} validationEvents={() => ({ onFocus: () => {}, onBlur: () => {} })} />;
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+    const trigger = screen.getByRole('button', { name: 'Consulate' });
+    expect(trigger.textContent).toBe('Select');
+    expect(screen.getByText('Select one or multiple')).toBeTruthy();
+    await user.click(trigger);
+    expect(screen.getAllByRole('menuitemcheckbox').map(item => item.textContent)).toEqual(['Calgary', 'Halifax', 'Ottawa', 'Toronto', 'Vancouver', 'Montreal', 'Quebec City']);
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Toronto' }));
+    expect(trigger.textContent).toBe('Toronto');
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    expect(latestDraft.consulates).toEqual(['Halifax', 'Toronto']);
+    expect(trigger.textContent).toBe('2 Selected');
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Toronto' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }).getAttribute('aria-checked')).toBe('true');
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Vancouver' }));
+    expect(trigger.title).toBe('');
+    expect(latestDraft.interval).toBe(90);
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Toronto' }));
+    expect(latestDraft.consulates).toEqual(['Halifax', 'Vancouver']);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it('removes corrected warnings without exposing the next untouched required field', async () => {
@@ -151,6 +260,19 @@ describe('Settings validation timing', () => {
 });
 
 describe('shared preference validation', () => {
+  it.each([1, 2, 3, 4, 5, 6, 7])('enforces the %s-consulate minimum on valid integer intervals', count => {
+    const consulates = CONSULATE_ORDER.slice(0, count);
+    expect(preferencesError({ ...DEMO_PREFERENCES, consulates, interval: count * 30 })).toBeNull();
+    expect(preferencesError({ ...DEMO_PREFERENCES, consulates, interval: count * 30 - 1 })).toBe(`Checking interval must be a whole number from ${count * 30} to 86400 seconds.`);
+    expect(preferencesError({ ...DEMO_PREFERENCES, consulates, interval: 86400 })).toBeNull();
+    expect(preferencesError({ ...DEMO_PREFERENCES, consulates, interval: 86401 })).not.toBeNull();
+    expect(preferencesError({ ...DEMO_PREFERENCES, consulates, interval: count * 30 + 0.5 })).not.toBeNull();
+  });
+  it('requires at least one consulate', () => {
+    expect(preferenceIssues({ ...DEMO_PREFERENCES, consulates: [] })).toContainEqual({ fields: ['consulates'], message: 'Select at least one consulate.' });
+    expect(preferenceIssues({ ...DEMO_PREFERENCES, consulates: ['Toronto', 'Halifax'] }).some(issue => issue.fields.includes('consulates'))).toBe(false);
+  });
+
   it.each([29, 30, 59, 60, 30.5, 86400, 86401])('validates checking interval boundary %s', interval => {
     const error = preferencesError({ ...DEMO_PREFERENCES, interval });
     if (Number.isInteger(interval) && interval >= 30 && interval <= 86400) expect(error).toBeNull();

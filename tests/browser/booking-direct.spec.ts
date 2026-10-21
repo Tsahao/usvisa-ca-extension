@@ -77,7 +77,7 @@ for (const testMode of [true, false]) {
       const args = { owner: 'browser-owner-02', runId: 'browser-run-0002', now };
       const state: EngineState = { ...bindGroup(startRun(emptyEngineState(now), { ...args, mode: 'booking' }), { ...args,
         binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null, dashboardPath, applicantIds: ['77777777', '88888888'] } }),
-        stage: 'form', lastCandidate: '2026-11-19', policyKey: policyKey(prefs), nextPollAt: now,
+        stage: 'form', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, policyKey: policyKey(prefs), nextPollAt: now,
         executor: { tabId, applicantIds: ['77777777', '88888888'], targetTime: '08:00', skippedDates: [], actionPending: false } };
       await panel.evaluate(async state => { await chrome.storage.local.set({ engineStateV1: state }); }, state);
       const read = () => panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);
@@ -261,7 +261,7 @@ test('packaged direct initial submission with native POST navigation (Test Mode 
     const args = { owner: 'browser-owner-03', runId: 'browser-run-0003', now };
     const state: EngineState = { ...bindGroup(startRun(emptyEngineState(now), { ...args, mode: 'booking' }), { ...args,
       binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null, dashboardPath, applicantIds: ['77777777', '88888888'] } }),
-      stage: 'form', lastCandidate: '2026-11-19', policyKey: policyKey(prefs), nextPollAt: now,
+      stage: 'form', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, policyKey: policyKey(prefs), nextPollAt: now,
       executor: { tabId, applicantIds: ['77777777', '88888888'], targetTime: '08:00', skippedDates: [], actionPending: false } };
     await panel.evaluate(async state => { await chrome.storage.local.set({ engineStateV1: state }); }, state);
     const read = () => panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);

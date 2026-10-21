@@ -29,7 +29,7 @@ to trusted extension contexts.
 
 View Logs also stores a local history of selected-consulate earliest-date
 changes, check times and booking outcomes. It retains at most 100 rows from
-the last 24 hours. Internal comparison and attempt references are hashed;
+the last 24 hours. Date history rows record which consulate each date was seen at. Internal comparison and attempt references are hashed;
 history records contain no credentials, raw visa/applicant identifiers, portal
 URLs or page content. History is not sent to analytics or the publisher.
 

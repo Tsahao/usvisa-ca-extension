@@ -1,23 +1,28 @@
-import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
+import { CONSULATE_ORDER, isIsoDate, selectedConsulates, type Consulate } from '../domain/dates';
 import { readAutoMode } from '../domain/auto-mode';
+import { minimumPollIntervalSeconds } from '../domain/timing';
 
 export const TERMS_VERSION = 'ui-preview-1';
-export const CITIES = Object.keys(CONSULATES) as Consulate[];
+export const CITIES: Consulate[] = [...CONSULATE_ORDER];
+// Figma's visual order is independent of the booking engine's tie-break order.
+export const CITY_DISPLAY_ORDER: readonly Consulate[] = ['Calgary', 'Halifax', 'Ottawa', 'Toronto', 'Vancouver', 'Montreal', 'Quebec'];
 export type Mode = 'booking' | 'alerts';
 export type RunStatus = 'idle' | 'running' | 'success' | 'failure';
 export type Preferences = {
-  email: string; password: string; consulate: Consulate | ''; earliest: string; latest: string;
+  email: string; password: string; consulates: Consulate[]; earliest: string; latest: string;
   autoMode: boolean; onlyEarlier: boolean; interval: number;
+  // UI-only rollback memory when the consulate minimum raised the interval.
+  intervalBeforeAutoIncrease?: number;
   paidIvr: string; unpaidIvr: string;
 };
 export type Run = { mode: Mode; status: RunStatus; lastChecked: string | null };
 export const DEFAULT_ADVANCED = {
   onlyEarlier: true, interval: 60, paidIvr: '', unpaidIvr: '',
 };
-export const EMPTY_PREFERENCES: Preferences = { email: '', password: '', consulate: '', earliest: '', latest: '', autoMode: true, ...DEFAULT_ADVANCED };
+export const EMPTY_PREFERENCES: Preferences = { email: '', password: '', consulates: [], earliest: '', latest: '', autoMode: true, ...DEFAULT_ADVANCED };
 export const DEMO_PREFERENCES: Preferences = {
   ...EMPTY_PREFERENCES, email: 'preview@example.invalid', password: 'synthetic-preview-password',
-  consulate: 'Vancouver', earliest: '2026-11-01', latest: '2027-12-31',
+  consulates: ['Vancouver'], earliest: '2026-11-01', latest: '2027-12-31',
 };
 export const DEMO_DATES: Record<Consulate, string | null> = {
   Calgary: '2026-12-21', Halifax: '2027-01-22', Montreal: '2026-12-03',
@@ -29,20 +34,51 @@ export const EMPTY_RUN: Run = { mode: 'booking', status: 'idle', lastChecked: nu
 
 export type PreferenceIssue = { fields: (keyof Preferences)[]; message: string };
 
+export function intervalBaseline(prefs: Preferences): number {
+  const remembered = prefs.intervalBeforeAutoIncrease;
+  // Ignore malformed/stale metadata rather than reducing a user's saved value.
+  return typeof remembered === 'number' && Number.isInteger(remembered) && remembered >= 30 &&
+    Number.isInteger(prefs.interval) && prefs.interval <= 86400 && remembered < prefs.interval
+    ? remembered : prefs.interval;
+}
+
+// Normalize drafts only: existing saved settings are not silently rewritten.
+// Reversible automatic increases never replace the user's original choice.
+export function withMinimumInterval(prefs: Preferences): Preferences {
+  const { intervalBeforeAutoIncrease: _remembered, ...rest } = prefs;
+  const baseline = intervalBaseline(prefs);
+  const interval = Math.max(baseline, minimumPollIntervalSeconds(prefs));
+  return { ...rest, interval, ...(interval > baseline && Number.isInteger(baseline) && baseline >= 30
+    ? { intervalBeforeAutoIncrease: baseline } : {}) };
+}
+
+export function updatePreference<K extends keyof Preferences>(prefs: Preferences, key: K, value: Preferences[K]): Preferences {
+  const next = { ...prefs, [key]: value };
+  if (key === 'consulates') return withMinimumInterval(next);
+  if (key === 'interval') {
+    // Even editing an auto-raised value back to the same number is an explicit
+    // choice. Only consulate changes may create rollback memory.
+    const { intervalBeforeAutoIncrease: _remembered, ...manual } = next;
+    return manual;
+  }
+  return next;
+}
+
 export function preferenceIssues(prefs: Preferences): PreferenceIssue[] {
   const issues: PreferenceIssue[] = [];
   if (readAutoMode(prefs) === null) issues.push({ fields: ['autoMode'], message: 'Choose whether to book appointments automatically.' });
   // No email-format gate by user decision: owners enter their own account
   // email, and a wrong address fails at sign-in instead of blocking setup.
   if (!prefs.password) issues.push({ fields: ['password'], message: 'Enter your visa account password.' });
-  if (!CITIES.includes(prefs.consulate as Consulate)) issues.push({ fields: ['consulate'], message: 'Select a consulate.' });
+  if (!selectedConsulates(prefs)?.length) issues.push({ fields: ['consulates'], message: 'Select at least one consulate.' });
   for (const field of ['earliest', 'latest'] as const) {
     if (!isIsoDate(prefs[field])) issues.push({ fields: [field], message: 'Choose a valid inclusive date window.' });
   }
   if (isIsoDate(prefs.earliest) && isIsoDate(prefs.latest) && prefs.earliest > prefs.latest)
     issues.push({ fields: ['earliest', 'latest'], message: 'Choose a valid inclusive date window.' });
-  if (!Number.isInteger(prefs.interval) || prefs.interval < 30 || prefs.interval > 86400)
-    issues.push({ fields: ['interval'], message: 'Checking interval must be a whole number from 30 to 86400 seconds.' });
+  const minimumInterval = minimumPollIntervalSeconds(prefs);
+  if (!Number.isInteger(prefs.interval) || prefs.interval < minimumInterval || prefs.interval > 86400)
+    issues.push({ fields: ['interval'], message: `Checking interval must be a whole number from ${minimumInterval} to 86400 seconds.` });
   for (const field of ['paidIvr', 'unpaidIvr'] as const) {
     if (prefs[field] !== '' && !/^\d+$/.test(prefs[field])) issues.push({ fields: [field], message: 'IVR groups must contain digits only.' });
   }

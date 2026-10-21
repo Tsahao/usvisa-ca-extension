@@ -37,7 +37,7 @@ function harness(testMode: boolean, initial = false, gate: true | false | string
   const args = { owner: 'owner-token-01', runId: 'run-id-0001', now: NOW };
   const bound = bindGroup(startRun(emptyEngineState(NOW), { ...args, mode: 'booking' }), { ...args,
     binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: initial ? null : '2027-01-01', applicantIds: ids } });
-  const state: EngineState = { ...bound, stage: 'form', lastCandidate: '2026-11-19', policyKey: policyKey(prefs),
+  const state: EngineState = { ...bound, stage: 'form', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, policyKey: policyKey(prefs),
     executor: { tabId: 7, applicantIds: ids, targetTime: '08:00', actionPending: false, skippedDates: [] } };
   const deps: ExecDeps = { nowIso: () => clock, random: () => 0, queryTabs: async () => [], getTab: async () => ({ id: 7, url: location.href }),
     createTab: async () => { throw new Error('Unexpected navigation'); }, loadPrefs: async () => ({ ...prefs }),

@@ -1,9 +1,11 @@
 import { useEffect, useState, type UIEvent } from 'react';
 import { ChevronDown, ChevronRight, Info } from 'lucide-react';
-import { DEFAULT_ADVANCED, preferenceIssues, type Preferences } from './model';
+import { DEFAULT_ADVANCED, preferenceIssues, updatePreference, withMinimumInterval, type Preferences } from './model';
+import { minimumPollIntervalSeconds } from '../domain/timing';
 import panel from './Panel.module.css';
 import local from './Configuration.module.css';
-import { PreferenceFields, Row, Toggle } from './PreferenceFields';
+import { PreferenceFields, Row } from './PreferenceFields';
+import { Toggle } from './Toggle';
 
 export function Configuration({ preferences, active, save, cancel, trackScroll, openTerms, openHistory }: {
   preferences: Preferences;
@@ -14,7 +16,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
   openTerms: () => void;
   openHistory?: () => void;
 }) {
-  const [draft, setDraft] = useState(() => structuredClone(preferences));
+  const [draft, setDraft] = useState(() => withMinimumInterval(structuredClone(preferences)));
   const [advanced, setAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -24,7 +26,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
   // before loading finishes would display (and could save) stale values —
   // including a stale Auto Mode position.
   useEffect(() => {
-    setDraft(structuredClone(preferences));
+    setDraft(withMinimumInterval(structuredClone(preferences)));
     setCompleted({});
     setFocused(null);
     setError('');
@@ -38,7 +40,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
     onFocus: () => setFocused(field),
     onBlur: () => { setFocused(null); setCompleted(current => ({ ...current, [field]: true })); },
   });
-  const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => { setDraft(current => ({ ...current, [key]: value })); };
+  const update = <K extends keyof Preferences>(key: K, value: Preferences[K]) => { setDraft(current => updatePreference(current, key, value)); };
   const submit = async () => {
     if (invalid || active) return;
     setSaving(true);
@@ -57,14 +59,14 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
         {advanced && <fieldset disabled={active || saving} className={panel.advanced}>
           <div className={panel.group}>
             <Toggle label="Earlier appointments only" checked={draft.onlyEarlier} change={value => update('onlyEarlier', value)} />
-            <Row label="Checking interval (s)"><input className={panel.shortInput} type="number" aria-label="Checking interval (s)" {...validationEvents('interval')} min="30" max="86400" value={draft.interval} onChange={event => update('interval', Number(event.target.value))} /></Row>
+            <Row label="Checking interval (s)"><input className={panel.shortInput} type="number" aria-label="Checking interval (s)" {...validationEvents('interval')} min={minimumPollIntervalSeconds(draft)} max="86400" value={draft.interval} onChange={event => update('interval', Number(event.target.value))} /></Row>
             <Row label="Paid IVR Group"><input aria-label="Paid IVR Group" inputMode="numeric" {...validationEvents('paidIvr')} value={draft.paidIvr} onChange={event => update('paidIvr', event.target.value)} /></Row>
             <Row label="Unpaid IVR Group"><input aria-label="Unpaid IVR Group" inputMode="numeric" {...validationEvents('unpaidIvr')} value={draft.unpaidIvr} onChange={event => update('unpaidIvr', event.target.value)} /></Row>
           </div>
         </fieldset>}
         {advanced && <div className={panel.advancedActions}>
           <button type="button" className={panel.secondary} onClick={openHistory}>View Logs</button>
-          <button type="button" disabled={active || saving} className={panel.secondary} onClick={() => { setDraft(current => ({ ...current, ...DEFAULT_ADVANCED })); }}>Reset Advanced</button>
+          <button type="button" disabled={active || saving} className={panel.secondary} onClick={() => { setDraft(current => withMinimumInterval({ ...current, ...DEFAULT_ADVANCED, intervalBeforeAutoIncrease: undefined })); }}>Reset Advanced</button>
         </div>}
         {(error || visibleIssue) && <p className={panel.validation} role="alert">{error || visibleIssue?.message}</p>}
         <a href="#terms" className={local.termsLink} onClick={event => { event.preventDefault(); openTerms(); }}>Terms & Conditions</a>

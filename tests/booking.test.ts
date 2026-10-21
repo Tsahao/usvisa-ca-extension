@@ -25,6 +25,7 @@ function expected(overrides: Partial<BookingExpectation> = {}): BookingExpectati
     scheduleId: '11111111',
     applicantIds: ['88888888', '77777777'],
     consulate: 'Vancouver',
+    selected: ['Vancouver'],
     currentDate: '2027-06-21',
     prefs: PREFS,
     testMode: false,
@@ -57,6 +58,16 @@ describe('pre-submit booking guard', () => {
     expect(guardBooking(form({ time: '' }), expected())).toEqual({ allowed: false, reason: 'time-missing' });
     const denial = guardBooking(form({ scheduleId: '99999999' }), expected());
     expect(JSON.stringify(denial)).not.toContain('99999999');
+  });
+
+  it('refuses a consulate outside the selection before comparing the facility', () => {
+    expect(guardBooking(form(), expected({ consulate: 'Vancouver', selected: ['Toronto'] }))).toEqual({ allowed: false, reason: 'consulate-unselected' });
+    expect(guardBooking(form(), expected({ consulate: 'Vancouver', selected: ['Toronto', 'Vancouver'] }))).toEqual({ allowed: true });
+  });
+
+  it('fails closed on a malformed consulate selection', () => {
+    expect(() => guardBooking(form(), expected({ selected: 'Vancouver' as unknown as ['Vancouver'] }))).toThrow('Invalid booking expectation.');
+    expect(() => guardBooking(form(), expected({ selected: ['Vancouver', 'Atlantis' as 'Vancouver'] }))).toThrow('Invalid booking expectation.');
   });
 
   it('supports initial booking with no current appointment', () => {

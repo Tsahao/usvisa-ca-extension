@@ -59,7 +59,7 @@ function harness() {
 }
 
 describe('durable automatic authentication', () => {
-  const recoveryState = (): EngineState => ({ ...bound(), stage: null, lastCandidate: '2026-11-19',
+  const recoveryState = (): EngineState => ({ ...bound(), stage: null, lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' },
     group: { ...bound().group!, dashboardPath: '/en-ca/niv/groups' },
     executor: { tabId: 7, applicantIds: ids, targetTime: '09:00', skippedDates: [], actionPending: false } });
   const site = 'https://ais.usvisa-info.com';

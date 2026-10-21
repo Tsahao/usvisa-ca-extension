@@ -24,6 +24,31 @@ function extension(snapshot = { ...idle }, preferences = { ...DEMO_PREFERENCES }
 }
 
 describe('redesigned sign-in panel', () => {
+  it('keeps first-time setup usable when selecting more cities without an Advanced interval field', async () => {
+    const signIn = vi.fn(async () => {});
+    const user = userEvent.setup();
+    render(<HomeScreen preferences={DEMO_PREFERENCES} signIn={signIn} openTerms={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(signIn).toHaveBeenCalledExactlyOnceWith({ ...DEMO_PREFERENCES, consulates: ['Calgary', 'Halifax', 'Vancouver'], interval: 90, intervalBeforeAutoIncrease: 60 });
+    expect(screen.queryByText(/Consider a longer checking interval/)).toBeNull();
+  });
+  it('restores the original setup interval after temporarily selecting extra cities', async () => {
+    const signIn = vi.fn(async () => {});
+    const user = userEvent.setup();
+    render(<HomeScreen preferences={DEMO_PREFERENCES} signIn={signIn} openTerms={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Halifax' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Calgary' }));
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(signIn).toHaveBeenCalledExactlyOnceWith(DEMO_PREFERENCES);
+  });
   it('requires every mandatory field and a valid window without an email-format gate', async () => {
     const signIn = vi.fn(async () => {}); const user = userEvent.setup();
     render(<HomeScreen preferences={EMPTY_PREFERENCES} signIn={signIn} openTerms={() => {}} />);
@@ -31,7 +56,8 @@ describe('redesigned sign-in panel', () => {
     expect(button.disabled).toBe(true); expect(screen.queryByRole('alert')).toBeNull();
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'owner-address' } });
     await user.type(screen.getByLabelText('Password'), 'synthetic-password');
-    await user.selectOptions(screen.getByLabelText('Consulate'), 'Vancouver');
+    await user.click(screen.getByRole('button', { name: 'Consulate' }));
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Vancouver' }));
     fireEvent.change(screen.getByLabelText('Earliest Acceptable'), { target: { value: '2026-12-01' } });
     expect(button.disabled).toBe(true); expect(screen.queryByRole('alert')).toBeNull();
     fireEvent.change(screen.getByLabelText('Latest Acceptable'), { target: { value: '2026-11-01' } });

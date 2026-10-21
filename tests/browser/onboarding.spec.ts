@@ -47,7 +47,8 @@ for (const { feature, signedOut } of [{ feature: 'booking', signedOut: false }, 
       if (feature === 'both') await region.screenshot({ path: 'test-results/onboarding-empty.png' });
       await panel.getByLabel('Email', { exact: true }).fill('synthetic@example.invalid');
       await panel.getByLabel('Password', { exact: true }).fill('synthetic-password');
-      await panel.getByLabel('Consulate', { exact: true }).selectOption('Vancouver');
+      await panel.getByRole('button', { name: 'Consulate', exact: true }).click();
+      await panel.getByRole('menuitemcheckbox', { name: 'Vancouver' }).click();
       await panel.getByLabel('Earliest Acceptable').fill('2026-11-01');
       await panel.getByLabel('Latest Acceptable').fill('2026-12-31');
       await panel.getByRole('switch', { name: 'Auto Book' }).uncheck();

@@ -1,8 +1,8 @@
 import { platform } from '../platform';
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import { ChevronLeft, Play, Square, RotateCw, CalendarCheck, TriangleAlert } from 'lucide-react';
-import { earliestCandidate } from '../domain/dates';
-import { CITIES, DEMO_APPOINTMENT, DEMO_AVAILABILITY, DEMO_DATES, DEMO_PREFERENCES, EMPTY_PREFERENCES, NO_VALUE, calendarDays, cityLabel, earliestObserved, formatDate, preferencesError, shiftMonth, type Mode, type Preferences, type Run, type RunStatus } from './model';
+import { earliestCandidate, type Consulate } from '../domain/dates';
+import { CITY_DISPLAY_ORDER, DEMO_APPOINTMENT, DEMO_AVAILABILITY, DEMO_DATES, DEMO_PREFERENCES, EMPTY_PREFERENCES, NO_VALUE, calendarDays, cityLabel, earliestObserved, formatDate, preferencesError, shiftMonth, type Mode, type Preferences, type Run, type RunStatus } from './model';
 import { isExtension, loadUiState, saveLastMode, savePreferences, saveRun } from './storage';
 import { focusVisaTab, PanelCommandError, panelCommand, retryRestartCommand } from './engine';
 import { fitCurrentPanelWindow } from '../panel-window';
@@ -57,16 +57,20 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
   const hasData = simulated ? run.lastChecked !== null : data?.checkedAt !== null && data?.checkedAt !== undefined;
   const title = failureTitle(failureKind ?? (run.status === 'failure' ? 'generic' : null));
   const special = run.status === 'success' || title !== null;
-  const availability = simulated ? DEMO_AVAILABILITY : data?.dates ?? [];
+  const availability = simulated
+    ? [...new Set(preferences.consulates.flatMap(city => city === 'Vancouver' ? DEMO_AVAILABILITY : DEMO_DATES[city] ? [DEMO_DATES[city] as string] : []))].sort()
+    : data?.dates ?? [];
   const currentDate = simulated ? DEMO_APPOINTMENT : data?.currentDate ?? null;
   const candidate = preferencesError(preferences) ? null : earliestCandidate(availability, currentDate, { ...preferences, exclusions: [] });
   const observed = earliestObserved(availability);
-  const cityDate = (city: Preferences['consulate']) => simulated ? DEMO_DATES[city || 'Vancouver'] : data?.rows.find(row => row.city === city)?.date ?? null;
+  const cityDate = (city: Consulate) => simulated ? DEMO_DATES[city] ?? null : data?.rows.find(row => row.city === city)?.date ?? null;
+  const selected = CITY_DISPLAY_ORDER.filter(city => preferences.consulates.includes(city));
+  const earliest = run.mode === 'booking' ? observed : earliestObserved(selected.flatMap(city => cityDate(city) ? [cityDate(city) as string] : []));
   const successMessage = { title: 'Appointment booked', detail: formatDate(simulated ? candidate : data?.confirmedDate ?? null), footer: 'Start again to look for an earlier date' };
   const message = title ? { title, detail: 'Check configurations', footer: 'Tap to retry' } : run.status === 'success' ? successMessage : null;
   const retrying = title !== null && !active;
   return <div className={styles.workflow}>
-    <div className={styles.workflowContent} onScroll={trackScroll}>
+    <div className={`${styles.workflowContent}${run.mode === 'booking' ? ` ${styles.bookingContent}` : ''}`} onScroll={trackScroll}>
     {special && message ? <div className={`${styles.result} ${!title && run.status === 'success' ? styles.success : styles.failure}`} role="status">
       {!title && run.status === 'success' ? <CalendarCheck size={42} /> : <span className={styles.failureIcon} aria-hidden><TriangleAlert size={42} /></span>}
       <h2>{message.title}</h2>
@@ -76,8 +80,10 @@ function Workflow({ preferences, run, change, configure, openCoffee, data, failu
       </div> : <p className={styles.bookedDate}>{message.detail}</p>}
       {!title && run.status === 'success' && run.mode === 'booking' && <button className={`${styles.secondary} ${styles.coffeeLink}`} onClick={openCoffee}>Buy me a coffee?</button>}
     </div> : <>
-      <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : cityLabel(preferences.consulate)}</h2><p>{hasData ? formatDate(run.mode === 'booking' ? observed : cityDate(preferences.consulate)) : NO_VALUE}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? NO_VALUE}</p></div></div>
-      {run.mode === 'booking' ? <Calendar key={simulated ? 'preview' : observed ?? 'empty'} available={hasData ? availability : []} initialMonth={simulated ? '2026-12' : observed?.slice(0, 7) ?? new Date().toISOString().slice(0, 7)} /> : <div className={`${styles.group} ${styles.consulates}`} aria-label="Other consulate dates">{CITIES.filter(city => city !== preferences.consulate).map(city => <div className={styles.row} key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : NO_VALUE}</span></div>)}</div>}
+      <div className={styles.stats}><div><h2>{run.mode === 'booking' ? 'Earliest Available' : selected.length === 1 ? cityLabel(selected[0]) : 'Earliest in selected'}</h2><p>{hasData && earliest ? formatDate(earliest) : NO_VALUE}</p></div><div><h2>Last Checked</h2><p>{run.lastChecked ?? NO_VALUE}</p></div></div>
+      {run.mode === 'booking'
+        ? <Calendar key={simulated ? 'preview' : observed ?? 'empty'} available={hasData ? availability : []} initialMonth={simulated ? '2026-12' : observed?.slice(0, 7) ?? new Date().toISOString().slice(0, 7)} />
+        : <div className={styles.consulates} role="list" aria-label="Consulate dates">{CITY_DISPLAY_ORDER.map(city => <div className={styles.row} role="listitem" key={city}><span>{cityLabel(city)}</span><span className={styles.date}>{hasData ? formatDate(cityDate(city)) : NO_VALUE}</span></div>)}</div>}
     </>}
     </div>
     <button className={`${styles.runButton} ${active || title ? styles.red : styles.green}`} aria-label={`${active ? 'Stop' : run.status === 'idle' && !retrying ? 'Start' : 'Retry'}${simulated ? ' preview' : ''}`} onClick={() => void change(active ? 'idle' : 'running')}>
@@ -362,6 +368,7 @@ export function App() {
   const previewRows: HistoryRow[] = useMemo(() => previewHistory ? Array.from({ length: 14 }, (_, index) => ({
     id: `synthetic-history-${index}`, checkedAt: new Date(Date.now() - index * 3600_000).toISOString(),
     earliestDate: ['2026-11-19', '2027-01-20', '2026-12-31', '2026-12-30'][index % 4],
+    consulate: CITY_DISPLAY_ORDER[index % CITY_DISPLAY_ORDER.length],
     booked: index === 0 ? 'Yes' : index === 2 || index === 3 ? 'Attempted' : 'No',
   })) : [], [previewHistory]);
   return <main className={detached ? styles.detached : embedded ? styles.embedded : styles.preview}>

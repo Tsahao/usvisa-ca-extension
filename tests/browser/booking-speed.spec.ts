@@ -118,7 +118,7 @@ for (const scenario of ['gated', 'direct', 'monitor-gated', 'monitor-direct', 's
         expect(posts).toBe(0);
         expect((await read()).intent?.phase).toBe('submitted');
       } else if (!autoMode) {
-        await expect.poll(async () => (await read()).lastCandidate).toBe('2026-11-19');
+        await expect.poll(async () => (await read()).lastCandidate).toEqual({ date: '2026-11-19', consulate: 'Vancouver' });
         expect(await read()).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
         await expect(host.locator('#appointments_consulate_appointment_date')).toHaveValue('');
         await expect(host.locator('#appointments_submit')).toHaveAttribute('data-clicks', '0');

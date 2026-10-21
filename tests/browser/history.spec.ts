@@ -31,7 +31,7 @@ test('Figma View Logs layout, empty state and retained Settings draft/scroll', a
   await page.getByLabel('Preview date history').selectOption('history');
   const table = panel.getByRole('table', { name: 'Date change history' });
   await expect(table).toBeVisible();
-  await expect(table.getByRole('columnheader')).toHaveText(['Checked', 'Earliest Date', 'Booked']);
+  await expect(table.getByRole('columnheader')).toHaveText(['Checked', 'Earliest Date', 'City']);
   await expect(table.getByRole('row')).toHaveCount(15);
   const tableBox = (await table.boundingBox())!;
   const panelBox = (await panel.boundingBox())!;
@@ -40,6 +40,14 @@ test('Figma View Logs layout, empty state and retained Settings draft/scroll', a
   expect(Math.abs(tableBox.x + tableBox.width / 2 - panelBox.x - panelBox.width / 2)).toBeLessThan(1);
   await expect(table.getByRole('row').first()).toHaveCSS('height', '44px');
   await expect(table.getByRole('cell').first()).toHaveCSS('font-size', '12px');
+  const quebecCity = table.getByRole('cell', { name: 'Quebec City', exact: true }).first();
+  await expect(quebecCity).toHaveCSS('white-space', 'nowrap');
+  expect(await quebecCity.evaluate(cell => {
+    const text = document.createRange();
+    text.selectNodeContents(cell);
+    return { lines: text.getClientRects().length, fits: cell.scrollWidth <= cell.clientWidth };
+  })).toEqual({ lines: 1, fits: true });
+  expect(await table.getByRole('row').first().getByRole('columnheader').nth(1).evaluate(cell => cell.getBoundingClientRect().width)).toBe(94);
   expect(await panel.locator('img').evaluateAll(images => images.every(image => (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0))).toBe(true);
   const separator = panel.locator('img[src="assets/toolbar-line.svg"]:visible');
   await expect(separator).toHaveJSProperty('naturalWidth', 389);
@@ -122,7 +130,7 @@ test('packaged unpaid history updates while open, ignores other consulates, and 
     await change('Toronto', 'October 17, 2026', 2);
     await change('Vancouver', 'No Appointments Available', 2);
     await change('Vancouver', 'January 20, 2027', 3);
-    await expect(table.getByRole('cell').filter({ hasText: /^No$/ })).toHaveCount(3);
+    await expect(table.getByRole('cell').filter({ hasText: /^Vancouver$/ })).toHaveCount(3);
     expect(posts).toBe(0);
     await panel.getByRole('button', { name: 'Back', exact: true }).click();
     await panel.getByRole('button', { name: 'Cancel', exact: true }).click();

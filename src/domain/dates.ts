@@ -59,9 +59,38 @@ export function inWindow(value: string, prefs: DatePreferences): boolean {
 
 export function canBook(value: string, currentDate: string | null, prefs: DatePreferences): boolean {
   if (currentDate !== null && !isIsoDate(currentDate)) return false;
-  return inWindow(value, prefs) && (!prefs.onlyEarlier || currentDate === null || value < currentDate);
+  // The current date is never a move, whatever the earlier-only setting: at
+  // another consulate it would be a pointless swap that verification (dates
+  // only) cannot distinguish from no change.
+  return inWindow(value, prefs) && value !== currentDate && (!prefs.onlyEarlier || currentDate === null || value < currentDate);
 }
 
 export function earliestCandidate(dates: string[], currentDate: string | null, prefs: DatePreferences): string | null {
   return [...dates].sort().find(value => canBook(value, currentDate, prefs)) ?? null;
+}
+
+export const CONSULATE_ORDER: readonly Consulate[] = ['Calgary', 'Halifax', 'Montreal', 'Ottawa', 'Quebec', 'Toronto', 'Vancouver'];
+
+export function selectedConsulates(raw: unknown): Consulate[] | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  let names: unknown[];
+  if (Array.isArray(record.consulates)) names = record.consulates;
+  else if (typeof record.consulate === 'string') names = record.consulate === '' ? [] : [record.consulate];
+  else return null;
+  if (!names.every(name => CONSULATE_ORDER.includes(name as Consulate))) return null;
+  return CONSULATE_ORDER.filter(name => names.includes(name));
+}
+
+export type ConsulateCandidate = { date: string; consulate: Consulate };
+
+export function earliestCandidateAcross(
+  byConsulate: { consulate: Consulate; dates: string[] }[], currentDate: string | null, prefs: DatePreferences,
+): ConsulateCandidate | null {
+  let best: ConsulateCandidate | null = null;
+  for (const { consulate, dates } of byConsulate) {
+    const date = earliestCandidate(dates, currentDate, prefs);
+    if (date !== null && (best === null || date < best.date)) best = { date, consulate };
+  }
+  return best;
 }
