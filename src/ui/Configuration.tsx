@@ -57,7 +57,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
         {advanced && <fieldset disabled={active || saving} className={panel.advanced}>
           <div className={panel.group}>
             <Toggle label="Earlier appointments only" checked={draft.onlyEarlier} change={value => update('onlyEarlier', value)} />
-            <Row label="Checking interval (s)"><input className={panel.shortInput} type="number" aria-label="Checking interval (s)" {...validationEvents('interval')} min="60" max="86400" value={draft.interval} onChange={event => update('interval', Number(event.target.value))} /></Row>
+            <Row label="Checking interval (s)"><input className={panel.shortInput} type="number" aria-label="Checking interval (s)" {...validationEvents('interval')} min="30" max="86400" value={draft.interval} onChange={event => update('interval', Number(event.target.value))} /></Row>
             <Row label="Paid IVR Group"><input aria-label="Paid IVR Group" inputMode="numeric" {...validationEvents('paidIvr')} value={draft.paidIvr} onChange={event => update('paidIvr', event.target.value)} /></Row>
             <Row label="Unpaid IVR Group"><input aria-label="Unpaid IVR Group" inputMode="numeric" {...validationEvents('unpaidIvr')} value={draft.unpaidIvr} onChange={event => update('unpaidIvr', event.target.value)} /></Row>
           </div>

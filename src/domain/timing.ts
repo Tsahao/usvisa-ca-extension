@@ -30,10 +30,10 @@ export function mapHttpStatus(status: number): HttpOutcome {
   return 'retryable';
 }
 
-// Healthy poll cadence: 60s base plus 0–30s jitter. Randomness is injected so
+// Healthy poll cadence: configured base (default 60s) plus 0–30s jitter. Randomness is injected so
 // tests stay deterministic; callers pass Math.random in production.
 export function pollDelaySeconds(random: () => number, interval = POLL_INTERVAL_S): number {
-  if (!Number.isInteger(interval) || interval < 60 || interval > 86400) throw new Error('Invalid poll interval.');
+  if (!Number.isInteger(interval) || interval < 30 || interval > 86400) throw new Error('Invalid poll interval.');
   const roll = random();
   if (!(roll >= 0 && roll < 1)) throw new Error('Invalid random source.');
   return interval + Math.floor(roll * (POLL_JITTER_S + 1));

@@ -41,8 +41,8 @@ export function preferenceIssues(prefs: Preferences): PreferenceIssue[] {
   }
   if (isIsoDate(prefs.earliest) && isIsoDate(prefs.latest) && prefs.earliest > prefs.latest)
     issues.push({ fields: ['earliest', 'latest'], message: 'Choose a valid inclusive date window.' });
-  if (!Number.isInteger(prefs.interval) || prefs.interval < 60 || prefs.interval > 86400)
-    issues.push({ fields: ['interval'], message: 'Checking interval must be a whole number from 60 to 86400 seconds.' });
+  if (!Number.isInteger(prefs.interval) || prefs.interval < 30 || prefs.interval > 86400)
+    issues.push({ fields: ['interval'], message: 'Checking interval must be a whole number from 30 to 86400 seconds.' });
   for (const field of ['paidIvr', 'unpaidIvr'] as const) {
     if (prefs[field] !== '' && !/^\d+$/.test(prefs[field])) issues.push({ fields: [field], message: 'IVR groups must contain digits only.' });
   }
