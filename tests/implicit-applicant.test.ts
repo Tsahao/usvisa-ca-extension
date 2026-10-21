@@ -117,3 +117,49 @@ describe('serialized paid form without applicant query or fields', () => {
     expect(confirmed).toHaveBeenCalledOnce();
   });
 });
+
+describe('sole-applicant form reached through the acknowledged warning', () => {
+  // A single-applicant group skips the applicant picker: acknowledging the
+  // limit warning submits a GET form that lands on the booking form with only
+  // the acknowledgement parameters in the query, never applicants[].
+  const acknowledged = base + '?confirmed_limit_message=1&commit=Continue';
+  const repeated = ['?confirmed_limit_message=1&confirmed_limit_message=1&commit=Continue', '?confirmed_limit_message=1&commit=Continue&commit=Continue'];
+  it('reads, edits and fetches times on the acknowledged bare form with the implicit binding', async () => {
+    vi.stubGlobal('location', { href: acknowledged });
+    expect(read('11111111')).toBeNull();
+    expect(read('11111111', id)).toMatchObject({ kind: 'form', applicantIds: [id], warningAcknowledged: true });
+    for (const action of ['facility', 'date', 'time'] as const) expect((await act({ ...request, action })).ok).toBe(true);
+    expect(await times('/en-ca/niv/schedule/11111111/appointment', 95, request.date, [id], id)).toMatchObject({ status: 200 });
+    expect(read('11111111', id)).toMatchObject({ applicantIds: [id], facilityId: 95, date: request.date, time: request.time });
+    expect(posted).not.toHaveBeenCalled();
+  });
+  it('submits on the acknowledged bare form with the implicit binding', async () => {
+    vi.stubGlobal('location', { href: acknowledged });
+    const clicked = vi.fn();
+    document.querySelector('#appointments_submit')!.addEventListener('click', clicked);
+    for (const action of ['facility', 'date', 'time'] as const) expect((await act({ ...request, action })).ok).toBe(true);
+    const args = { ...request, action: 'submit' as const, earliest: '2026-11-01', latest: '2026-12-31', currentDate: null, currentDateTag: 'unbooked' as const, onlyEarlier: true, testMode: true };
+    document.querySelector('#appointments_submit')!.setAttribute('data-confirm', JSON.stringify({ title: 'Synthetic initial confirmation', ok: 'Confirm', cancel: 'Cancel' }));
+    expect(submit({ ...args, implicitApplicantId: undefined })).toEqual({ ok: false });
+    // Test Mode never clicks the final submit on the acknowledged form either.
+    expect(submit(args)).toEqual({ ok: false });
+    expect(clicked).not.toHaveBeenCalled();
+    expect(posted).not.toHaveBeenCalled();
+    for (const query of repeated) {
+      vi.stubGlobal('location', { href: base + query });
+      expect(submit({ ...args, testMode: false })).toEqual({ ok: false });
+    }
+    expect(clicked).not.toHaveBeenCalled();
+    vi.stubGlobal('location', { href: acknowledged });
+    expect(submit({ ...args, testMode: false })).toEqual({ ok: true });
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(posted).toHaveBeenCalledOnce();
+  });
+  it.each(['?confirmed_limit_message=0&commit=Continue', '?confirmed_limit_message=1&other=1', ...repeated])('still refuses any other query on the bare form (%s)', async query => {
+    vi.stubGlobal('location', { href: base + query });
+    expect(read('11111111', id)).toBeNull();
+    expect((await act({ ...request, action: 'facility' })).ok).toBe(false);
+    expect(await times('/en-ca/niv/schedule/11111111/appointment', 95, request.date, [id], id)).toEqual({ status: 0, body: null });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});

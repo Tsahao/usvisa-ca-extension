@@ -164,7 +164,9 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
     return next();
   }
   let formIds = url.searchParams.getAll('applicants[]');
-  if (!url.search && request.implicitApplicantId && /^[0-9]{1,32}$/.test(request.implicitApplicantId) &&
+  const bareQuery = (!url.search || ([...url.searchParams.keys()].every(key => key === 'confirmed_limit_message' || key === 'commit') && url.searchParams.get('confirmed_limit_message') === '1' &&
+    url.searchParams.getAll('confirmed_limit_message').length === 1 && url.searchParams.getAll('commit').length <= 1));
+  if (bareQuery && request.implicitApplicantId && /^[0-9]{1,32}$/.test(request.implicitApplicantId) &&
       sameIds([request.implicitApplicantId]) && !document.querySelector('[name="applicants[]"]')) {
     const forms = document.querySelectorAll<HTMLFormElement>('#appointment-form');
     if (forms.length !== 1) return refuse('form-missing');
