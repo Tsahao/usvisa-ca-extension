@@ -597,3 +597,18 @@ describe('paid executor', () => {
     expect(h.d.inject).not.toHaveBeenCalled();
   });
 });
+
+describe('workflow-blocked telemetry source', () => {
+  it.each(['tab', 'roster'] as const)('retains the %s refusal and booking stage without old authentication context', async issue => {
+    const h = harness('form');
+    const initial = seeded('form');
+    initial.failureContext = { category: 'authentication-failed', code: 'credential-rejected', step: 'login-submit', authPurpose: 'start' };
+    if (issue === 'tab') h.d.getTab = vi.fn(async () => { throw new Error('synthetic closed tab'); });
+    else h.page.applicantIds = ['99999999'];
+    const next = validateEngineState(await runBookingStage(h.d, initial));
+    expect(next).toMatchObject({ status: 'verifying', failureContext: { category: 'workflow-blocked',
+      code: issue === 'tab' ? 'tab-unavailable' : 'applicant-roster-changed', step: 'booking-form' } });
+    expect(next.failureContext).not.toHaveProperty('authPurpose');
+    expect(h.mutations).toEqual([]);
+  });
+});

@@ -299,3 +299,90 @@ describe('best-effort delivery and storage', () => {
     expect(f.record().outbox).toHaveLength(0); expect(f.record().nextFlushAt).toBeNull();
   });
 });
+
+describe('bounded terminal failure context', () => {
+  const context = { category: 'authentication-failed', code: 'tab-unavailable', step: 'tab-check', authPurpose: 'renew' } as const;
+  it('sends source context once across worker wakes and transport retries, without raw data', async () => {
+    const f = fixture(); await f.start();
+    const failed: EngineState = { ...f.state, status: 'stopped', loginFailed: true, failureContext: { ...context } };
+    f.tracker.observe(failed);
+    // The analytics queue must not retain a mutable reference to the source metadata.
+    failed.failureContext!.code = 'credential-rejected';
+    await f.tracker.settled();
+    const worker = createAnalyticsTracker(f.deps);
+    worker.observe(failed); await worker.settled();
+    const events = f.record().outbox.filter(event => event.event === 'workflow_failed');
+    expect(events).toHaveLength(1);
+    expect(events[0].properties).toMatchObject({ failure_reason: 'authentication-failed', failure_code: 'tab-unavailable',
+      failure_step: 'tab-check', auth_purpose: 'renew' });
+    f.values[ANALYTICS_KEY] = { ...f.record(), outbox: events };
+    f.fetchFn.mockRejectedValueOnce(new Error('synthetic network failure'));
+    await worker.flush();
+    f.setTime(f.record().nextFlushAt!); await worker.flush();
+    const bodies = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string));
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(JSON.stringify(bodies)).not.toMatch(/11111111|22222222|run-id|synthetic network failure/);
+  });
+  it('keeps old queued failures deliverable without inventing historical details', async () => {
+    const f = fixture(); await f.start();
+    f.tracker.observe({ ...f.state, status: 'stopped', loginFailed: true }); await f.tracker.settled();
+    const old = f.record().outbox.at(-1)!;
+    delete old.properties.failure_code; delete old.properties.failure_step;
+    expect(validateQueuedEvent(old)).toBe(old);
+    f.values[ANALYTICS_KEY] = { ...f.record(), outbox: [old] };
+    await createAnalyticsTracker(f.deps).flush();
+    const body = JSON.parse(f.fetchFn.mock.calls[0][1].body as string);
+    expect(body.properties.failure_reason).toBe('authentication-failed');
+    expect(body.properties).not.toHaveProperty('failure_code');
+    expect(body.properties).not.toHaveProperty('auth_purpose');
+  });
+  it.each(['legacy', 'wrong-category', 'corrupt-code', 'extra-private-field'])('uses unknown rather than stale or unsafe details (%s)', async issue => {
+    const f = fixture(); await f.start();
+    const raw = issue === 'legacy' ? undefined : issue === 'wrong-category' ? context : issue === 'corrupt-code'
+      ? { ...context, category: 'workflow-blocked', code: 'private@example.invalid' }
+      : { ...context, category: 'workflow-blocked', email: 'private@example.invalid' };
+    f.tracker.observe({ ...f.state, status: 'verifying', failureContext: raw as EngineState['failureContext'] });
+    await f.tracker.settled();
+    const event = f.record().outbox.at(-1)!;
+    expect(event.properties).toMatchObject({ failure_reason: 'workflow-blocked', failure_code: 'unknown', failure_step: 'unknown' });
+    expect(event.properties).not.toHaveProperty('auth_purpose');
+    expect(JSON.stringify(event)).not.toContain('private@example.invalid');
+  });
+  it('exports explicit blocked details without adding an authentication purpose', async () => {
+    const f = fixture(); await f.start();
+    f.tracker.observe({ ...f.state, status: 'verifying', failureContext: {
+      category: 'workflow-blocked', code: 'applicant-roster-changed', step: 'booking-form' } });
+    await f.tracker.settled();
+    expect(f.record().outbox.at(-1)!.properties).toMatchObject({ failure_reason: 'workflow-blocked',
+      failure_code: 'applicant-roster-changed', failure_step: 'booking-form' });
+    expect(f.record().outbox.at(-1)!.properties).not.toHaveProperty('auth_purpose');
+  });
+  it('rejects unknown values, partial metadata and diagnostic fields on other milestones before delivery', async () => {
+    const f = fixture(); await f.start();
+    f.tracker.observe({ ...f.state, status: 'stopped', loginFailed: true, failureContext: context });
+    await f.tracker.settled();
+    const event = f.record().outbox.at(-1)!;
+    for (const patch of [{ failure_code: 'private@example.invalid' }, { failure_step: 'https://example.invalid' },
+      { auth_purpose: 'synthetic-password' }, { failure_code: undefined }, { failure_step: undefined },
+      { failure_detail: 'raw page content' }]) {
+      const unsafe = { ...event, properties: { ...event.properties, ...patch } };
+      expect(() => toCapturePayload(unsafe as unknown as Parameters<typeof toCapturePayload>[0], token)).toThrow();
+    }
+    for (const milestone of f.record().outbox.filter(entry => entry.event !== 'workflow_failed')) {
+      expect(() => validateQueuedEvent({ ...milestone, properties: { ...milestone.properties,
+        failure_code: 'tab-unavailable', failure_step: 'tab-check' } })).toThrow();
+    }
+  });
+  it.each(['retry', 'manual', 'intent', 'verification-error', 'stopped-session', 'disabled'])('metadata does not make excluded states count as failures (%s)', async issue => {
+    const f = fixture(issue !== 'disabled'); await f.start();
+    const state: EngineState = { ...f.state, status: 'stopped', loginFailed: true, failureContext: context };
+    if (issue === 'retry') state.status = 'running';
+    if (issue === 'manual') state.manualAuthentication = true;
+    if (issue === 'intent') state.intent = { runId, mode: 'booking', groupId: '11111111', targetDate: '2026-11-19',
+      consulate: 'Vancouver', testMode: false, createdAt: now };
+    if (issue === 'verification-error') state.verificationError = 'synthetic verification guidance';
+    if (issue === 'stopped-session') f.tracker.end();
+    f.tracker.observe(state); await f.tracker.settled();
+    expect(f.record()?.outbox.filter(event => event.event === 'workflow_failed') ?? []).toHaveLength(0);
+  });
+});

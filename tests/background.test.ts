@@ -2170,7 +2170,8 @@ describe('read-only probe boundaries', () => {
     chromeMock.tabs.query.mockResolvedValue([{ id: 8, url }]);
     chromeMock.tabs.get.mockRejectedValue(new Error('Synthetic owned tab closed'));
     alarmed({ name: 'enginePoll' });
-    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying' }));
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying',
+      failureContext: { category: 'workflow-blocked', code: 'tab-unavailable', step: 'tab-check' } }));
     expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(2);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
   });

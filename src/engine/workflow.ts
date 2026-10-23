@@ -1,3 +1,4 @@
+import { readFailureContext, type FailureContext } from '../domain/failure-context';
 import { isPanelCommandErrorMessage } from './start-errors';
 import { isAuthenticationFailureReason, type AuthenticationFailureReason } from '../domain/diagnostics';
 import { emptyAlertState, type AlertState } from '../domain/alerts';
@@ -28,7 +29,7 @@ export function isVerificationErrorMessage(value: unknown): value is string {
   return typeof value === 'string' && (VERIFICATION_ERRORS as readonly string[]).includes(value);
 }
 
-// Fixed identifier-free authentication failure reasons (developer state only,
+// Fixed identifier-free authentication failure reasons (also used by analytics,
 // never shown in product UI/copy). Optional in saves; old saves migrate to
 // null and malformed values fail closed. Cleared on fresh/healthy
 // authentication and preserved existing panel/analytics semantics (panel
@@ -119,10 +120,13 @@ export type EngineState = {
   loginFailed: boolean;
   authenticationError?: string | null;
   // Retained fixed identifier-free authentication failure diagnostic reason.
-  // Developer state only: never rendered in product UI/copy, never carries
+  // Never rendered in product UI/copy; also used for failure analytics. Never carries
   // URLs, credentials, identifiers or page contents. Optional; old saves
   // migrate to null.
   authenticationFailureReason?: AuthenticationFailureReason | null;
+  // Captured at the terminal transition before authentication/stage is cleared.
+  // Optional, identifier-free analytics context; malformed metadata is dropped.
+  failureContext?: FailureContext | null;
   manualAuthentication: boolean;
   verificationTabId: number | null;
   queuedStart?: QueuedStart | null;
@@ -165,7 +169,7 @@ export function emptyEngineState(now: string): EngineState {
     startedAt: null,
     policyKey: null,
     pollIntervalS: 60,
-    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false, verificationTabId: null,
+    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, authenticationFailureReason: null, failureContext: null, manualAuthentication: false, verificationTabId: null,
     queuedStart: null, verificationError: null, restartPending: false, restartFailed: false,
   };
 }
@@ -368,6 +372,7 @@ export function validateEngineState(value: unknown): EngineState {
     pollIntervalS: pollIntervalS as number,
     authentication, sessionRenewals: sessionRenewals as number,
     loginFailed: loginFailed as boolean, authenticationError: authenticationError as string | null, authenticationFailureReason: authenticationFailureReason as AuthenticationFailureReason | null, manualAuthentication: manualAuthentication as boolean, verificationTabId: verificationTabId as number | null,
+    failureContext: readFailureContext(state.failureContext),
     queuedStart, verificationError: verificationError as string | null, restartPending, restartFailed,
     ...(discovery ? { discovery } : {}),
   };
@@ -411,7 +416,7 @@ export function startRun(
     startedAt: args.now,
     policyKey: null,
     pollIntervalS: 60,
-    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, authenticationFailureReason: null, manualAuthentication: false, verificationTabId: null,
+    authentication: null, sessionRenewals: 0, loginFailed: false, authenticationError: null, authenticationFailureReason: null, failureContext: null, manualAuthentication: false, verificationTabId: null,
     queuedStart: null, verificationError: null, restartPending: false, restartFailed: false,
   };
 }
@@ -455,7 +460,7 @@ export function stopRun(state: EngineState, args: { owner: string; runId: string
   if (state.status !== 'running' && state.status !== 'verifying') return state;
   if (state.owner !== args.owner || state.runId !== args.runId) return state;
   return { ...state, status: state.intent ? 'verifying' : 'stopped', authentication: null, verification: null, nextPollAt: null,
-    verificationTabId: null, queuedStart: null, restartPending: false, updatedAt: args.now };
+    verificationTabId: null, queuedStart: null, restartPending: false, failureContext: null, updatedAt: args.now };
 }
 
 // Intent is persisted before any irreversible action. Late or foreign intents
@@ -553,7 +558,7 @@ export function reconcileStartup(state: EngineState, now: string, browserRestart
       state = { ...state, status: 'verifying', verification: { reads: [], nextReadAt: new Date(Date.parse(now) + 30_000).toISOString() }, nextPollAt: null, updatedAt: now };
     else state = { ...state, status: 'verifying', verification: null, nextPollAt: null, updatedAt: now };
   }
-  else if (state.status === 'running' && state.executor?.actionPending) state = parkForReview(state, now);
+  else if (state.status === 'running' && state.executor?.actionPending) state = parkForReview(state, now, { category: 'workflow-blocked', code: 'checkpoint-interrupted', step: 'worker-recovery' });
   else if (state.status === 'running' && browserRestart) state = parkForReview(state, now);
   // Deliberately parked verification (Stop, browser restart, manual sign-in,
   // fixed error banners) stays parked with no deadline: the alarm loop has
@@ -567,10 +572,11 @@ export function reconcileStartup(state: EngineState, now: string, browserRestart
 // Parks a running workflow for manual review without ending it: tab loss,
 // invalid configuration, or any situation where continuing blindly would be
 // unsafe. Everything is preserved; only the deadline is dropped.
-export function parkForReview(state: EngineState, now: string): EngineState {
+export function parkForReview(state: EngineState, now: string, context?: FailureContext): EngineState {
   if (!isIsoDateTime(now)) throw new Error('Invalid engine timestamp.');
   if (state.status !== 'running') return state;
-  return { ...state, status: 'verifying', authentication: null, nextPollAt: null, restartPending: false, updatedAt: now };
+  return { ...state, status: 'verifying', authentication: null, nextPollAt: null, restartPending: false,
+    failureContext: readFailureContext(context), updatedAt: now };
 }
 
 // Parks a run that still holds a booking intent for automatic verification

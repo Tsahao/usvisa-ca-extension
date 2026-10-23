@@ -1,3 +1,7 @@
+import { FAILURE_REASONS, isAuthPurpose, isFailureCode, isFailureStep, readFailureContext,
+  type AuthPurpose, type FailureCode, type FailureContext, type FailureReason, type FailureStep } from '../domain/failure-context';
+export { FAILURE_REASONS, type FailureReason } from '../domain/failure-context';
+
 // Fixed allowlist analytics event builders. No credentials, IVR, group,
 // applicant, tab, URL, date, preference, or raw error/DOM/network text ever
 // enters telemetry. Every event carries only the fields below.
@@ -10,9 +14,6 @@ export const ANALYTICS_EVENTS = [
   'appointment_booked',
 ] as const;
 export type AnalyticsEventName = (typeof ANALYTICS_EVENTS)[number];
-
-export const FAILURE_REASONS = ['start-failed', 'setup-exhausted', 'authentication-failed', 'workflow-blocked'] as const;
-export type FailureReason = (typeof FAILURE_REASONS)[number];
 
 export const ANALYTICS_MODES = ['booking', 'alerts'] as const;
 export type AnalyticsMode = (typeof ANALYTICS_MODES)[number];
@@ -39,6 +40,9 @@ export type AnalyticsProperties = {
   environment: AnalyticsEnvironment;
   test_mode?: boolean;
   failure_reason?: FailureReason;
+  failure_code?: FailureCode;
+  failure_step?: FailureStep;
+  auth_purpose?: AuthPurpose;
   $process_person_profile: false;
   $geoip_disable: true;
 };
@@ -69,7 +73,7 @@ export function validateQueuedEvent(value: unknown): QueuedAnalyticsEvent {
   if (props.$process_person_profile !== false || props.$geoip_disable !== true)
     throw new Error('Invalid analytics event.');
   // Reject any non-allowlisted property (prevents identifier leaks).
-  const allowed = new Set(['analytics_session_id', 'mode', 'extension_version', 'environment', 'test_mode', 'failure_reason', '$process_person_profile', '$geoip_disable']);
+  const allowed = new Set(['analytics_session_id', 'mode', 'extension_version', 'environment', 'test_mode', 'failure_reason', 'failure_code', 'failure_step', 'auth_purpose', '$process_person_profile', '$geoip_disable']);
   for (const key of Object.keys(props)) {
     if (!allowed.has(key)) throw new Error('Invalid analytics event.');
   }
@@ -81,6 +85,11 @@ export function validateQueuedEvent(value: unknown): QueuedAnalyticsEvent {
     throw new Error('Invalid analytics event.');
   if (props.failure_reason !== undefined && !isFailureReason(props.failure_reason))
     throw new Error('Invalid analytics event.');
+  // Optional for outbox entries queued by older releases. New builders emit
+  // code/step together; diagnostics are forbidden on all other milestones.
+  const hasDetails = props.failure_code !== undefined || props.failure_step !== undefined || props.auth_purpose !== undefined;
+  if (hasDetails && (entry.event !== 'workflow_failed' || !isFailureCode(props.failure_code) || !isFailureStep(props.failure_step) ||
+      (props.auth_purpose !== undefined && !isAuthPurpose(props.auth_purpose)))) throw new Error('Invalid analytics event.');
   // Per-event required fields.
   if (entry.event === 'installation_seen') {
     if (props.analytics_session_id !== undefined || props.mode !== undefined || props.test_mode !== undefined || props.failure_reason !== undefined)
@@ -153,6 +162,7 @@ export function buildAppointmentBooked(args: {
 export function buildWorkflowFailed(args: {
   eventUuid: string; distinctId: string; timestamp: string; extensionVersion: string;
   analyticsSessionId: string; mode: AnalyticsMode; testMode: boolean; failureReason: FailureReason;
+  failureContext?: FailureContext | null;
 }): QueuedAnalyticsEvent {
   if (!isUuid(args.eventUuid) || !isUuid(args.distinctId) || !isUuid(args.analyticsSessionId))
     throw new Error('Invalid analytics identity.');
@@ -160,10 +170,14 @@ export function buildWorkflowFailed(args: {
   if (args.mode !== 'booking' && args.mode !== 'alerts') throw new Error('Invalid analytics mode.');
   if (typeof args.testMode !== 'boolean') throw new Error('Invalid analytics mode flag.');
   if (!isFailureReason(args.failureReason)) throw new Error('Invalid analytics reason.');
+  const context = readFailureContext(args.failureContext);
+  const details = context?.category === args.failureReason ? context : null;
   return { uuid: args.eventUuid, event: 'workflow_failed', distinct_id: args.distinctId,
     timestamp: args.timestamp,
     properties: { ...baseProperties(args.extensionVersion), analytics_session_id: args.analyticsSessionId,
-      mode: args.mode, test_mode: args.testMode, failure_reason: args.failureReason },
+      mode: args.mode, test_mode: args.testMode, failure_reason: args.failureReason,
+      failure_code: details?.code ?? 'unknown', failure_step: details?.step ?? 'unknown',
+      ...(details?.authPurpose === undefined ? {} : { auth_purpose: details.authPurpose }) },
     attempts: 0 };
 }
 

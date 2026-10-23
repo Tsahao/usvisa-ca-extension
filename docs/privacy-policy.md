@@ -1,6 +1,6 @@
 # Privacy Policy — US Visa Scheduler for Canada
 
-Effective date: October 16, 2026.
+Effective date: October 23, 2026.
 
 Publisher: loose ends studio.
 
@@ -75,7 +75,11 @@ understand adoption and workflow reliability:
 Events contain random installation and event identifiers, a timestamp,
 extension version and production-environment label. Workflow events also
 contain a separate random session identifier, mode and Test Mode flag; failure
-events include a fixed failure category. These identifiers are not derived from
+events include a fixed failure category and predefined codes for the specific
+failure reason and workflow step. When known, they also identify the sign-in
+purpose (starting, renewing or verifying a workflow). Unavailable details are
+marked unknown or omitted. These are limited status codes, not the internal
+diagnostics log, page content or raw error messages. These identifiers are not derived from
 your email, visa account or hardware. The installation identifier and a bounded
 queue of unsent events are stored locally.
 

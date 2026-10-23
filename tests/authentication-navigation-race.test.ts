@@ -578,3 +578,44 @@ describe('login-to-dashboard navigation race', () => {
     expect(bound.authenticationError).toBeNull();
   });
 });
+
+describe('terminal failure telemetry source', () => {
+  it.each(['tab', 'navigation', 'save', 'preferences'] as const)('identifies a %s exception in the renewal block without guessing tab loss', async issue => {
+    const h = harness();
+    h.setUrl(DASHBOARD);
+    h.deps.navigateTab = vi.fn(async () => undefined);
+    const initial = { ...boundSingle(), executor: { tabId: 7, applicantIds: singleId, targetTime: null, skippedDates: [], actionPending: false } };
+    const error = new Error('private@example.invalid https://example.invalid/ synthetic-password');
+    if (issue === 'tab') h.deps.getTab = vi.fn(async () => { throw error; });
+    if (issue === 'navigation') h.deps.navigateTab = vi.fn(async () => { throw error; });
+    if (issue === 'save') h.deps.saveState = vi.fn(async () => { throw error; });
+    if (issue === 'preferences') h.deps.loadPrefs = vi.fn().mockResolvedValueOnce({ ...prefs }).mockRejectedValue(error);
+    const next = validateEngineState(await runAuthentication(h.deps, beginAuthentication(initial, 'renew', NOW)));
+    const code = issue === 'tab' ? 'tab-unavailable' : issue === 'navigation' ? 'navigation-failed' : 'storage-unavailable';
+    const step = issue === 'tab' ? 'tab-check' : issue === 'navigation' ? 'navigation' : issue === 'save' ? 'state-save' : 'configuration-check';
+    expect(next).toMatchObject({ status: 'stopped', authentication: null, authenticationFailureReason: code,
+      failureContext: { category: 'authentication-failed', code, step, authPurpose: 'renew' } });
+    expect(JSON.stringify(next.failureContext)).not.toMatch(/private@|https:|synthetic-password/);
+    if (issue !== 'navigation') expect(h.deps.navigateTab).not.toHaveBeenCalled();
+    expect(h.deps.inject).not.toHaveBeenCalled();
+  });
+  it('retains initial credential rejection context after clearing auth, then clears it on a new Start', async () => {
+    const h = harness();
+    h.deps.inject = vi.fn(async (_tab, func) => func.name === 'readSiteMaintenance'
+      ? { maintenance: false } : { ok: false, reason: 'credential-rejected' });
+    const initial = beginAuthentication(seed(), 'start', NOW);
+    const next = validateEngineState(await runAuthentication(h.deps, { ...initial, authentication: { ...initial.authentication!, tabId: 7 } }));
+    expect(next.failureContext).toEqual({ category: 'authentication-failed', code: 'credential-rejected', step: 'login-prepare', authPurpose: 'start' });
+    expect(next.authentication).toBeNull();
+    expect(startRun(next, { ...args, runId: 'fresh-run-0001', mode: 'booking' }).failureContext).toBeNull();
+    expect(beginAuthentication({ ...next, status: 'running' }, 'start', NOW).failureContext).toBeNull();
+  });
+  it('drops missing or malformed optional metadata without breaking an otherwise valid checkpoint', () => {
+    const state = boundSingle(); delete state.failureContext;
+    expect(validateEngineState(state).failureContext).toBeNull();
+    for (const context of [{ category: 'authentication-failed', code: 'secret', step: 'tab-check' },
+      { category: 'authentication-failed', code: 'tab-unavailable', step: 'tab-check', page: 'private' }]) {
+      expect(validateEngineState({ ...state, failureContext: context }).failureContext).toBeNull();
+    }
+  });
+});

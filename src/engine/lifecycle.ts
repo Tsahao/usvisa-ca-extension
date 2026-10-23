@@ -1,3 +1,4 @@
+import { blockedFailureContext } from '../domain/failure-context';
 import { minimumPollIntervalSeconds, SESSION_AGE_MINUTES } from '../domain/timing';
 import { parkForReview, type EngineState } from './workflow';
 import { readAutoMode } from '../domain/auto-mode';
@@ -21,8 +22,11 @@ export function reviewLifecycle(state: EngineState, preferences: Record<string, 
   const interval = preferences?.interval ?? 60;
   const minimumInterval = minimumPollIntervalSeconds(preferences);
   if (!Number.isInteger(interval) || (interval as number) < minimumInterval || (interval as number) > 86400 ||
-      (state.policyKey !== null && state.pollIntervalS < minimumInterval)) return parkForReview(state, now);
-  if (elapsed < 0 || elapsed >= SESSION_AGE_MINUTES * 60_000 || (state.policyKey !== null && state.policyKey !== key))
-    return parkForReview(state, now);
+      (state.policyKey !== null && state.pollIntervalS < minimumInterval)) return parkForReview(state, now, blockedFailureContext('config-changed', 'lifecycle-check'));
+  if (elapsed < 0 || elapsed >= SESSION_AGE_MINUTES * 60_000)
+    return parkForReview(state, now, { category: 'workflow-blocked',
+      code: elapsed < 0 ? 'clock-invalid' : 'session-age-exceeded', step: 'lifecycle-check' });
+  if (state.policyKey !== null && state.policyKey !== key)
+    return parkForReview(state, now, blockedFailureContext('config-changed', 'lifecycle-check'));
   return state.policyKey === null ? { ...state, policyKey: key, pollIntervalS: interval as number, updatedAt: now } : state;
 }

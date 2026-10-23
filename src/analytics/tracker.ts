@@ -1,3 +1,4 @@
+import { readFailureContext, type FailureContext } from '../domain/failure-context';
 import type { AnalyticsConfig } from './config';
 import { buildAlertsEstablished, buildAppointmentBooked, buildInstallationSeen, buildWorkflowFailed, buildWorkflowStarted,
   type AnalyticsMode, type FailureReason, type QueuedAnalyticsEvent } from './events';
@@ -67,12 +68,12 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
     appendEvent(record, buildWorkflowStarted({ ...base(), distinctId: record.distinctId,
       analyticsSessionId: id, mode, testMode }));
   }
-  function failIn(record: AnalyticsRecord, reason: FailureReason): void {
+  function failIn(record: AnalyticsRecord, reason: FailureReason, context?: FailureContext | null): void {
     const session = record.session;
     if (!session || session.closed || session.failed) return;
     session.failed = true;
     appendEvent(record, buildWorkflowFailed({ ...base(), distinctId: record.distinctId,
-      analyticsSessionId: session.id, mode: session.mode, testMode: session.testMode, failureReason: reason }));
+      analyticsSessionId: session.id, mode: session.mode, testMode: session.testMode, failureReason: reason, failureContext: context }));
   }
   async function flush(): Promise<void> {
     if (!deps.config.enabled || flushing) return;
@@ -139,6 +140,8 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
     },
     observe(state: EngineState, previousRunId?: string | null): void {
       if (state.owner !== 'product-panel-owner' || !state.runId) return;
+      // Copy bounded source metadata before the asynchronous analytics queue.
+      const context = readFailureContext(state.failureContext);
       void change(record => {
         // Only an explicitly queued product request can create a session when
         // recovery replaces the engine run ID. Ordinary retries retain it.
@@ -157,8 +160,8 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
         if (!session || session.runId !== state.runId || session.mode !== state.mode) return;
         if (state.intent || state.manualAuthentication || state.verificationError) return;
         if (state.status === 'stopped' && (state.loginFailed || state.restartFailed || state.authenticationError))
-          failIn(record, state.restartFailed ? 'setup-exhausted' : 'authentication-failed');
-        else if (state.status === 'verifying' && state.stage !== 'done') failIn(record, 'workflow-blocked');
+          failIn(record, state.restartFailed ? 'setup-exhausted' : 'authentication-failed', context);
+        else if (state.status === 'verifying' && state.stage !== 'done') failIn(record, 'workflow-blocked', context);
       });
     },
     activated(state: EngineState, rowCount: number): void {

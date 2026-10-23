@@ -39,7 +39,7 @@ export const SELECTION_FAILURE_CODES = [
 ] as const;
 export type SelectionFailureCode = (typeof SELECTION_FAILURE_CODES)[number];
 
-// Fixed identifier-free authentication failure reasons (developer state only,
+// Fixed identifier-free authentication failure reasons (also allowlisted for analytics,
 // never shown in product UI/copy). Optional in saves; old saves migrate to
 // null and malformed values fail closed. Defined here so diagnostics and the
 // workflow share one allowlist.
@@ -50,6 +50,8 @@ export const AUTHENTICATION_FAILURE_REASONS = [
   'untrusted-navigation',
   'context-changed',
   'navigation-failed',
+  'storage-unavailable',
+  'operation-failed',
   'unrecognized-reading',
   'credential-rejected',
   // Exact dashboard selection causes (proposal 7): each fixed resolveGroup

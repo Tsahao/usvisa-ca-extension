@@ -108,6 +108,12 @@ Configured production builds send five limited, pseudonymous PostHog usage
 events: installation, accepted workflow Start, terminal workflow failure, and
 validated unpaid-alert activation, and verified successful booking (Auto Mode ON only). Count
 `appointment_booked` events in PostHog to measure bookings made by the extension.
+Failure events retain their broad `failure_reason` category and add allowlisted
+`failure_code` and `failure_step` values, plus `auth_purpose` when known. Details
+are captured at the failure, survive worker suspension, and never include raw
+exceptions or the local diagnostics log. Missing details use `unknown`; older
+queued events remain deliverable without new fields. Retries, manual sign-in
+and unresolved booking verification still do not count as terminal failures.
 Payloads exclude credentials, visa and
 applicant identifiers, portal content, URLs, consulates and appointment dates.
 No autocapture, heatmaps or session replay is used. The first release has no

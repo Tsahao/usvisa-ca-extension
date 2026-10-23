@@ -1,3 +1,4 @@
+import { blockedFailureContext, bookingFailureStep } from '../domain/failure-context';
 import { canBook, CONSULATES, selectedConsulates, validatePreferences, type Consulate } from '../domain/dates';
 import { guardBooking } from '../domain/booking';
 import { readAutoMode } from '../domain/auto-mode';
@@ -98,7 +99,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   // fixed reason so post-run analysis never reads a generic stage guard.
   const parkBare = (detail: DiagnosticDetail = 'stage-guard') => {
     note('executor-park', detail);
-    return parkForReview(state, deps.nowIso());
+    return parkForReview(state, deps.nowIso(), blockedFailureContext(detail, bookingFailureStep(state.stage)));
   };
   const park = (detail?: DiagnosticDetail) => (state.intent && !deps.isCancelled?.() ? verify() : parkBare(detail));
   if (state.executor?.actionPending && state.intent) return verify();
@@ -376,14 +377,16 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
           page.applicants.some(entry => entry.checked !== true || entry.disabled !== false)) return park();
       let ids: string[];
       try { ids = validateApplicantIds(page.applicants.map(entry => entry.id)); } catch { return park(); }
-      if (state.group!.applicantIds && !sameApplicants(state.group!.applicantIds, ids)) return park();
-      if (state.executor!.applicantIds && !sameApplicants(state.executor!.applicantIds, ids)) return park();
+      if (state.group!.applicantIds && !sameApplicants(state.group!.applicantIds, ids)) return park('roster-changed');
+      if (state.executor!.applicantIds && !sameApplicants(state.executor!.applicantIds, ids)) return park('roster-changed');
       state = { ...state, executor: { ...state.executor!, applicantIds: ids } };
       return act({ ...request, action: 'applicants', applicantIds: ids }, 'form');
     }
     case 'form': {
       const ids = state.executor!.applicantIds;
-      if (page.kind !== 'form' || !sameApplicants(page.applicantIds, ids) || !ids) return park();
+      if (page.kind !== 'form') return park();
+      if (!ids) return park('roster-missing');
+      if (!sameApplicants(page.applicantIds, ids)) return park('roster-changed');
       if (state.group!.pendingInspection) {
         // Actual form controls and the independent bound roster/baseline,
         // not a continue_actions URL, establish booking capability.

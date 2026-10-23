@@ -1,3 +1,4 @@
+import { blockedFailureContext } from './domain/failure-context';
 import { platform, type InjectionResult, type Tab } from './platform';
 import { isBareAppointmentQuery, classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
@@ -1595,10 +1596,17 @@ function queueEnginePoll(): void {
         const ownedTabId = state.mode === 'booking' ? state.executor?.tabId : state.monitorTabId;
         if (ownedTabId != null && !state.intent) {
           try {
-            const owned = await platform.tabs.get(ownedTabId);
+            let owned;
+            try { owned = await platform.tabs.get(ownedTabId); }
+            catch {
+              const next = parkForReview(state, now, blockedFailureContext('tab-lost', 'tab-check'));
+              await saveEngineState(area, next);
+              await syncEngineAlarm(null);
+              return;
+            }
             if (!isNavigationRecoveryUrl(state, owned.url) ||
                 (owned.pendingUrl && !isNavigationRecoveryUrl(state, owned.pendingUrl))) {
-              const next = parkForReview(state, now);
+              const next = parkForReview(state, now, blockedFailureContext('untrusted-url', 'tab-check'));
               await saveEngineState(area, next);
               await syncEngineAlarm(null);
               return;
@@ -1632,7 +1640,7 @@ function queueEnginePoll(): void {
           const stamped = new Date().toISOString();
           const park = async (detail: DiagnosticDetail = 'stage-guard') => {
             noteDiagnostic('poll-park', { mode: state.mode, detail });
-            const parked = parkForReview(state, new Date().toISOString());
+            const parked = parkForReview(state, new Date().toISOString(), blockedFailureContext(detail, 'alerts-poll'));
             if (parked !== state) await saveEngineState(area, parked);
             await syncEngineAlarm(null);
           };
@@ -1808,7 +1816,7 @@ function queueEnginePoll(): void {
         // Anything unplannable parks for review instead of acting blindly.
         const park = async (detail: DiagnosticDetail = 'stage-guard') => {
           noteDiagnostic('poll-park', { mode: state.mode, detail });
-          const parked = parkForReview(state, new Date().toISOString());
+          const parked = parkForReview(state, new Date().toISOString(), blockedFailureContext(detail, 'booking-poll'));
           if (parked !== state) await saveEngineState(area, parked);
           await syncEngineAlarm(null);
         };
@@ -1935,10 +1943,11 @@ function queueEnginePoll(): void {
           return;
         }
         if (!sameApplicants(page.applicantIds, state.executor!.applicantIds) ||
-            (state.group.applicantIds && !sameApplicants(page.applicantIds, state.group.applicantIds)) || readAutoMode(prefs) === null) {
+            (state.group.applicantIds && !sameApplicants(page.applicantIds, state.group.applicantIds))) {
           await park('roster-changed');
           return;
         }
+        if (readAutoMode(prefs) === null) { await park('config-changed'); return; }
         const schedulePath = `/en-ca/niv/schedule/${scheduleId}/appointment`;
         // One days.json fetch per selected consulate, in order, on the same
         // reader tab. The first denied reply re-authenticates immediately and
@@ -2171,7 +2180,7 @@ platform.storage.onChanged?.addListener((changes, areaName) => {
     // Corrected configuration retires the previous stopped diagnostic. An
     // unresolved booking still retains all of its verification guidance.
     if (current?.status === 'stopped' && !current.intent && (current.loginFailed || current.authenticationError)) {
-      await saveEngineState(area, { ...current, loginFailed: false, authenticationError: null, authenticationFailureReason: null, updatedAt: new Date().toISOString() });
+      await saveEngineState(area, { ...current, loginFailed: false, authenticationError: null, authenticationFailureReason: null, failureContext: null, updatedAt: new Date().toISOString() });
       await syncEngineAlarm(null);
       return;
     }

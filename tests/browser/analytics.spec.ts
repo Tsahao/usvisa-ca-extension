@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AnalyticsRecord } from '../../src/analytics/store';
+import type { EngineState } from '../../src/engine/workflow';
 
 const exec = promisify(execFile);
 const dashboard = 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555';
@@ -73,6 +74,15 @@ test('packaged explicit telemetry distinguishes paid curiosity from healthy unpa
     await expect(host).toHaveURL('https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment');
     await expect.poll(() => panel.evaluate(async () => ((await chrome.storage.local.get('analyticsV1')).analyticsV1 as AnalyticsRecord)?.session?.activated)).toBe(true);
     await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'PANEL_START', mode: 'alerts' }));
+    // A real tab closure in the synthetic portal produces a bounded reason
+    // from the background transition, retained through outbox delivery.
+    await host.close();
+    await panel.evaluate(async () => {
+      const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;
+      await chrome.storage.local.set({ engineStateV1: { ...state, nextPollAt: new Date().toISOString() } });
+      await chrome.alarms.create('enginePoll', { when: Date.now() });
+    });
+    await expect.poll(() => panel.evaluate(async () => ((await chrome.storage.local.get('analyticsV1')).analyticsV1 as AnalyticsRecord)?.session?.failed)).toBe(true);
     // Simulate lost connectivity, then retry with exactly the same event IDs.
     await worker.evaluate(() => { (globalThis as any).__offline = true; });
     const trigger = () => panel.evaluate(async () => {
@@ -89,7 +99,12 @@ test('packaged explicit telemetry distinguishes paid curiosity from healthy unpa
     const deliveries: any[] = await worker.evaluate(() => (globalThis as any).__telemetry);
     const bodies = deliveries.map(entry => entry.body);
     expect(bodies.filter(body => body.event === 'workflow_started')).toHaveLength(2);
-    expect(bodies.filter(body => body.event === 'workflow_failed')).toHaveLength(1);
+    expect(bodies.filter(body => body.event === 'workflow_failed')).toHaveLength(2);
+    const blocked = bodies.find(body => body.properties.failure_reason === 'workflow-blocked');
+    expect(blocked.properties).toMatchObject({ failure_code: 'tab-unavailable', failure_step: 'tab-check' });
+    expect(blocked.properties).not.toHaveProperty('auth_purpose');
+    const early = bodies.find(body => body.properties.failure_reason === 'start-failed');
+    expect(early.properties).toMatchObject({ failure_code: 'unknown', failure_step: 'unknown' });
     expect(bodies.filter(body => body.event === 'alerts_monitoring_established')).toHaveLength(1);
     expect(new Set(bodies.map(body => body.distinct_id)).size).toBe(1);
     for (const delivery of deliveries) {
