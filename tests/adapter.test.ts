@@ -469,6 +469,7 @@ describe('website adapter readers', () => {
   });
 
   it('flags the structural maintenance document from its heading and container', () => {
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/account' });
     document.body.innerHTML = `<div class="grid-y grid-frame construction-background"><div class="cell large-4 medium-5"><div class="grid-container">
       <div class="cell medium-7 text-center medium-text-left"><h1>Doing Maintenance</h1><h2>No need to worry.</h2>
       <h3 class="h5">Our website is down for planned maintenance. We should be back up momentarily. Check back soon.</h3></div></div></div></div>`;
@@ -477,12 +478,13 @@ describe('website adapter readers', () => {
   });
 
   it('detects maintenance on any page but ignores ordinary mentions', () => {
+    vi.stubGlobal('location', { href: 'https://ais.usvisa-info.com/en-ca/niv/account' });
     document.body.innerHTML = '<h1>Doing Maintenance</h1>';
     expect(readSiteMaintenance()).toEqual({ maintenance: true });
     document.body.innerHTML = '<div class="construction-background"></div>';
     expect(readSiteMaintenance()).toEqual({ maintenance: true });
     document.body.innerHTML = '<p>Scheduled maintenance is planned for Sunday.</p>';
-    expect(readSiteMaintenance()).toEqual({ maintenance: true });
+    expect(readSiteMaintenance()).toEqual({ maintenance: false });
     document.body.innerHTML = '<h1>Dashboard</h1><p>All systems normal.</p>';
     expect(readSiteMaintenance()).toEqual({ maintenance: false });
   });

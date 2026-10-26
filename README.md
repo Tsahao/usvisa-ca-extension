@@ -105,17 +105,29 @@ an overloaded recording queue can drop events. Recovery events remain
 available after a successful retry, so a run need not stall to be investigated.
 
 Configured production builds send five limited, pseudonymous PostHog usage
-events: installation, accepted workflow Start, terminal workflow failure, and
+events: installation, accepted workflow Start, terminal workflow failure,
 validated unpaid-alert activation, and verified successful booking (Auto Mode ON only). Count
 `appointment_booked` events in PostHog to measure bookings made by the extension.
+New verified-booking events include `appointment_date` (exact booked calendar
+date, `YYYY-MM-DD`) and `visa_classes` (sorted distinct allowlisted codes, e.g.
+`["L1", "L2"]`). Visa classes come from the selected group's complete dashboard
+applicant table, persist locally with that workflow and are cross-checked on
+the success dashboard; missing, unsupported or conflicting data is `unknown`.
+The appointment form need not expose visa class. These properties appear only
+on verified successful bookings, never on Starts, failures or availability
+checks. Older queued booking events remain deliverable without these fields.
+Failure causes distinguish adapter timeouts, denied/server/invalid responses, stale form fields and policy refusals;
+the step identifies the exact field action or read/save operation. These are fixed codes, never raw errors or page data.
 Failure events retain their broad `failure_reason` category and add allowlisted
 `failure_code` and `failure_step` values, plus `auth_purpose` when known. Details
 are captured at the failure, survive worker suspension, and never include raw
 exceptions or the local diagnostics log. Missing details use `unknown`; older
 queued events remain deliverable without new fields. Retries, manual sign-in
 and unresolved booking verification still do not count as terminal failures.
-Payloads exclude credentials, visa and
-applicant identifiers, portal content, URLs, consulates and appointment dates.
+Payloads exclude credentials, visa/group/applicant identifiers, applicant names,
+URLs, consulates, appointment times, previous appointment dates, preferences
+and raw portal content. Only the verified booked date and normalized visa-class
+codes are included as booking details.
 No autocapture, heatmaps or session replay is used. The first release has no
 analytics opt-out switch in its panel. Analytics uses ordinary cross-origin
 requests (CORS), without requesting host access to PostHog. Delivery remains

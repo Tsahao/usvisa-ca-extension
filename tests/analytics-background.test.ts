@@ -197,4 +197,44 @@ describe('product worker telemetry integration (mocked network only)', () => {
     expect(await send({ type: 'PANEL_START', mode: 'alerts' })).toMatchObject({ ok: false });
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
   });
+
+  it.each(['matching', 'missing', 'changed-class', 'changed-roster'])('reports only verified target date and scoped class metadata (%s)', async issue => {
+    stored.uiPreferencesV1 = { ...preferences, testMode: false };
+    const ids = ['77777777', '88888888'];
+    let raw: Record<string, any> = { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027',
+      applicantIds: ids, visaClassSnapshot: { applicantIds: ids, labels: ['L1 Intra-company Transferee', 'L2 Spouse or Child of an L1'] } };
+    chromeMock.scripting.executeScript.mockImplementation(async (input: { func: { name: string } }) => [{ result:
+      input.func.name === 'readDashboardGroups' ? snapshot : structuredClone(raw) }]);
+    expect(await send({ type: 'PANEL_START', mode: 'booking' })).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(record().session?.runId).toBe(stored.engineStateV1.runId));
+    expect(stored.engineStateV1.group).toMatchObject({ applicantIds: ids, visaClasses: ['L1', 'L2'] });
+    const started = structuredClone(stored.engineStateV1);
+    stored.engineStateV1 = { ...started, status: 'verifying', nextPollAt: null, executor: null, stage: null,
+      intent: { runId: started.runId, groupId: '11111111', mode: 'booking', targetDate: '2026-11-19',
+        consulate: 'Vancouver', testMode: false, createdAt: new Date().toISOString(), phase: 'submitted' },
+      verification: { reads: [], nextReadAt: new Date().toISOString() }, verificationTabId: 7, verificationError: null };
+    raw = { ...raw, text: 'November 19, 2026 at 09:15' };
+    if (issue === 'missing') delete raw.visaClassSnapshot;
+    if (issue === 'changed-class') raw.visaClassSnapshot.labels = ['H1B Specialty Occupation', 'H4 Dependent'];
+    if (issue === 'changed-roster') { raw.applicantIds = ['77777777']; raw.visaClassSnapshot.applicantIds = ['77777777']; raw.visaClassSnapshot.labels = ['L1']; }
+    for (let read = 1; read <= 3; read++) {
+      stored.engineStateV1.verification.nextReadAt = new Date().toISOString();
+      alarmed({ name: 'enginePoll' });
+      await send({ type: 'PANEL_STATE' });
+      if (read < 3) {
+        expect(stored.engineStateV1.verification.reads).toHaveLength(read);
+        expect(record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(0);
+      }
+    }
+    expect(stored.engineSuccessV1).toMatchObject({ date: '2026-11-19' });
+    expect(stored.engineStateV1).toMatchObject({ status: 'stopped', intent: null, verificationError: null });
+    await vi.waitFor(() => expect(record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(1));
+    await send({ type: 'PANEL_STATE' }); await flush();
+    const success = events().find(event => event.event === 'appointment_booked');
+    expect(success.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: issue === 'matching' ? ['L1', 'L2'] : ['unknown'] });
+    expect(JSON.stringify(events())).not.toMatch(/fixture@example|private-synthetic|11111111|22222222|77777777|88888888|Vancouver|2027-01-01|09:15|Intra-company|Spouse|schedule\//);
+    for (const event of events().filter(event => event.event !== 'appointment_booked')) {
+      expect(event.properties).not.toHaveProperty('appointment_date'); expect(event.properties).not.toHaveProperty('visa_classes');
+    }
+  });
 });

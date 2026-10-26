@@ -1,3 +1,4 @@
+import { WORKFLOW_DETAIL_CODES, isPaidAdapterFailureCode } from './failure-codes';
 import { AUTHENTICATION_FAILURE_REASONS, SELECTION_FAILURE_CODES } from './diagnostics';
 
 // Public telemetry vocabulary. Never accept raw errors, routes or page data.
@@ -7,6 +8,7 @@ export const FAILURE_REASONS = ['start-failed', 'setup-exhausted', 'authenticati
 export type FailureReason = (typeof FAILURE_REASONS)[number];
 export const FAILURE_CODES = [
   ...AUTHENTICATION_FAILURE_REASONS,
+  ...WORKFLOW_DETAIL_CODES,
   'unknown', 'stage-guard', 'candidate-invalid', 'applicant-roster-missing',
   'navigation-unconfirmed', 'renewal-limit', 'checkpoint-interrupted',
   'session-age-exceeded', 'clock-invalid', 'setup-retry-limit',
@@ -20,6 +22,14 @@ export const FAILURE_STEPS = [
   'booking-actions', 'booking-warning', 'booking-applicants', 'booking-form',
   'booking-confirm', 'booking-poll', 'alerts-poll', 'lifecycle-check',
   'worker-recovery', 'restart-setup',
+  'booking-schedule-entry', 'booking-reschedule-entry', 'booking-facility-change',
+  'booking-date-change', 'booking-time-change', 'booking-form-read',
+  'booking-policy-check', 'booking-warning-acknowledge', 'dashboard-continue',
+  'start-state', 'start-dashboard', 'start-groups', 'start-selection', 'start-baseline', 'start-roster', 'start-save',
+  'alerts-entry', 'poll-scheduling',
+  'auth-entry-read', 'auth-renewal-entry', 'auth-stalled-load-check', 'auth-stalled-load-navigation',
+  'auth-retry-load-check', 'auth-retry-load-navigation', 'auth-cycle-navigation', 'auth-race-check',
+  'auth-entry-progress-check', 'auth-landing-navigation',
 ] as const;
 export type FailureStep = (typeof FAILURE_STEPS)[number];
 export const AUTH_PURPOSES = ['start', 'renew', 'verify'] as const;
@@ -46,12 +56,11 @@ export function authenticationFailureStep(code: FailureCode, phase: string): Fai
   if (SELECTION_FAILURE_CODES.includes(code as (typeof SELECTION_FAILURE_CODES)[number])) return 'group-selection';
   switch (code) {
     case 'configuration-changed': return 'configuration-check';
-    case 'tab-unavailable': return 'tab-check';
+    case 'tab-unavailable': case 'auth-login-tabs-ambiguous': return 'tab-check';
     case 'navigation-failed': case 'untrusted-navigation': return 'navigation';
-    case 'context-changed': return 'authentication-context';
+    case 'context-changed': case 'auth-pending-checkpoint': case 'auth-clock-invalid': case 'auth-intent-conflict': return 'authentication-context';
     case 'group-identity-changed': return 'group-check';
     case 'applicant-roster-changed': return 'roster-check';
-    case 'appointment-date-changed': return 'baseline-check';
   }
   switch (phase) {
     case 'prepare': return 'login-prepare';
@@ -79,10 +88,42 @@ export function blockedFailureContext(detail: unknown, step: FailureStep): Failu
     'tab-lost': 'tab-unavailable', 'untrusted-url': 'untrusted-navigation',
     'config-changed': 'configuration-changed', 'cancelled': 'cancelled',
     'group-changed': 'group-identity-changed', 'roster-changed': 'applicant-roster-changed',
-    'roster-missing': 'applicant-roster-missing', 'baseline-changed': 'appointment-date-changed',
+    'roster-missing': 'applicant-roster-missing',
     'candidate-invalid': 'candidate-invalid', 'navigation-unconfirmed': 'navigation-unconfirmed',
     'stage-guard': 'stage-guard',
   };
-  const code = typeof detail === 'string' && Object.hasOwn(codes, detail) ? codes[detail] : 'unknown';
+  const code = typeof detail === 'string' && Object.hasOwn(codes, detail) ? codes[detail] : isFailureCode(detail) ? detail : 'unknown';
   return { category: 'workflow-blocked', code, step };
+}
+
+// The operation is recorded in failure_step; only known literal reasons may
+// cross the adapter boundary. Missing/malformed/unknown replies stay distinct.
+export function adapterFailureCode(reply: unknown): FailureCode {
+  if (reply === null || reply === undefined) return 'adapter-reply-missing';
+  if (typeof reply !== 'object' || Array.isArray(reply)) return 'adapter-reply-malformed';
+  const result = reply as { ok?: unknown; reason?: unknown };
+  if (result.ok !== false) return 'adapter-reply-malformed';
+  return isPaidAdapterFailureCode(result.reason) ? result.reason : 'adapter-reason-unrecognized';
+}
+export function paidActionStep(action: string): FailureStep {
+  switch (action) {
+    case 'schedule': return 'booking-schedule-entry';
+    case 'reschedule': return 'booking-reschedule-entry';
+    case 'warning': return 'booking-warning';
+    case 'applicants': return 'booking-applicants';
+    case 'facility': return 'booking-facility-change';
+    case 'date': return 'booking-date-change';
+    case 'time': return 'booking-time-change';
+    default: return 'booking-form';
+  }
+}
+
+// Preserve the last counted setup retry for a later setup-exhausted event;
+// this does not emit an event for a retry or for recovery.
+export function authenticationRetryContext(detail: string, phase: string, purpose: AuthPurpose): FailureContext {
+  const codes: Record<string, FailureCode> = { maintenance: 'auth-retry-maintenance', transport: 'auth-retry-transport',
+    'script-interrupted': 'auth-retry-script-interrupted', 'stalled-load': 'auth-retry-stalled-load',
+    'reply-missing': 'auth-retry-reply-missing', 'reply-malformed': 'auth-retry-reply-malformed' };
+  const code = Object.hasOwn(codes, detail) ? codes[detail] : isFailureCode(detail) ? detail : 'auth-retry-reading-unclassified';
+  return { category: 'setup-exhausted', code, step: authenticationFailureStep(code, phase), authPurpose: purpose };
 }

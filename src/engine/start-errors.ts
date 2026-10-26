@@ -1,3 +1,5 @@
+import { selectionFailureCode } from '../domain/groups';
+import type { FailureCode, FailureContext, FailureStep } from '../domain/failure-context';
 export type PanelReadStep = 'state' | 'dashboard' | 'groups' | 'selection' | 'appointment' | 'applicants' | 'save';
 
 const known: Record<string, string> = {
@@ -40,4 +42,23 @@ export function isPanelCommandErrorMessage(value: unknown): value is string {
 export function panelCommandError(error: unknown, step: PanelReadStep): string {
   const message = error instanceof Error ? error.message : '';
   return Object.hasOwn(known, message) ? known[message] : fallback[step];
+}
+
+// Error text is compared only to fixed engine sentinels. Arbitrary exception
+// messages never become telemetry; fallback identifies the operation instead.
+export function startFailureContext(error: unknown, step: PanelReadStep): FailureContext {
+  const steps: Record<PanelReadStep, FailureStep> = { state: 'start-state', dashboard: 'start-dashboard',
+    groups: 'start-groups', selection: 'start-selection', appointment: 'start-baseline', applicants: 'start-roster', save: 'start-save' };
+  const fallbackCodes: Record<PanelReadStep, FailureCode> = { state: 'start-state-read-failed', dashboard: 'start-dashboard-inspection-failed',
+    groups: 'start-groups-read-failed', selection: 'start-selection-failed', appointment: 'start-baseline-read-failed',
+    applicants: 'start-roster-read-failed', save: 'start-save-failed' };
+  const knownCodes: Record<string, FailureCode> = {
+    'Save valid configurations before starting.': 'start-configuration-invalid', 'Invalid workflow.': 'start-mode-invalid',
+    'Open one trusted dashboard.': 'start-dashboard-ambiguous', 'Dashboard unavailable.': 'start-dashboard-tab-missing',
+    'Dashboard context changed.': 'start-context-changed', 'Appointment identity changed.': 'group-identity-changed',
+    'Applicant roster changed.': 'applicant-roster-changed', 'Configuration changed.': 'configuration-changed',
+  };
+  const message = error instanceof Error ? error.message : '';
+  const code = selectionFailureCode(message) ?? (Object.hasOwn(knownCodes, message) ? knownCodes[message] : fallbackCodes[step]);
+  return { category: 'start-failed', code, step: steps[step] };
 }

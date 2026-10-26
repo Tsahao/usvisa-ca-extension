@@ -1,6 +1,7 @@
+import { adoptAppointmentBaseline } from '../src/engine/baseline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildTimeAnalyticsConfig, resolveAnalyticsConfig } from '../src/analytics/config';
-import { buildInstallationSeen, toCapturePayload, validateQueuedEvent } from '../src/analytics/events';
+import { ANALYTICS_EVENTS, buildInstallationSeen, toCapturePayload, validateQueuedEvent } from '../src/analytics/events';
 import { ANALYTICS_KEY, OUTBOX_MAX, validateAnalyticsRecord, type AnalyticsRecord } from '../src/analytics/store';
 import { createAnalyticsTracker, isProductPanelSender } from '../src/analytics/tracker';
 import { sendOneEvent } from '../src/analytics/transport';
@@ -110,13 +111,14 @@ describe('durable milestones and sessions', () => {
   async function bookingFixture(testMode = false) {
     const f = fixture();
     const state: EngineState = { ...f.state, mode: 'booking', status: 'verifying',
+      group: { ...f.state.group!, kind: 'paid', visaClasses: ['L1', 'L2'] },
       intent: { runId, mode: 'booking', groupId: '11111111', targetDate: '2026-11-19',
         consulate: 'Vancouver', testMode, createdAt: now, phase: 'submitted' } };
     const id = f.tracker.start('booking', testMode);
     f.tracker.link(id, state); await f.tracker.settled();
     return { ...f, state };
   }
-  it('queues one verified booking, retains deduplication across worker wakes and sends no appointment details', async () => {
+  it('queues the verified date/classes once across worker wakes without other appointment details', async () => {
     const f = await bookingFixture();
     f.tracker.booked(f.state); f.tracker.booked(f.state); await f.tracker.settled();
     const worker = createAnalyticsTracker(f.deps);
@@ -125,13 +127,18 @@ describe('durable milestones and sessions', () => {
     await worker.flush();
     const event = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(event => event.event === 'appointment_booked');
     expect(event.properties).toEqual({ analytics_session_id: f.record().session!.id, mode: 'booking', test_mode: false,
+      appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'],
       extension_version: '0.1.0', environment: 'production', $process_person_profile: false, $geoip_disable: true, $ip: null });
-    expect(JSON.stringify(event)).not.toMatch(/11111111|22222222|run-id|Vancouver|2026-11-19/);
+    expect(JSON.stringify(event)).not.toMatch(/11111111|22222222|run-id|Vancouver|09:15|applicant|targetDate/);
   });
-  it.each(['test-mode', 'foreign', 'wrong-run', 'no-intent', 'alerts', 'untracked'])('does not count an unqualified booking (%s)', async issue => {
+  it.each(['test-mode', 'foreign', 'wrong-run', 'wrong-intent-run', 'wrong-group', 'unpaid', 'invalid-date', 'no-intent', 'alerts', 'untracked'])('does not count an unqualified booking (%s)', async issue => {
     const f = await bookingFixture(issue === 'test-mode');
     if (issue === 'foreign') f.state.owner = 'probe-owner-dev';
     if (issue === 'wrong-run') f.state.runId = 'another-run-01';
+    if (issue === 'wrong-intent-run') f.state.intent!.runId = 'another-run-01';
+    if (issue === 'wrong-group') f.state.intent!.groupId = '99999999';
+    if (issue === 'unpaid') f.state.group!.kind = 'unpaid';
+    if (issue === 'invalid-date') f.state.intent!.targetDate = '2026-02-30';
     if (issue === 'no-intent') f.state.intent = null;
     if (issue === 'alerts') f.state.mode = 'alerts';
     if (issue === 'untracked') f.values[ANALYTICS_KEY] = { ...f.record(), session: null };
@@ -146,18 +153,68 @@ describe('durable milestones and sessions', () => {
   it('counts another booking after an explicit new workflow Start', async () => {
     const f = await bookingFixture();
     f.tracker.booked(f.state); await f.tracker.settled();
-    const next = { ...f.state, runId: 'run-id-0002' };
+    const next = { ...f.state, runId: 'run-id-0002', intent: { ...f.state.intent!, runId: 'run-id-0002' } };
     const id = f.tracker.start('booking', false); f.tracker.link(id, next);
     f.tracker.booked(next); await f.tracker.settled();
     expect(f.record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(2);
   });
-  it('rejects malformed success events and appointment data in the allowlist validator', async () => {
+  it('rejects malformed success details, raw descriptions, time and non-allowlisted properties', async () => {
     const f = await bookingFixture(); f.tracker.booked(f.state); await f.tracker.settled();
     const event = f.record().outbox.find(event => event.event === 'appointment_booked')!;
     for (const properties of [{ test_mode: true }, { mode: 'alerts' }, { analytics_session_id: undefined },
-      { failure_reason: 'start-failed' }, { targetDate: '2026-11-19' }]) {
+      { failure_reason: 'start-failed' }, { targetDate: '2026-11-19' }, { appointment_time: '09:15' },
+      { appointment_date: '2026-02-30' }, { appointment_date: '2026-11-19T09:15:00Z' }, { appointment_date: null },
+      { visa_classes: ['L1 Intra-company Transferee'] }, { visa_classes: ['private@example.invalid'] },
+      { visa_classes: ['L2', 'L1'] }, { visa_classes: ['L1', 'L1'] }, { visa_classes: [] },
+      { visa_classes: null }, { visa_classes: undefined }, { appointment_date: undefined }]) {
       expect(() => validateQueuedEvent({ ...event, properties: { ...event.properties, ...properties } })).toThrow();
     }
+  });
+  it('keeps legacy booked outbox events deliverable without inventing metadata', async () => {
+    const f = await bookingFixture(); f.tracker.booked(f.state); await f.tracker.settled();
+    const event = f.record().outbox.find(event => event.event === 'appointment_booked')!;
+    delete event.properties.appointment_date; delete event.properties.visa_classes;
+    expect(validateAnalyticsRecord(f.record()).outbox.at(-1)).toEqual(event);
+    await f.tracker.flush();
+    const body = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(event => event.event === 'appointment_booked');
+    expect(body.properties).not.toHaveProperty('appointment_date');
+    expect(body.properties).not.toHaveProperty('visa_classes');
+  });
+  it.each(['installation_seen', 'workflow_started', 'alerts_monitoring_established', 'workflow_failed'])('never allows booking details on %s', async name => {
+    const f = fixture(); await f.start();
+    f.tracker.activated(f.state, 7); f.tracker.startFailed(null);
+    f.tracker.observe({ ...f.state, status: 'stopped', loginFailed: true }); await f.tracker.settled();
+    const event = f.record().outbox.find(event => event.event === name)!;
+    expect(event).toBeDefined();
+    for (const details of [{ appointment_date: '2026-11-19' }, { visa_classes: ['B1/B2'] },
+      { appointment_date: '2026-11-19', visa_classes: ['B1/B2'] }]) {
+      expect(() => validateQueuedEvent({ ...event, properties: { ...event.properties, ...details } })).toThrow();
+    }
+  });
+  it('copies booking metadata before asynchronous writes and retries the same date/classes/UUID after offline delivery', async () => {
+    const f = await bookingFixture();
+    f.tracker.booked(f.state);
+    f.state.group!.visaClasses!.push('unknown'); f.state.intent!.targetDate = '2026-12-01';
+    await f.tracker.settled();
+    const event = structuredClone(f.record().outbox.find(event => event.event === 'appointment_booked')!);
+    expect(event.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'] });
+    f.fetchFn.mockImplementation(async (_url, init) => {
+      if (JSON.parse(init.body as string).event === 'appointment_booked') throw new Error('Synthetic offline');
+      return new Response('{}', { status: 200 });
+    });
+    await f.tracker.flush();
+    expect(f.record().outbox[0]).toEqual({ ...event, attempts: 1 });
+    f.fetchFn.mockResolvedValue(new Response('{}', { status: 200 }));
+    f.setTime('2026-10-14T13:00:00.000Z');
+    const worker = createAnalyticsTracker(f.deps); await worker.flush();
+    const bodies = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).filter(event => event.event === 'appointment_booked');
+    expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]);
+  });
+  it.each([undefined, ['private@example.invalid'], []])('reports unknown for missing/corrupt optional local class metadata (%j)', async value => {
+    const f = await bookingFixture();
+    f.state.group!.visaClasses = value as any;
+    f.tracker.booked(f.state); await f.tracker.settled();
+    expect(f.record().outbox.at(-1)!.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: ['unknown'] });
   });
   it('commits installation and Start together, links locally, and activates only once', async () => {
     const f = fixture(); await f.start();
@@ -385,4 +442,71 @@ describe('bounded terminal failure context', () => {
     f.tracker.observe(state); await f.tracker.settled();
     expect(f.record()?.outbox.filter(event => event.event === 'workflow_failed') ?? []).toHaveLength(0);
   });
+});
+
+describe('baseline recovery has no analytics signal', () => {
+  it('keeps the five supported milestones and emits nothing for a validated baseline update', async () => {
+    expect(ANALYTICS_EVENTS).toEqual(['installation_seen', 'workflow_started', 'alerts_monitoring_established', 'workflow_failed', 'appointment_booked']);
+    const f = fixture();
+    const initial: EngineState = { ...f.state, mode: 'booking', group: { ...f.state.group!, kind: 'paid', currentDate: '2027-01-01', applicantIds: ['77777777'] } };
+    const id = f.tracker.start('booking', false); f.tracker.link(id, initial); await f.tracker.settled();
+    const updated = adoptAppointmentBaseline(initial, { scheduleId: '11111111', ivr: '22222222', kind: 'booked',
+      text: 'September 15, 2026', applicantIds: ['77777777'] }, now);
+    f.tracker.observe(updated); f.tracker.observe(updated); await f.tracker.settled();
+    const worker = createAnalyticsTracker(f.deps); worker.observe(updated); await worker.settled();
+    expect(f.record().outbox.map(e => e.event)).toEqual(['installation_seen', 'workflow_started']);
+    expect(f.record().session!.failed).toBe(false);
+    worker.observe({ ...updated, status: 'stopped', loginFailed: true }); await worker.settled();
+    expect(f.record().outbox.map(e => e.event)).toEqual(['installation_seen', 'workflow_started', 'workflow_failed']);
+  });
+  it('drops previously queued recovery events without blocking supported milestones or changing installation identity', async () => {
+    const f = fixture(); await f.start();
+    const original = structuredClone(f.record());
+    const retired = { ...original.outbox[1], uuid: f.deps.uuid(), event: 'appointment_baseline_updated',
+      properties: { ...original.outbox[1].properties, raw_error: 'synthetic-private-data' } };
+    const legacy = { ...original, session: { ...original.session!, baselineRevision: 1 }, outbox: [...original.outbox, retired] };
+    expect(() => validateQueuedEvent(retired)).toThrow();
+    const migrated = validateAnalyticsRecord(legacy);
+    expect(migrated.outbox).toEqual(original.outbox);
+    expect(migrated.session).not.toHaveProperty('baselineRevision');
+    expect(legacy.outbox).toHaveLength(3); // Migration never mutates the supplied save.
+    f.values[ANALYTICS_KEY] = legacy;
+    await createAnalyticsTracker(f.deps).flush();
+    expect(f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string).event)).toEqual(['installation_seen', 'workflow_started']);
+    expect(f.record().distinctId).toBe(original.distinctId);
+    expect(f.record().outbox).toEqual([]);
+  });
+});
+
+it('keeps a precise source cause through Start failure recording and durable delivery', async () => {
+  const f = fixture(); const id = f.tracker.start('alerts', true);
+  f.tracker.startFailed(id, { category: 'start-failed', code: 'start-baseline-read-failed', step: 'start-baseline' });
+  await f.tracker.settled();
+  const worker = createAnalyticsTracker(f.deps); await worker.flush();
+  const event = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(e => e.event === 'workflow_failed');
+  expect(event.properties).toMatchObject({ failure_reason: 'start-failed', failure_code: 'start-baseline-read-failed', failure_step: 'start-baseline' });
+});
+
+it('reports the last precise setup failure when the existing retry budget is exhausted', async () => {
+  const { retryRestart } = await import('../src/engine/restart');
+  const f = fixture(); await f.start();
+  let state: EngineState = { ...f.state, restartPending: true, group: null,
+    failureContext: { category: 'setup-exhausted', code: 'start-groups-read-failed', step: 'start-groups' } };
+  for (let i = 0; i < 10; i++) state = retryRestart(state, now, () => 0);
+  f.tracker.observe(state); await f.tracker.settled();
+  expect(f.record().outbox.at(-1)!.properties).toMatchObject({ failure_reason: 'setup-exhausted',
+    failure_code: 'start-groups-read-failed', failure_step: 'start-groups' });
+});
+
+it('keeps the last maintenance cause when restart authentication exhausts its retry budget', async () => {
+  const { deferAuthenticationForMaintenance, beginAuthentication } = await import('../src/engine/authentication');
+  const { restartExhausted } = await import('../src/engine/restart');
+  const f = fixture(); await f.start();
+  const auth = beginAuthentication({ ...f.state, restartPending: true, consecutiveFailures: 9 }, 'start', now);
+  const deferred = deferAuthenticationForMaintenance(auth, now, () => 0);
+  f.tracker.observe(deferred); await f.tracker.settled();
+  expect(f.record().session!.failed).toBe(false);
+  f.tracker.observe(restartExhausted(deferred, now)); await f.tracker.settled();
+  expect(f.record().outbox.at(-1)!.properties).toMatchObject({ failure_reason: 'setup-exhausted',
+    failure_code: 'auth-retry-maintenance', failure_step: 'login-prepare', auth_purpose: 'start' });
 });

@@ -18,6 +18,7 @@ export function installPortalCalendar(options: { times?: string[]; businessTimes
   let businessTimes: string[] = [];
   let businessDays = ['2026-11-19'];
   let facilityRequest: Ajax | undefined;
+  let calendarRequest: Ajax | undefined;
   facility.onchange = () => {
     businessDays = [];
     date.value = ''; time.value = '';
@@ -43,12 +44,14 @@ export function installPortalCalendar(options: { times?: string[]; businessTimes
     const requestFacility = facility.value;
     const dayWarning = document.getElementById('non-consulate-business-day-message');
     if (dayWarning) dayWarning.hidden = businessDays.includes(requestDate);
+    const xhr: Ajax = { status: 0 }; calendarRequest = xhr;
+    const settings = { url: `${new URL(location.href).pathname}/times/${requestFacility}.json?date=${requestDate}&appointments[expedite]=false`, type: 'GET' };
+    emit('ajaxSend', xhr, settings);
     const complete = () => {
       const available = options.blank ? [] : options.times ?? ['09:15', '10:30'];
       businessTimes = options.businessTimes ?? available;
       time.replaceChildren(new Option('Select', ''), ...available.map(value => new Option(value, value)));
-      const xhr = { status: 200, responseJSON: { available_times: available, business_times: businessTimes } };
-      const settings = { url: `${new URL(location.href).pathname}/times/${requestFacility}.json?date=${requestDate}&appointments[expedite]=false`, type: 'GET' };
+      xhr.status = 200; xhr.responseJSON = { available_times: available, business_times: businessTimes };
       emit('ajaxComplete', xhr, settings);
     };
     if (options.delay) setTimeout(complete, options.delay);
@@ -73,6 +76,7 @@ export function installPortalCalendar(options: { times?: string[]; businessTimes
     if (warning) warning.hidden = time.value === '' || businessTimes.includes(time.value);
   });
   return { get calls() { return calls; }, get listenerCount() { return [...handlers.values()].reduce((total, listeners) => total + listeners.size, 0); },
+    get calendarRequest() { return calendarRequest; },
     get facilityRequest() { return facilityRequest; },
     complete: (xhr: Ajax, url: string, type = 'GET') => emit('ajaxComplete', xhr, { url, type }),
     send: (xhr: Ajax, url: string, type = 'GET') => emit('ajaxSend', xhr, { url, type }),

@@ -1,5 +1,6 @@
-import { appointmentApplicants, appointmentDateRelaxed } from '../domain/appointment';
+import { appointmentApplicants, appointmentDateRelaxed, appointmentVisaClasses } from '../domain/appointment';
 import { sameApplicants } from '../domain/applicants';
+import { safeVisaClasses, type VisaClass } from '../domain/visa-classes';
 import { normalizeReadingIvr } from '../domain/groups';
 import { verifyBooking } from '../domain/booking';
 import { COOLDOWN_S, SETUP_FAILURE_COOLDOWN_AFTER, VERIFICATION_READ_GAP_S, pollDelaySeconds } from '../domain/timing';
@@ -104,7 +105,16 @@ export async function runVerificationRead(state: EngineState, deps: {
   // Recognized success resolves even when the roster changed, so a changed
   // roster cannot keep a known successful appointment locked.
   if (outcome === 'target-confirmed') {
-    const resolved = resolveVerification(healthyState, { owner: state.owner, runId: state.runId, outcome, now });
+    const freshClasses = appointmentVisaClasses(raw, state.group);
+    const savedClasses = safeVisaClasses(state.group.visaClasses);
+    // A fresh same-roster class reading may fill legacy/missing metadata.
+    // Otherwise require agreement with the pre-booking dashboard snapshot;
+    // missing, changed or malformed evidence reports unknown, not stale data.
+    const classesAgree = savedClasses.join(',') === freshClasses.join(',');
+    const savedUnknown = savedClasses.length === 1 && savedClasses[0] === 'unknown';
+    const visaClasses: VisaClass[] = savedUnknown || classesAgree ? freshClasses : ['unknown'];
+    const resolved = resolveVerification({ ...healthyState, group: { ...state.group, visaClasses } },
+      { owner: state.owner, runId: state.runId, outcome, now });
     note('verification-resolved', undefined, { outcome });
     // Legacy Test Mode intents resolve read-only then stop; never authorize
     // live mutations because of a legacy testMode intent. Clear any queued

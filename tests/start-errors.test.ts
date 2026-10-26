@@ -72,3 +72,13 @@ describe('panel failure classification', () => {
       expect(panelFailureKind(value)).toBe('generic');
   });
 });
+
+describe('safe Start failure source context', () => {
+  it('preserves exact selection causes and labels unclassified exceptions by their read step', async () => {
+    const { startFailureContext } = await import('../src/engine/start-errors');
+    expect(startFailureContext(new Error('Paid group not found on the dashboard.'), 'selection')).toEqual({
+      category: 'start-failed', code: 'paid-group-not-found', step: 'start-selection' });
+    expect(startFailureContext(new Error('private@example.invalid password <html>'), 'appointment')).toEqual({
+      category: 'start-failed', code: 'start-baseline-read-failed', step: 'start-baseline' });
+  });
+});

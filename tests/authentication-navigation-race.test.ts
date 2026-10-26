@@ -550,7 +550,7 @@ describe('login-to-dashboard navigation race', () => {
       .toThrow('Invalid authentication diagnostic.');
     for (const reason of ['configuration-changed', 'cancelled', 'tab-unavailable', 'untrusted-navigation',
       'context-changed', 'navigation-failed', 'unrecognized-reading', 'credential-rejected',
-      'group-identity-changed', 'applicant-roster-changed', 'appointment-date-changed',
+      'group-identity-changed', 'applicant-roster-changed',
       'no-dashboard-group', 'paid-group-not-found', 'unpaid-group-not-found', 'payment-markers-conflict',
       'payment-ineligible', 'group-binding-invalid'] as const) {
       expect(isAuthenticationFailureReason(reason)).toBe(true);
@@ -593,7 +593,11 @@ describe('terminal failure telemetry source', () => {
     const next = validateEngineState(await runAuthentication(h.deps, beginAuthentication(initial, 'renew', NOW)));
     const code = issue === 'tab' ? 'tab-unavailable' : issue === 'navigation' ? 'navigation-failed' : 'storage-unavailable';
     const step = issue === 'tab' ? 'tab-check' : issue === 'navigation' ? 'navigation' : issue === 'save' ? 'state-save' : 'configuration-check';
-    expect(next).toMatchObject({ status: 'stopped', authentication: null, authenticationFailureReason: code,
+    if (issue === 'navigation') {
+      expect(next).toMatchObject({ status: 'running', consecutiveFailures: 1, authenticationFailureReason: null,
+        failureContext: null, authentication: { phase: 'cycle-wait', pending: false, tabId: 7 } });
+      expect(Date.parse(next.nextPollAt!)).toBeGreaterThan(Date.parse(NOW));
+    } else expect(next).toMatchObject({ status: 'stopped', authentication: null, authenticationFailureReason: code,
       failureContext: { category: 'authentication-failed', code, step, authPurpose: 'renew' } });
     expect(JSON.stringify(next.failureContext)).not.toMatch(/private@|https:|synthetic-password/);
     if (issue !== 'navigation') expect(h.deps.navigateTab).not.toHaveBeenCalled();

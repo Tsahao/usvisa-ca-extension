@@ -68,6 +68,8 @@ export type ExecutorState = {
   skippedDates: { consulate: Consulate; date: string }[];
   actionPending: boolean;
   loadingSince?: string;
+  // Only these audited preliminary actions cannot submit a booking.
+  entryAction?: 'dashboard-continue' | 'schedule' | 'reschedule' | 'warning' | 'applicants';
 };
 
 export type AuthenticationState = {
@@ -82,6 +84,9 @@ export type AuthenticationState = {
   // A navigation recovery reuses renewal validation, but tries the session
   // through the fixed root before falling back to sign-in.
   dashboardFirst?: true;
+  // Confirmed outage: retry through the fixed sign-in GET, never reload a
+  // document that may have been reached by POST. Survives worker suspension.
+  maintenanceRecovery?: true;
   // What the durable pending checkpoint guards: 'navigation' is a browser-side
   // GET to a fixed approved target (an interrupted one is safely recoverable
   // on worker wake), 'action' is an injected login form action which may have
@@ -101,6 +106,9 @@ export type EngineState = {
   intent: ConfirmationIntent | null;
   group: GroupBinding | null;
   consecutiveFailures: number;
+  // Field/final-form recoveries across successful dashboard reads; local pacing only.
+  formLoadFailures?: number;
+  entryRecoveryFailures?: number;
   cooldownUntil: string | null;
   lastCandidate: ConsulateCandidate | null;
   stage: string | null;
@@ -156,7 +164,7 @@ export function emptyEngineState(now: string): EngineState {
     status: 'idle',
     intent: null,
     group: null,
-    consecutiveFailures: 0,
+    consecutiveFailures: 0, formLoadFailures: 0, entryRecoveryFailures: 0,
     cooldownUntil: null,
     lastCandidate: null,
     stage: null,
@@ -225,6 +233,12 @@ export function validateEngineState(value: unknown): EngineState {
   const pollIntervalS = state.pollIntervalS ?? 60;
   let authentication: AuthenticationState | null = null;
   const sessionRenewals = state.sessionRenewals ?? 0;
+  const entryRecoveryFailures = state.entryRecoveryFailures ?? 0;
+  if (!Number.isInteger(entryRecoveryFailures) || (entryRecoveryFailures as number) < 0 || (entryRecoveryFailures as number) >= 10)
+    throw new Error('Invalid entry recovery budget.');
+  const formLoadFailures = state.formLoadFailures ?? 0;
+  if (!Number.isInteger(formLoadFailures) || (formLoadFailures as number) < 0 || (formLoadFailures as number) >= 10)
+    throw new Error('Invalid form recovery budget.');
   const loginFailed = state.loginFailed ?? false;
   const authenticationError = state.authenticationError ?? null;
   if (authenticationError !== null && !isPanelCommandErrorMessage(authenticationError)) throw new Error('Invalid authentication diagnostic.');
@@ -263,9 +277,12 @@ export function validateEngineState(value: unknown): EngineState {
       throw new Error('Invalid authentication state.');
     if (auth.dashboardFirst !== undefined && (auth.dashboardFirst !== true || auth.purpose !== 'renew'))
       throw new Error('Invalid authentication state.');
+    if (auth.maintenanceRecovery !== undefined && auth.maintenanceRecovery !== true)
+      throw new Error('Invalid authentication state.');
     authentication = { tabId: auth.tabId, phase: auth.phase, pending: auth.pending, startedAt: auth.startedAt, purpose: auth.purpose,
       cycleStartedAt, cycleDeadline, submittedInCycle,
       ...(auth.dashboardFirst === undefined ? {} : { dashboardFirst: auth.dashboardFirst }),
+      ...(auth.maintenanceRecovery === undefined ? {} : { maintenanceRecovery: true as const }),
       ...(auth.checkpoint === undefined ? {} : { checkpoint: auth.checkpoint }) };
   }
   if (!Number.isInteger(pollIntervalS) || (pollIntervalS as number) < 30 || (pollIntervalS as number) > 86400) throw new Error('Invalid poll interval.');
@@ -299,6 +316,8 @@ export function validateEngineState(value: unknown): EngineState {
     if (!Number.isSafeInteger(value.tabId) || value.tabId < 0 || typeof value.actionPending !== 'boolean' ||
         !(value.targetTime === null || (typeof value.targetTime === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value.targetTime))))
       throw new Error('Invalid executor state.');
+    if (value.entryAction !== undefined && !['dashboard-continue', 'schedule', 'reschedule', 'warning', 'applicants'].includes(value.entryAction))
+      throw new Error('Invalid executor checkpoint.');
     const rawSkipped: unknown = value.skippedDates ?? [];
     if (value.loadingSince !== undefined && !isIsoDateTime(value.loadingSince)) throw new Error('Invalid executor loading state.');
     if (!Array.isArray(rawSkipped) || rawSkipped.length > 3660) throw new Error('Invalid executor state.');
@@ -307,7 +326,7 @@ export function validateEngineState(value: unknown): EngineState {
     if (!skippedDates.every(entry => entry !== null && typeof entry === 'object' && typeof entry.date === 'string' && isIsoDate(entry.date) &&
           typeof entry.consulate === 'string' && Object.hasOwn(CONSULATES, entry.consulate)) ||
         new Set(skippedDates.map(entry => `${entry.consulate}|${entry.date}`)).size !== skippedDates.length) throw new Error('Invalid executor state.');
-    executor = { skippedDates: skippedDates.map(({ consulate, date }) => ({ consulate, date })), tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,
+    executor = { ...(value.entryAction === undefined ? {} : { entryAction: value.entryAction }), skippedDates: skippedDates.map(({ consulate, date }) => ({ consulate, date })), tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,
       ...(value.loadingSince === undefined ? {} : { loadingSince: value.loadingSince }),
       applicantIds: value.applicantIds === null ? null : validateApplicantIds(value.applicantIds) };
   }
@@ -358,6 +377,8 @@ export function validateEngineState(value: unknown): EngineState {
     intent: state.intent === null ? null : validateIntent(state.intent),
     group,
     consecutiveFailures: consecutiveFailures as number,
+    formLoadFailures: formLoadFailures as number,
+    entryRecoveryFailures: entryRecoveryFailures as number,
     cooldownUntil: cooldownUntil as string | null,
     lastCandidate,
     stage: stage as string | null,
@@ -403,7 +424,7 @@ export function startRun(
     status: 'running',
     intent: null,
     group: null,
-    consecutiveFailures: 0,
+    consecutiveFailures: 0, formLoadFailures: 0, entryRecoveryFailures: 0,
     cooldownUntil: null,
     lastCandidate: null,
     stage: null,
@@ -506,6 +527,15 @@ export function setNextPoll(  state: EngineState,
   return { ...state, nextPollAt: args.nextPollAt, updatedAt: args.now };
 }
 
+// A typed checkpoint is recoverable only for its original preliminary stage.
+// It authorizes read-only re-entry, never replay of the action itself.
+export function isEntryCheckpoint(state: EngineState): boolean {
+  if (state.mode !== 'booking' || !state.executor?.actionPending || state.intent || !state.group?.applicantIds) return false;
+  const action = state.executor.entryAction;
+  return (state.stage === 'actions' && ['dashboard-continue', 'schedule', 'reschedule'].includes(action ?? '')) ||
+    (state.stage === 'warning' && action === 'warning') || (state.stage === 'applicants' && action === 'applicants');
+}
+
 // Worker startup reconciliation. An interrupted confirmation transitions to
 // verification and is never replayed blindly. Worker suspension preserves
 // deadlines and queued restart permission; browser restart parks work and
@@ -537,7 +567,9 @@ export function reconcileStartup(state: EngineState, now: string, browserRestart
     state = { ...state, authentication: { ...state.authentication, pending: false, checkpoint: undefined,
       submittedInCycle: true, phase: 'wait' }, nextPollAt: deadline, updatedAt: now };
   }
-  else if (state.authentication?.pending) state = { ...state, status: 'verifying', authentication: null, verification: null, nextPollAt: null,
+  else if (state.authentication?.pending) state = { ...state, status: 'verifying',
+    failureContext: { category: 'workflow-blocked', code: 'worker-auth-checkpoint-interrupted', step: 'worker-recovery', authPurpose: state.authentication.purpose },
+    authentication: null, verification: null, nextPollAt: null,
     verificationTabId: null, restartPending: false, ...(browserRestart ? { queuedStart: null } : {}), updatedAt: now } as EngineState;
   else if (browserRestart && state.authentication) state = { ...state, status: 'verifying', authentication: null, verification: null, nextPollAt: null,
     verificationTabId: null, queuedStart: null, restartPending: false, updatedAt: now };
@@ -558,7 +590,10 @@ export function reconcileStartup(state: EngineState, now: string, browserRestart
       state = { ...state, status: 'verifying', verification: { reads: [], nextReadAt: new Date(Date.parse(now) + 30_000).toISOString() }, nextPollAt: null, updatedAt: now };
     else state = { ...state, status: 'verifying', verification: null, nextPollAt: null, updatedAt: now };
   }
-  else if (state.status === 'running' && state.executor?.actionPending) state = parkForReview(state, now, { category: 'workflow-blocked', code: 'checkpoint-interrupted', step: 'worker-recovery' });
+  else if (!browserRestart && state.status === 'running' && isEntryCheckpoint(state))
+    state = { ...state, nextPollAt: state.nextPollAt && Date.parse(state.nextPollAt) > Date.parse(now) ? state.nextPollAt : now, updatedAt: now };
+  else if (state.status === 'running' && state.executor?.actionPending) state = parkForReview(state, now, readFailureContext(state.failureContext)?.code === 'checkpoint-interrupted'
+    ? readFailureContext(state.failureContext)! : { category: 'workflow-blocked', code: 'checkpoint-interrupted', step: 'worker-recovery' });
   else if (state.status === 'running' && browserRestart) state = parkForReview(state, now);
   // Deliberately parked verification (Stop, browser restart, manual sign-in,
   // fixed error banners) stays parked with no deadline: the alarm loop has

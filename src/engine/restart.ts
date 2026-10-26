@@ -1,10 +1,13 @@
+import { readFailureContext } from '../domain/failure-context';
 import { pollDelaySeconds, SETUP_FAILURE_COOLDOWN_AFTER } from '../domain/timing';
 import type { EngineState } from './workflow';
 
 export function restartExhausted(state: EngineState, now: string): EngineState {
+  const last = readFailureContext(state.failureContext);
   return { ...state, status: 'stopped', restartPending: false, restartFailed: true, authentication: null, group: null, executor: null,
     stage: null, nextPollAt: null, cooldownUntil: null, loginFailed: true, authenticationError: null, authenticationFailureReason: null,
-    failureContext: { category: 'setup-exhausted', code: 'setup-retry-limit', step: 'restart-setup' }, updatedAt: now };
+    failureContext: last ? { ...last, category: 'setup-exhausted' }
+      : { category: 'setup-exhausted', code: 'setup-retry-limit', step: 'restart-setup' }, updatedAt: now };
 }
 
 // Setup retries are read-only fresh validation, never a booking-click retry.
@@ -16,6 +19,6 @@ export function retryRestart(state: EngineState, now: string, random: () => numb
   const counted = { ...state, consecutiveFailures: failures };
   if (failures >= SETUP_FAILURE_COOLDOWN_AFTER) return restartExhausted(counted, now);
   return { ...counted, status: 'running', authentication: null, group: null, executor: null, stage: null,
-    cooldownUntil: null, loginFailed: false, authenticationError: null, authenticationFailureReason: null, failureContext: null, manualAuthentication: false,
+    cooldownUntil: null, loginFailed: false, authenticationError: null, authenticationFailureReason: null, failureContext: readFailureContext(state.failureContext), manualAuthentication: false,
     nextPollAt: new Date(Date.parse(now) + pollDelaySeconds(random, state.pollIntervalS) * 1000).toISOString(), updatedAt: now };
 }

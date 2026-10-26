@@ -57,3 +57,9 @@ describe('problem email draft', () => {
       entries: [{ at: '2026-01-01T00:00:00.000Z', code: 'auth-terminal' }] } }))).toContain('No recent diagnostic entries.');
   });
 });
+
+it('includes the same precise booking failure code in a sanitized problem report', () => {
+  const context = problemContext({ ...emptyEngineState(now), status: 'verifying', stage: 'form',
+    failureContext: { category: 'workflow-blocked', code: 'calendar-load-timeout', step: 'booking-date-change' } });
+  expect(context.failureCode).toBe('calendar-load-timeout');
+});

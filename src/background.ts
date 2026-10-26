@@ -1,4 +1,5 @@
-import { blockedFailureContext } from './domain/failure-context';
+import { adoptAppointmentBaseline } from './engine/baseline';
+import { blockedFailureContext, type FailureContext } from './domain/failure-context';
 import { platform, type InjectionResult, type Tab } from './platform';
 import { isBareAppointmentQuery, classifyRoute, SITE_ORIGIN, type RouteKind } from './domain/routes';
 import { normalizeReadingIvr, resolveGroup, sameGroupRef, selectionFailureCode, type GroupResolution } from './domain/groups';
@@ -8,17 +9,18 @@ import { normalizeSummaryRaw } from './domain/summary';
 import { acceptNotification, monitorForScope, monitorsForScope, observeMonitorDate, observeSummary, resetBaseline, type MonitorSlot } from './domain/monitor';
 import { mapHttpStatus, pollDelaySeconds } from './domain/timing';
 import { isSameGroupUrl } from './domain/trust';
-import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSiteMaintenance, readSummaryRaw } from './adapter/reads';
+import { readAppointmentForm, readCurrentAppointment, readDashboardGroups, readSummaryRaw } from './adapter/reads';
 import { fetchDaysJson } from './adapter/poll';
 import { readPaidPage, type PaidPage } from './adapter/paid';
 import { performPaidAction, type PaidAction } from './adapter/acts';
 import { sameApplicants } from './domain/applicants';
-import { appointmentApplicants, appointmentDate, appointmentDateRelaxed } from './domain/appointment';
+import { appointmentApplicants, appointmentDate, appointmentDateRelaxed, appointmentVisaClasses } from './domain/appointment';
+import type { VisaClass } from './domain/visa-classes';
 import { runVerificationRead } from './engine/verification';
 import { reviewLifecycle } from './engine/lifecycle';
 import { panelSnapshot } from './engine/panel';
 import { assessDashboard } from './engine/discovery';
-import { panelCommandError, type PanelReadStep } from './engine/start-errors';
+import { startFailureContext, panelCommandError, type PanelReadStep } from './engine/start-errors';
 import { panelFailureKind } from './engine/panel-errors';
 import { preferencesError, type Preferences } from './ui/model';
 import { validateEngineMessage } from './engine/messages';
@@ -39,9 +41,11 @@ import {
   VERIFICATION_CONFIG_CHANGED,
   VERIFICATION_ROSTER_CHANGED,
   VERIFICATION_UNREADABLE,
+  type EngineState,
 } from './engine/workflow';
 import { runBookingStage } from './engine/executor';
-import { beginAuthentication, deferAuthenticationForMaintenance, runAuthentication } from './engine/authentication';
+import { beginAuthentication, deferAuthenticationForMaintenance, recoverMaintenance, runAuthentication } from './engine/authentication';
+import { observeMaintenance } from './engine/maintenance';
 import { isNavigationRecoveryUrl, needsNavigationRecovery } from './engine/navigation-recovery';
 import { policyKey } from './engine/lifecycle';
 import { SESSION_AGE_MINUTES } from './domain/timing';
@@ -183,8 +187,6 @@ let explicitStartEpoch = 0;
 const ALARM = 'developmentProbeWake';
 const ENGINE_ALARM = 'enginePoll';
 let fastWake: ReturnType<typeof setTimeout> | null = null;
-// A maintenance reload awaiting its landing re-read (one-shot per reload).
-let maintenanceReload: { runId: string; tabId: number } | null = null;
 // If storage itself is unavailable, Chrome's durable alarm is the only place
 // we can retain a retry. Do not let duplicate events busy-loop in this worker.
 let storageRetryAt: string | null = null;
@@ -252,6 +254,17 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   // the auth tab to avoid leaking duplicates; other routes release custody
   // without navigating an untrusted tab. Active good verifiers keep progress.
   if (state.verificationTabId !== null) {
+    try {
+      if (await observeMaintenance(executionDependencies({ get: keys => platform.storage.local.get(keys),
+          set: values => platform.storage.local.set(values) }, state), state, state.verificationTabId)) {
+        const auth = beginTrackedAuthentication(state, 'verify', new Date().toISOString(), Math.random);
+        if (auth.authentication) {
+          noteDiagnostic('auth-maintenance', { mode: state.mode, purpose: 'verify', detail: 'maintenance' });
+          return deferAuthenticationForMaintenance({ ...auth,
+            authentication: { ...auth.authentication, tabId: state.verificationTabId } }, new Date().toISOString(), Math.random);
+        }
+      }
+    } catch { /* Ordinary bounded verifier read/recovery still owns failures. */ }
     let live: { id?: number; url?: string } | null = null;
     try { live = await platform.tabs.get(state.verificationTabId); } catch { live = null; }
     if (!live) {
@@ -350,7 +363,8 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
   if (verifiedSuccess) {
     await platform.storage.local.set({ engineSuccessV1: { runId: state.runId, date: prevIntent!.targetDate } });
     void dateHistory.confirmed(state);
-    analytics?.booked(state);
+    // Verification cross-checks optional visa metadata without gating success.
+    analytics?.booked({ ...state, group: next.group });
   }
   if (prevIntent && !prevIntent.testMode && prevQueued && next.intent === null) {
     const now = new Date().toISOString();
@@ -437,6 +451,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       restarted = bindGroup(restarted, { owner: prevQueued.owner, runId, now,
         binding: { scheduleId: group.scheduleId, ivr: group.ivr, kind: prevQueued.mode === 'booking' ? 'paid' : 'unpaid',
           currentDate: prevIntent.targetDate, dashboardPath: group.dashboardPath,
+          ...(next.group?.visaClasses ? { visaClasses: next.group.visaClasses } : {}),
           ...(keepProvisional ? { pendingInspection: true } : {}),
           ...(group.applicantIds ? { applicantIds: group.applicantIds } : {}) } });
       restarted = { ...restarted, policyKey: currentPolicy as string, pollIntervalS: currentInterval,
@@ -488,6 +503,7 @@ async function verifyFromDashboard(state: import('./engine/workflow').EngineStat
       restarted = bindGroup(restarted, { owner: prevQueued.owner, runId, now,
         binding: { scheduleId: group.scheduleId, ivr: group.ivr, kind: prevQueued.mode === 'booking' ? 'paid' : 'unpaid',
           currentDate: baseline, dashboardPath: group.dashboardPath,
+          ...(next.group?.visaClasses ? { visaClasses: next.group.visaClasses } : {}),
           ...(keepProvisional ? { pendingInspection: true } : {}),
           ...(group.applicantIds ? { applicantIds: group.applicantIds } : {}) } });
       restarted = { ...restarted, policyKey: currentPolicy as string, pollIntervalS: currentInterval,
@@ -512,6 +528,18 @@ async function dashboardTab() {
   if (tabs.length > 1) throw new Error('Open one trusted dashboard.');
   if (tabs.length !== 1 || tabs[0].id === undefined) throw new Error('Dashboard unavailable.');
   return tabs[0];
+}
+
+class RetryableStartRead extends Error {
+  constructor() { super('Start read interrupted.'); }
+}
+function isFreshBaselineTransport(raw: unknown, expected: { scheduleId: string; ivr: string | null }): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const reading = raw as Record<string, unknown>;
+  const status = reading.status;
+  return typeof status === 'number' && Number.isInteger(status) && (status === 0 || status === 408 || status === 429 || (status >= 500 && status <= 599)) &&
+    (reading.redirected === undefined || reading.redirected === false) &&
+    isFreshBaselineAuthDenied({ ...reading, status: 401 }, expected);
 }
 
 // Strictly validates a fresh-baseline denied/redirect signal for explicit paid
@@ -568,68 +596,90 @@ async function prepareAlertScope(area: import('./engine/storage').StorageArea, s
   await area.set({ unpaidMonitorV1: slot });
 }
 
-async function attemptRestart(area: import('./engine/storage').StorageArea, state: import('./engine/workflow').EngineState) {
+type RestartReadStep = PanelReadStep | 'navigation' | 'alarm';
+async function attemptRestart(area: import('./engine/storage').StorageArea, state: import('./engine/workflow').EngineState, onStep: (step: RestartReadStep) => void = () => {}) {
+  onStep('state');
   const now = new Date().toISOString();
   const cancelled = () => cancelledRuns.has(`${state.owner}:${state.runId}`);
   const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Preferences | undefined;
   if (cancelled() || !prefs || preferencesError(prefs) || state.policyKey !== policyKey(prefs as unknown as Record<string, unknown>))
-    return parkForReview(state, now);
+    return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
   const unchanged = async () => !cancelled() && JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) === JSON.stringify(prefs);
+  onStep('dashboard');
   const dashboards = (await platform.tabs.query({})).filter(tab => classifyRoute(tab.url ?? '') === 'dashboard');
   if (dashboards.length === 0) {
     let next = beginTrackedAuthentication(state, 'start', now, Math.random);
     const entry = await startEntryTab();
-    if (!await unchanged()) return parkForReview(state, now);
+    if (!await unchanged()) return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
     if (entry !== null && next.authentication) {
       const live = await platform.tabs.get(entry);
       const parsed = new URL(live.url ?? '');
       const blank = live.url === 'about:blank' || live.url?.startsWith('chrome://newtab');
-      if (!blank && (parsed.origin !== SITE_ORIGIN || parsed.username || parsed.password || parsed.port)) return parkForReview(state, now);
+      if (!blank && (parsed.origin !== SITE_ORIGIN || parsed.username || parsed.password || parsed.port)) return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
       next = { ...next, authentication: { ...next.authentication, tabId: entry, pending: true } };
+      onStep('save');
       await saveEngineState(area, next);
-      if (!await unchanged() || (await platform.tabs.get(entry)).url !== live.url) return parkForReview(state, now);
+      if (!await unchanged() || (await platform.tabs.get(entry)).url !== live.url) return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
+      onStep('navigation');
       if (!['/en-ca/niv', '/en-ca/niv/', '/en-ca/niv/users/sign_in'].includes(parsed.pathname))
         await platform.tabs.update(entry, { url: `${SITE_ORIGIN}/en-ca/niv/` });
       next = { ...next, authentication: { ...next.authentication!, pending: false }, nextPollAt: new Date(Date.now() + 2_000).toISOString() };
     }
     return next;
   }
-  if (dashboards.length !== 1 || dashboards[0].id === undefined) throw new Error('Dashboard unavailable.');
+  if (dashboards.length !== 1) throw new Error('Open one trusted dashboard.');
+  if (dashboards[0].id === undefined) throw new Error('Dashboard unavailable.');
   const tab = dashboards[0];
   const dashboardPath = new URL(tab.url!).pathname;
+  try {
+    if (await observeMaintenance(executionDependencies(area, state), state, tab.id!)) {
+      if (!await unchanged()) return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
+      const auth = beginTrackedAuthentication(state, 'start', now, Math.random);
+      return deferAuthenticationForMaintenance({ ...auth, authentication: { ...auth.authentication!, tabId: tab.id! } }, now, Math.random);
+    }
+  } catch { /* The existing Start read classification handles failed probes. */ }
+  onStep('groups');
   const result = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
-  if (!await unchanged()) return parkForReview(state, now);
+  if (!await unchanged()) return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
   state = assessDashboard(state, result[0]?.result);
   if (state.discovery?.choosing) return { ...state, updatedAt: now };
+  onStep('selection');
   const match = resolveGroup(result[0]?.result as never, { mode: state.mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr, preferPaid: true });
   let currentDate: string | null = null;
   let applicantIds: string[] | undefined;
+  let visaClasses: VisaClass[] | undefined;
   if (state.mode === 'booking') {
+    onStep('appointment');
     const baseline = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment,
       args: [match.scheduleId, match.ivr, true, true, dashboardPath] });
     currentDate = appointmentDate(baseline[0]?.result, match);
+    onStep('applicants');
     applicantIds = appointmentApplicants(baseline[0]?.result);
+    visaClasses = appointmentVisaClasses(baseline[0]?.result, { ...match, applicantIds });
   }
   const live = await platform.tabs.get(tab.id!);
-  if (live.url !== tab.url || live.status === 'loading' || !await unchanged()) return parkForReview(state, now);
+  if (live.url !== tab.url || live.status === 'loading' || !await unchanged()) return parkForReview(state, now, blockedFailureContext('entry-context-changed', 'restart-setup'));
   let next = bindGroup(state, { owner: state.owner!, runId: state.runId!, now,
     binding: { ...match, kind: state.mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
+      ...(visaClasses ? { visaClasses } : {}),
       ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) } });
   // Degraded success: the restart was authorized although the card's IVR
   // stayed unreadable and/or its payment classification stayed unknown.
   if (match.ivr === null) noteDiagnostic('ivr-unreadable-proceeded', { mode: state.mode });
   if (match.inspectionRequired) noteDiagnostic('payment-unknown-proceeded', { mode: state.mode });
-  next = { ...next, restartPending: false, consecutiveFailures: 0, cooldownUntil: null, startedAt: now,
+  next = { ...next, restartPending: false, failureContext: null, consecutiveFailures: 0, cooldownUntil: null, startedAt: now,
     nextPollAt: new Date(Date.now() + 2_000).toISOString(), updatedAt: now };
   if (state.mode === 'booking') return { ...next, stage: 'actions',
     executor: { tabId: tab.id!, applicantIds: applicantIds!, targetTime: null, skippedDates: [], actionPending: false } };
   await prepareAlertScope(area, next);
   const payments = (await platform.tabs.query({})).filter(entry => entry.id !== undefined && classifyRoute(entry.url ?? '') === 'payment' && isSameGroupUrl(entry.url!, match.scheduleId));
   next = { ...next, monitorTabId: payments[0]?.id ?? tab.id! };
+  onStep('save');
   await saveEngineState(area, next);
   if (!payments.length) {
     const current = await platform.tabs.get(tab.id!);
-    if (current.url !== tab.url || !await unchanged()) return parkForReview(next, now);
+    if (current.url !== tab.url || !await unchanged()) return parkForReview(next, now, blockedFailureContext('entry-context-changed', 'alerts-entry'));
+    onStep('navigation');
     await platform.tabs.update(tab.id!, { url: `${SITE_ORIGIN}/en-ca/niv/schedule/${match.scheduleId}/payment` });
   }
   return next;
@@ -805,6 +855,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
       const requestCancelled = () => requestEpoch !== explicitStartEpoch;
       let readStep: PanelReadStep = 'state';
       let analyticsStart: string | null = null;
+      let retryAcceptedStart: (() => Promise<EngineState>) | null = null;
       try {
         const now = new Date().toISOString();
         let state = (await loadEngineState(area)) ?? emptyEngineState(now);
@@ -901,7 +952,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                       await platform.tabs.update(entry, { url: 'https://ais.usvisa-info.com/en-ca/niv/' });
                     state = { ...state, authentication: { ...state.authentication, tabId: entry },
                       nextPollAt: new Date(Date.parse(now) + 2_000).toISOString(), updatedAt: new Date().toISOString() };
-                  } catch { state = parkForReview(state, now); }
+                  } catch { state = parkForReview(state, now, blockedFailureContext('entry-navigation-failed', 'navigation')); }
                 }
               }
               readStep = 'save';
@@ -909,19 +960,38 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
             } else {
               const tab = await dashboardTab();
               const dashboardPath = new URL(tab.url!).pathname;
+              // Own a retry only for the accepted Start's read-only operations.
+              // No cached group/roster/baseline is bound by this fallback.
+              retryAcceptedStart = async () => {
+                if (requestCancelled() || JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) !== JSON.stringify(prefs))
+                  throw new Error('Dashboard context changed.');
+                const live = await platform.tabs.get(tab.id!);
+                if (requestCancelled() || live.url !== tab.url || !isExactDashboardUrl(live.url, dashboardPath) || live.status === 'loading' || live.pendingUrl)
+                  throw new Error('Dashboard context changed.');
+                if (requestCancelled() || JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) !== JSON.stringify(prefs))
+                  throw new Error('Dashboard context changed.');
+                let retrying = reviewLifecycle(beginPanelRun(), prefs as unknown as Record<string, unknown>, now);
+                retrying = beginTrackedAuthentication(retrying, 'start', now, Math.random);
+                retrying = applyPollResult(retrying, { outcome: 'retryable', now, random: Math.random });
+                return { ...retrying, authentication: { ...retrying.authentication!, tabId: tab.id!, phase: 'retry' } };
+              };
               readStep = 'groups';
-              const results = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups });
+              const results = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readDashboardGroups })
+                .catch(() => { throw new RetryableStartRead(); });
+              if (results[0]?.result == null) throw new RetryableStartRead();
               // Maintenance cannot establish a group. Keep Start active and
               // retry this owned dashboard before resolving any identities.
               const discovered = (results[0]?.result as { groups?: unknown } | undefined)?.groups;
               let maintenance = false;
               if (Array.isArray(discovered) && discovered.length === 0) {
                 try {
-                  const check = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readSiteMaintenance });
-                  maintenance = (check[0]?.result as { maintenance?: unknown } | undefined)?.maintenance === true;
+                  const started = reviewLifecycle(beginPanelRun(), prefs as unknown as Record<string, unknown>, now);
+                  maintenance = await observeMaintenance(executionDependencies(area, started), started, tab.id!);
                 } catch { /* An unreadable document still fails normal group resolution. */ }
               }
               if (maintenance) {
+                if (requestCancelled() || JSON.stringify((await area.get(['uiPreferencesV1'])).uiPreferencesV1) !== JSON.stringify(prefs))
+                  throw new Error('Dashboard context changed.');
                 state = reviewLifecycle(beginPanelRun(), prefs as unknown as Record<string, unknown>, now);
                 state = beginTrackedAuthentication(state, 'start', now, Math.random);
                 state = { ...state, authentication: { ...state.authentication!, tabId: tab.id! } };
@@ -950,10 +1020,13 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                 const match = resolveGroup(results[0]?.result as never, { mode, paidIvr: prefs.paidIvr, unpaidIvr: prefs.unpaidIvr, preferPaid: true });
                 let currentDate: string | null = null;
                 let applicantIds: string[] | undefined;
+                let visaClasses: VisaClass[] | undefined;
                 if (mode === 'booking') {
                   readStep = 'appointment';
-                  const appt = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, true, true, dashboardPath, true] });
+                  const appt = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, true, true, dashboardPath, true] })
+                    .catch(() => { throw new RetryableStartRead(); });
                   const raw = appt[0]?.result;
+                  if (raw == null || isFreshBaselineTransport(raw, match)) throw new RetryableStartRead();
                   // Stale signed-in-looking dashboard with an expired session:
                   // the cached DOM still resolves a group, but the bounded
                   // fresh baseline GET was denied/redirected. Never use cached
@@ -979,7 +1052,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                     const pendingState = { ...state, authentication: { ...state.authentication, tabId: tab.id!, pending: true }, updatedAt: new Date().toISOString() };
                     await saveEngineState(area, pendingState);
                     const parkPending = async () => {
-                      const parked = parkForReview(pendingState, new Date().toISOString());
+                      const parked = parkForReview(pendingState, new Date().toISOString(), blockedFailureContext('entry-context-changed', 'navigation'));
                       await saveEngineState(area, parked);
                       analytics?.link(analyticsStart, parked);
                       analytics?.observe(parked);
@@ -1026,10 +1099,12 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                   currentDate = appointmentDate(raw, match);
                   readStep = 'applicants';
                   applicantIds = appointmentApplicants(raw);
+                  visaClasses = appointmentVisaClasses(raw, { ...match, applicantIds });
                 }
                 if (message.discover === true || state.discovery) await dashboardUnchanged();
                 state = { ...discoveredState, nextPollAt: new Date(Date.parse(now) + 2_000).toISOString() };
                 state = bindGroup(state, { owner: state.owner!, runId: state.runId!, now, binding: { ...match, kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate, dashboardPath,
+                  ...(visaClasses ? { visaClasses } : {}),
                   ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) } });
                 // Degraded success: the run was authorized although the card's
                 // IVR stayed unreadable and/or its payment classification
@@ -1053,13 +1128,17 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
                     // Same-tab unpaid entry: retain the validated dashboard tab
                     // and navigate it to the bound group's payment summary
                     // instead of opening a second tab.
+                    let entryFailure = blockedFailureContext('tab-lost', 'tab-check');
                     try {
                       const live = await platform.tabs.get(tab.id!);
+                      entryFailure = blockedFailureContext('entry-context-changed', 'tab-check');
                       if (classifyRoute(live.url ?? '') !== 'dashboard' || new URL(live.url!).pathname !== dashboardPath)
                         throw new Error('Dashboard context changed.');
+                      entryFailure = blockedFailureContext('config-changed', 'configuration-check');
                       if (message.discover === true || discoveredState.discovery) await dashboardUnchanged();
+                      entryFailure = blockedFailureContext('entry-navigation-failed', 'navigation');
                       await platform.tabs.update(tab.id!, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${match.scheduleId}/payment` });
-                    } catch { state = parkForReview(state, now); await saveEngineState(area, state); }
+                    } catch { state = parkForReview(state, now, entryFailure); await saveEngineState(area, state); }
                   }
                 }
               }
@@ -1072,7 +1151,19 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
         const saved = await area.get(['engineObservationV1', 'engineSuccessV1']);
         respond({ ok: true, snapshot: panelSnapshot(state, saved.engineObservationV1, saved.engineSuccessV1) });
       } catch (error) {
-        analytics?.startFailed(analyticsStart);
+        if (error instanceof RetryableStartRead && retryAcceptedStart) {
+          try {
+            const retrying = await retryAcceptedStart();
+            readStep = 'save';
+            await saveEngineState(area, retrying);
+            analytics?.link(analyticsStart, retrying);
+            analytics?.observe(retrying);
+            await syncEngineAlarm(engineAlarmAt(retrying));
+            respond({ ok: true, snapshot: panelSnapshot(retrying, undefined, undefined) });
+            return;
+          } catch (recoveryError) { error = recoveryError; }
+        }
+        analytics?.startFailed(analyticsStart, startFailureContext(error, readStep));
         const detail = panelCommandError(error, readStep);
         // Validated classification beside the existing safe error: only the
         // exact known IVR domain errors (or their fixed safe diagnostics)
@@ -1177,10 +1268,12 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
         const match = resolveGroup({ groups: identified }, { mode, paidIvr, unpaidIvr });
         let currentDate: string | null = null;
         let applicantIds: string[] | undefined;
+        let visaClasses: VisaClass[] | undefined;
         if (mode === 'booking') {
           const appt = await platform.scripting.executeScript({ target: { tabId: tab.id }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, false, true] });
           currentDate = appointmentDate(appt[0]?.result, match);
           applicantIds = appointmentApplicants(appt[0]?.result);
+          visaClasses = appointmentVisaClasses(appt[0]?.result, { ...match, applicantIds });
         }
         const now = new Date().toISOString();
         const current = (await loadEngineState(area)) ?? emptyEngineState(now);
@@ -1193,6 +1286,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
           owner,
           runId: started.runId ?? '',
           binding: { ...match, kind: mode === 'booking' ? 'paid' : 'unpaid', currentDate,
+            ...(visaClasses ? { visaClasses } : {}),
             ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}) },
           now,
         });
@@ -1452,6 +1546,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
             });
             let currentDate: string | null = null;
             let applicantIds: string[] | undefined;
+            let visaClasses: VisaClass[] | undefined;
             let dashboardPath: string | undefined;
             if (validated.mode === 'booking') {
               const tab = await dashboardTab();
@@ -1459,11 +1554,12 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
               const result = await platform.scripting.executeScript({ target: { tabId: tab.id! }, func: readCurrentAppointment, args: [match.scheduleId, match.ivr, false, true, dashboardPath] });
               currentDate = appointmentDate(result[0]?.result, match);
               applicantIds = appointmentApplicants(result[0]?.result);
+              visaClasses = appointmentVisaClasses(result[0]?.result, { ...match, applicantIds });
             }
             next = bindGroup(current, {
               owner: validated.owner,
               runId: validated.runId,
-              binding: { ...match, kind: validated.mode === 'booking' ? 'paid' : 'unpaid', currentDate, ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}), ...(dashboardPath ? { dashboardPath } : {}) },
+              binding: { ...match, kind: validated.mode === 'booking' ? 'paid' : 'unpaid', currentDate, ...(visaClasses ? { visaClasses } : {}), ...(match.inspectionRequired ? { pendingInspection: true } : {}), ...(applicantIds ? { applicantIds } : {}), ...(dashboardPath ? { dashboardPath } : {}) },
               now,
             });
             break;
@@ -1478,7 +1574,7 @@ platform.runtime.onMessage.addListener((message, sender, respond) => {
   }
 });
 
-async function recoverPollException(area: import('./engine/storage').StorageArea): Promise<void> {
+async function recoverPollException(area: import('./engine/storage').StorageArea, failure?: FailureContext): Promise<void> {
   const now = new Date().toISOString();
   try {
     // Always reload: a mutation may have committed a checkpoint before its
@@ -1490,12 +1586,12 @@ async function recoverPollException(area: import('./engine/storage').StorageArea
       next = stopRun(next, { owner: latest.owner, runId: latest.runId, now });
     const due = engineAlarmAt(next);
     if (next === latest && (!due || Date.parse(due) <= Date.now())) {
-      if (next.restartPending && next.status === 'running' && !next.authentication) next = retryRestart(next, now, Math.random);
+      if (next.restartPending && next.status === 'running' && !next.authentication) next = retryRestart(failure ? { ...next, failureContext: failure } : next, now, Math.random);
       else if ((next.status === 'running' && next.group) || next.authentication) {
         next = applyPollResult(next, { outcome: 'retryable', now, random: Math.random });
         noteExceptionRecovery(next);
         if (next.authentication) next = { ...next, authentication: { ...next.authentication, phase: 'retry' } };
-        if (next.restartPending && next.consecutiveFailures >= SETUP_FAILURE_COOLDOWN_AFTER) next = restartExhausted(next, now);
+        if (next.restartPending && next.consecutiveFailures >= SETUP_FAILURE_COOLDOWN_AFTER && !next.authentication?.maintenanceRecovery) next = restartExhausted(next, now);
       } else if (next.verification?.nextReadAt) {
         next = { ...next, verification: { ...next.verification,
           nextReadAt: new Date(Date.now() + pollDelaySeconds(Math.random, next.pollIntervalS) * 1000).toISOString() }, updatedAt: now };
@@ -1518,6 +1614,7 @@ function queueEnginePoll(): void {
         get: (keys: string[]) => platform.storage.local.get(keys),
         set: (values: Record<string, unknown>) => platform.storage.local.set(values),
       };
+      let restartReadStep: RestartReadStep | null = null;
       try {
         if (storageRetryAt && Date.parse(storageRetryAt) > Date.now()) { await syncEngineAlarm(storageRetryAt); return; }
         storageRetryAt = null;
@@ -1529,9 +1626,12 @@ function queueEnginePoll(): void {
           executingRun = state.owner && state.runId ? { owner: state.owner, runId: state.runId } : null;
           const deadline = engineAlarmAt(state);
           if (deadline && Date.parse(deadline) > Date.now()) { await syncEngineAlarm(deadline); return; }
-          const next = await attemptRestart(area, state);
+          restartReadStep = 'state';
+          const next = await attemptRestart(area, state, step => { restartReadStep = step; });
           if (state.discovery && !state.group && next.group && !next.authentication) trackDiscoveredStart(next);
+          restartReadStep = 'save';
           await saveEngineState(area, next);
+          restartReadStep = 'alarm';
           await syncEngineAlarm(engineAlarmAt(next));
           return;
         }
@@ -1541,7 +1641,7 @@ function queueEnginePoll(): void {
           if (deadline && Date.parse(deadline) > Date.now()) { await syncEngineAlarm(deadline); return; }
           let next = await runAuthentication(executionDependencies(area, state), state);
           if (state.restartPending && !next.intent && !next.manualAuthentication) {
-            if (next.consecutiveFailures >= SETUP_FAILURE_COOLDOWN_AFTER) next = restartExhausted(next, new Date().toISOString());
+            if (next.consecutiveFailures >= SETUP_FAILURE_COOLDOWN_AFTER && !next.authentication?.maintenanceRecovery) next = restartExhausted(next, new Date().toISOString());
             else if (next.status === 'stopped' && next.authenticationError) next = retryRestart(next, new Date().toISOString(), Math.random);
             else if (!next.authentication && next.status === 'running' && next.group) next = { ...next, restartPending: false };
           }
@@ -1549,25 +1649,37 @@ function queueEnginePoll(): void {
           // dashboard tab and navigate it to the payment summary instead of
           // opening a second tab.
           if (!next.authentication && next.status === 'running' && next.mode === 'alerts' && next.group) {
+            let entryFailure = blockedFailureContext('monitor-state-invalid', 'alerts-entry');
             try {
               if (state.authentication.purpose === 'start' || next.mode !== state.mode) await prepareAlertScope(area, next);
               const group = next.group;
               // Renewal retains custody even when duplicate summaries exist.
+              entryFailure = blockedFailureContext('tab-query-failed', 'alerts-entry');
               const existing = state.authentication.purpose === 'renew' ? undefined : (await platform.tabs.query({})).find(entry =>
                 entry.id !== undefined && entry.url !== undefined && classifyRoute(entry.url) === 'payment' && isSameGroupUrl(entry.url, next.group!.scheduleId));
               next = { ...next, monitorTabId: existing?.id ?? state.authentication.tabId };
               if (!existing) {
+                entryFailure = blockedFailureContext('authentication-tab-missing', 'tab-check');
                 const authTabId = state.authentication.tabId;
                 if (authTabId === null || authTabId === undefined) throw new Error('Missing authentication tab.');
+                entryFailure = blockedFailureContext('tab-lost', 'tab-check');
                 const live = await platform.tabs.get(authTabId);
+                entryFailure = blockedFailureContext('entry-context-changed', 'tab-check');
                 if (classifyRoute(live.url ?? '') !== 'dashboard' || !group.dashboardPath ||
                     new URL(live.url!).pathname !== group.dashboardPath || cancelledRuns.has(`${state.owner}:${state.runId}`))
                   throw new Error('Authentication context changed.');
+                entryFailure = blockedFailureContext('storage-unavailable', 'state-save');
                 await saveEngineState(area, next);
+                entryFailure = blockedFailureContext('cancelled', 'configuration-check');
                 if (cancelledRuns.has(`${state.owner}:${state.runId}`)) throw new Error('Authentication cancelled.');
+                entryFailure = blockedFailureContext('entry-navigation-failed', 'navigation');
                 await platform.tabs.update(authTabId, { url: `https://ais.usvisa-info.com/en-ca/niv/schedule/${group.scheduleId}/payment` });
               }
-            } catch { next = parkForReview(next, new Date().toISOString()); }
+            } catch (error) {
+              if (error instanceof Error && error.message === 'Configuration changed.')
+                entryFailure = blockedFailureContext('config-changed', 'configuration-check');
+              next = parkForReview(next, new Date().toISOString(), entryFailure);
+            }
           }
           if (state.discovery && state.authentication.purpose === 'start' && !state.group && !next.authentication && next.group)
             trackDiscoveredStart(next);
@@ -1611,11 +1723,26 @@ function queueEnginePoll(): void {
               await syncEngineAlarm(null);
               return;
             }
+            // A document-wide outage is independent of Book/Alerts stage.
+            // Field stages also probe in the executor; here catch polls and
+            // changed routes before navigation/session recovery can preempt it.
+            if (!state.executor?.actionPending && (state.mode === 'alerts' || !state.stage || needsNavigationRecovery(state, owned))) {
+              let maintenance = false;
+              try { maintenance = await observeMaintenance(executionDependencies(area, state), state, ownedTabId); } catch { /* Ordinary reads classify failures. */ }
+              if (maintenance && policyKey((await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown>) === state.policyKey &&
+                  !cancelledRuns.has(`${state.owner}:${state.runId}`)) {
+                noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
+                const next = recoverMaintenance(state, ownedTabId, now, Math.random);
+                await saveEngineState(area, next);
+                await syncEngineAlarm(engineAlarmAt(next));
+                return;
+              }
+            }
             navigationRecovery = needsNavigationRecovery(state, owned);
             sessionExpired ||= classifyRoute(owned.url ?? '') === 'login';
           }
           catch {
-            const next = parkForReview(state, now);
+            const next = parkForReview(state, now, blockedFailureContext('owned-tab-check-failed', 'tab-check'));
             await saveEngineState(area, next);
             await syncEngineAlarm(null);
             return;
@@ -1638,7 +1765,7 @@ function queueEnginePoll(): void {
           // scope-bound monitor, and notify selected-consulate changes only.
           // Read failures budget a retry; corrupt baselines park for review.
           const stamped = new Date().toISOString();
-          const park = async (detail: DiagnosticDetail = 'stage-guard') => {
+          const park = async (detail: DiagnosticDetail) => {
             noteDiagnostic('poll-park', { mode: state.mode, detail });
             const parked = parkForReview(state, new Date().toISOString(), blockedFailureContext(detail, 'alerts-poll'));
             if (parked !== state) await saveEngineState(area, parked);
@@ -1652,7 +1779,7 @@ function queueEnginePoll(): void {
           const prefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1 as Record<string, unknown> | undefined;
           const consulates = selectedConsulates(prefs);
           if (!consulates?.length) {
-            await park();
+            await park('poll-consulates-invalid');
             return;
           }
           let windowPrefs;
@@ -1665,7 +1792,7 @@ function queueEnginePoll(): void {
             };
             validatePreferences(windowPrefs);
           } catch {
-            await park();
+            await park('poll-date-window-invalid');
             return;
           }
           const scheduleId = state.group.scheduleId;
@@ -1683,7 +1810,7 @@ function queueEnginePoll(): void {
               await syncEngineAlarm(engineAlarmAt(next));
               return;
             }
-            await park();
+            await park(matchingPayments.length > 1 && state.monitorTabId === null ? 'summary-tab-ambiguous' : 'summary-tab-unavailable');
             return;
           }
           if (state.monitorTabId === null) {
@@ -1699,24 +1826,21 @@ function queueEnginePoll(): void {
             await failSoft();
             return;
           }
-          // Site maintenance keeps the payment URL but drops the summary, and
-          // the dead page never recovers without a refresh. Reload it (a safe
-          // GET) and retry on budget; the landing re-read follows on load.
-          // Persistent maintenance still reaches cooldown and review.
+          // A late document change may reach maintenance after the shared
+          // preflight. Re-observe it, then hold the same fixed-GET recovery.
           if (typeof raw === 'object' && raw !== null && (raw as { maintenance?: unknown }).maintenance === true) {
             noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
-            try {
-              await platform.tabs.reload(payment.id, { bypassCache: true });
-              maintenanceReload = state.runId ? { runId: state.runId, tabId: payment.id } : null;
-            } catch { maintenanceReload = null; }
-            await failSoft();
+            const maintenance = await observeMaintenance(executionDependencies(area, state), state, payment.id).catch(() => false);
+            const next = maintenance ? recoverMaintenance(state, payment.id, new Date().toISOString(), Math.random) : pollRetry(state);
+            await saveEngineState(area, next);
+            await syncEngineAlarm(engineAlarmAt(next));
             return;
           }
           try {
             const reading = normalizeSummaryRaw(
               raw as { headingFound: boolean; rows: { city: string; text: string }[] },
             );
-            if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
+            if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park('cancelled'); return; }
             if (state.group!.pendingInspection) {
               // A complete seven-city summary on the same owned schedule is
               // the Alerts capability evidence. Revalidate after the read;
@@ -1737,7 +1861,7 @@ function queueEnginePoll(): void {
             let monitors: MonitorSlot['monitors'];
             try {
               monitors = monitorsForScope(saved, scopeKey, consulates);
-            } catch { await park(); return; }
+            } catch { await park('monitor-state-invalid'); return; }
             // Observe every selected consulate before any write: a missing
             // row throws here and takes the malformed-summary path below.
             const observed = consulates.map(consulate => ({
@@ -1762,7 +1886,7 @@ function queueEnginePoll(): void {
             let deliveryFailed = false;
             for (const { consulate, alertDue } of observed) {
               if (!alertDue) continue;
-              if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
+              if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park('cancelled'); return; }
               try {
                 // Acceptance records creation only, never proof of delivery.
                 await platform.notifications.create({
@@ -1814,7 +1938,7 @@ function queueEnginePoll(): void {
         }
         // Paid fetch loop only; the unpaid summary loop arrives separately.
         // Anything unplannable parks for review instead of acting blindly.
-        const park = async (detail: DiagnosticDetail = 'stage-guard') => {
+        const park = async (detail: DiagnosticDetail) => {
           noteDiagnostic('poll-park', { mode: state.mode, detail });
           const parked = parkForReview(state, new Date().toISOString(), blockedFailureContext(detail, 'booking-poll'));
           if (parked !== state) await saveEngineState(area, parked);
@@ -1828,7 +1952,7 @@ function queueEnginePoll(): void {
         const latest = prefs?.latest;
         const onlyEarlier = prefs?.onlyEarlier === true;
         if (consulates === null || consulates.length === 0) {
-          await park();
+          await park('poll-consulates-invalid');
           return;
         }
         let windowPrefs;
@@ -1841,7 +1965,7 @@ function queueEnginePoll(): void {
           };
           validatePreferences(windowPrefs);
         } catch {
-          await park();
+          await park('poll-date-window-invalid');
           return;
         }
         const scheduleId = state.group.scheduleId;
@@ -1859,7 +1983,7 @@ function queueEnginePoll(): void {
             const parked = parkForVerification(state, new Date().toISOString());
             if (parked !== state) await saveEngineState(area, parked);
             await syncEngineAlarm(engineAlarmAt(parked));
-          } else await park();
+          } else await park('executor-tab-missing');
           return;
         }
         const retryRead = async (detail?: DiagnosticDetail) => {
@@ -1870,7 +1994,7 @@ function queueEnginePoll(): void {
         let implicitApplicantId: string | null = null;
         if (state.group.applicantIds?.length === 1 &&
             sameApplicants(state.executor!.applicantIds, state.group.applicantIds) && isBareAppointmentQuery(new URL(reader.url!))) {
-          if (!state.group.dashboardPath) { await park(); return; }
+          if (!state.group.dashboardPath) { await park('dashboard-path-missing'); return; }
           let baseline: InjectionResult[];
           try {
             baseline = await platform.scripting.executeScript({ target: { tabId: reader.id }, func: readCurrentAppointment,
@@ -1899,7 +2023,21 @@ function queueEnginePoll(): void {
             return;
           }
           try {
-            if (appointmentDate(baseline[0]?.result, state.group) !== state.group.currentDate) { await park('baseline-changed'); return; }
+            if (appointmentDate(baseline[0]?.result, state.group) !== state.group.currentDate) {
+              const live = await platform.tabs.get(reader.id);
+              if (live.url !== reader.url || live.status === 'loading' || (live.pendingUrl && live.pendingUrl !== 'about:blank')) {
+                await retryRead('script-interrupted'); return;
+              }
+              const latestPrefs = (await area.get(['uiPreferencesV1'])).uiPreferencesV1;
+              if (cancelledRuns.has(`${state.owner}:${state.runId}`) || JSON.stringify(latestPrefs) !== JSON.stringify(prefs)) {
+                await park('config-changed'); return;
+              }
+              const adopted = adoptAppointmentBaseline(state, baseline[0]?.result, new Date().toISOString());
+              const next = beginTrackedAuthentication(adopted, 'renew', new Date().toISOString(), Math.random, true);
+              await saveEngineState(area, next);
+              await syncEngineAlarm(engineAlarmAt(next));
+              return;
+            }
           } catch (error) {
             const message = error instanceof Error ? error.message : '';
             if (message === 'Appointment identity changed.') await park('group-changed');
@@ -1914,20 +2052,14 @@ function queueEnginePoll(): void {
           const result = await platform.scripting.executeScript({ target: { tabId: reader.id }, func: readPaidPage, args: [scheduleId, implicitApplicantId] });
           page = result[0]?.result as PaidPage;
         } catch { await retryRead('script-interrupted'); return; }
-        // A maintenance page keeps the form URL but renders no usable form. As
-        // in the unpaid loop, reload it and retry on budget; anything else
-        // still parks. Readable pages with changed applicants always park.
+        // A late maintenance document can replace the form after preflight.
+        // It authorizes only paced fixed-GET recovery, never a form reload.
         if (page && page.scheduleId !== scheduleId) { await park('group-changed'); return; }
         if (!page || page.kind !== 'form') {
-          let maintenance = false;
-          try {
-            const check = await platform.scripting.executeScript({ target: { tabId: reader.id }, func: readSiteMaintenance });
-            maintenance = (check[0]?.result as { maintenance?: unknown } | undefined)?.maintenance === true;
-          } catch { maintenance = false; }
+          const maintenance = await observeMaintenance(executionDependencies(area, state), state, reader.id).catch(() => false);
           if (maintenance) {
             noteDiagnostic('poll-maintenance', { mode: state.mode, detail: 'maintenance' });
-            try { await platform.tabs.reload(reader.id, { bypassCache: true }); } catch { /* Tab loss parks below via retry budget. */ }
-            const next = pollRetry(state, 'maintenance');
+            const next = recoverMaintenance(state, reader.id, new Date().toISOString(), Math.random);
             await saveEngineState(area, next);
             await syncEngineAlarm(engineAlarmAt(next));
             return;
@@ -1975,7 +2107,7 @@ function queueEnginePoll(): void {
           replies.push({ consulate, status, body });
           if (mapHttpStatus(status) === 'denied') { denied = true; break; }
         }
-        if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park(); return; }
+        if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park('cancelled'); return; }
         if (denied) {
           noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
           const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
@@ -2082,9 +2214,15 @@ function queueEnginePoll(): void {
           : recorded;
         await saveEngineState(area, next);
         await syncEngineAlarm(engineAlarmAt(next));
-      } catch {
+      } catch (error) {
         console.error('Engine poll alarm failed.');
-        await recoverPollException(area);
+        // The callback updates this across awaits; widen the compiler's local narrowing.
+        const failedStep = restartReadStep as RestartReadStep | null;
+        const context: FailureContext | undefined = failedStep === null ? undefined
+          : failedStep === 'navigation' ? { category: 'setup-exhausted', code: 'entry-navigation-failed', step: 'navigation' }
+          : failedStep === 'alarm' ? { category: 'setup-exhausted', code: 'poll-alarm-failed', step: 'poll-scheduling' }
+          : { ...startFailureContext(error, failedStep), category: 'setup-exhausted' };
+        await recoverPollException(area, context);
       } finally {
         if (executingRun) cancelledRuns.delete(`${executingRun.owner}:${executingRun.runId}`);
         executingRun = null;
@@ -2145,12 +2283,9 @@ platform.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
     const saved = await area.get(['engineObservationV1']);
     const observation = saved.engineObservationV1 as { runId?: unknown } | undefined;
     const observed = !!observation && observation.runId === state.runId;
-    // A maintenance reload gets one immediate re-read on landing; afterwards
-    // the normal cadence resumes. Anything else with an observation keeps it.
-    const reloaded = maintenanceReload !== null && state.runId !== null &&
-      maintenanceReload.runId === state.runId && maintenanceReload.tabId === tabId;
-    if (reloaded) maintenanceReload = null;
-    if (observed && !reloaded) return;
+    // Outage retries have durable authentication deadlines; ordinary summary
+    // loads retain the normal cadence after the first observation.
+    if (observed) return;
     const next = setNextPoll(state, { owner: state.owner, runId: state.runId, nextPollAt: new Date().toISOString(), now: new Date().toISOString() });
     if (next !== state) {
       await saveEngineState(area, next);
@@ -2191,7 +2326,7 @@ platform.storage.onChanged?.addListener((changes, areaName) => {
       return;
     }
     const now = new Date().toISOString();
-    const next = current.status === 'running' ? parkForReview(current, now) : { ...current, authentication: null, verification: null, nextPollAt: null, updatedAt: now };
+    const next = current.status === 'running' ? parkForReview(current, now, blockedFailureContext('config-changed', 'configuration-check')) : { ...current, authentication: null, verification: null, nextPollAt: null, updatedAt: now };
     await saveEngineState(area, next);
     await syncEngineAlarm(null);
   });

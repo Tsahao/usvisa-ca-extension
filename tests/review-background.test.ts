@@ -93,7 +93,7 @@ describe('cross-component review regressions', () => {
     expect(stored.engineObservationV1.dates).toEqual([]);
     available.dates = ['2026-11-20']; await nextPoll();
     expect(mock.notifications.create).toHaveBeenCalledTimes(3);
-    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => ['readPaidPage', 'fetchDaysJson'].includes(input.func.name))).toBe(true);
+    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => ['readSiteMaintenance', 'readPaidPage', 'fetchDaysJson'].includes(input.func.name))).toBe(true);
     expect(state()).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
   });
 
@@ -135,7 +135,7 @@ describe('cross-component review regressions', () => {
     await fire();
     expect(mock.notifications.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'New date available: 2026-11-19 (Vancouver)' }));
     expect(state()).toMatchObject({ mode: 'alerts', status: 'running', stage: null, intent: null, executor: null });
-    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => input.func.name === 'readSummaryRaw')).toBe(true);
+    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => ['readSiteMaintenance', 'readSummaryRaw'].includes(input.func.name))).toBe(true);
   });
 
   it.each([null, 7])('holds the full verification deadline before tab resolution (%s)', async tabId => {
@@ -267,7 +267,7 @@ describe('cross-component review regressions', () => {
       }
     }
     expect(stored.engineSuccessV1.runId).toBe(oldRun);
-    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => input.func.name === 'readDashboardGroups')).toBe(true);
+    expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => ['readSiteMaintenance', 'readDashboardGroups'].includes(input.func.name))).toBe(true);
     const retried = await send({ type: 'PANEL_START', mode: 'booking' });
     expect(retried.snapshot.status).toBe('running');
     expect(state().consecutiveFailures).toBe(0);
@@ -285,7 +285,7 @@ describe('cross-component review regressions', () => {
       group: { currentDate: '2026-11-19', applicantIds: ['77777777', '88888888'] }, executor: { tabId: 7, applicantIds: ['77777777', '88888888'] } });
   });
 
-  it('applies the restart exhaustion boundary to authentication maintenance without credential actions', async () => {
+  it('keeps confirmed maintenance active through restart cooldown without credential actions', async () => {
     seedSuccess();
     tabs[0].url = 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in';
     await send({ type: 'PANEL_START', mode: 'booking' }); await fire();
@@ -294,9 +294,10 @@ describe('cross-component review regressions', () => {
     mock.scripting.executeScript.mockResolvedValue([{ result: { maintenance: true } }]);
     vi.setSystemTime(new Date(state().nextPollAt!));
     const reply = await fire();
-    expect(reply.snapshot).toMatchObject({ status: 'failure', failureKind: 'generic', restartFailed: true });
-    expect(state().consecutiveFailures).toBe(10);
-    expect(state().cooldownUntil).toBeNull();
+    expect(reply.snapshot).toMatchObject({ status: 'running' });
+    expect(state()).toMatchObject({ restartPending: true, restartFailed: false, consecutiveFailures: 10, nextPollAt: null,
+      authentication: { phase: 'retry', maintenanceRecovery: true } });
+    expect(state().cooldownUntil).not.toBeNull();
     expect(mock.scripting.executeScript.mock.calls.every(([input]: any[]) => input.func.name === 'readSiteMaintenance')).toBe(true);
   });
 

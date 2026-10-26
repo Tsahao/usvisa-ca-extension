@@ -1,3 +1,4 @@
+import type { PaidAdapterFailureCode } from '../domain/failure-codes';
 export type PaidAction = {
   action: 'reschedule' | 'schedule' | 'warning' | 'applicants' | 'facility' | 'date' | 'time';
   scheduleId: string;
@@ -14,7 +15,7 @@ export type ActResult = { ok: true; advanced?: boolean } | { ok: false; reason: 
 // alarm). No imported/module helpers: Chrome serializes this function alone.
 // There is deliberately no appointment-submit or confirmation action.
 export async function performPaidAction(request: PaidAction): Promise<ActResult> {
-  const refuse = (reason: string): ActResult => ({ ok: false, reason });
+  const refuse = (reason: PaidAdapterFailureCode): ActResult => ({ ok: false, reason });
   const url = new URL(location.href);
   const base = `/en-ca/niv/schedule/${request.scheduleId}`;
   if (!/^[0-9]{1,32}$/.test(request.scheduleId) || url.origin !== 'https://ais.usvisa-info.com' ||
@@ -229,11 +230,14 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
       };
       const completed = (_event: unknown, xhr: Ajax, settings: Settings) => {
         if (ownedRequest !== xhr || !matches(settings)) return;
-        if (xhr.status !== 200 || location.href !== url.href ||
+        if (xhr.status !== 200) return finish(refuse(xhr.status === 401 || xhr.status === 403 ? 'facility-request-denied' :
+          xhr.status === 0 ? 'facility-network-failed' : xhr.status >= 500 ? 'facility-server-error' :
+          xhr.status === 408 || xhr.status === 429 ? 'facility-request-retryable' : 'facility-http-error'));
+        if (location.href !== url.href ||
             ['appointments_consulate_appointment_facility_id', 'appointments_consulate_appointment_date', 'appointments_consulate_appointment_time']
               .some(id => document.querySelectorAll(`[id="${id}"]`).length !== 1) ||
             document.getElementById(facility.id) !== facility || document.getElementById(date.id) !== date || document.getElementById(time.id) !== time ||
-            facility.disabled || date.disabled || time.disabled || facility.value !== value || date.value !== '' || time.value !== '') return finish(refuse('facility-load-failed'));
+            facility.disabled || date.disabled || time.disabled || facility.value !== value || date.value !== '' || time.value !== '') return finish(refuse('facility-context-changed'));
         const days = xhr.responseJSON;
         const validDay = (day: unknown): day is { date: string; business_day: boolean } => {
           if (!day || typeof day !== 'object') return false;
@@ -242,7 +246,7 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
             new Date(item.date).toISOString().slice(0, 10) === item.date && typeof item.business_day === 'boolean';
         };
         if (!Array.isArray(days) || days.length > 3660 || !days.every(validDay) ||
-            new Set(days.map(day => day.date)).size !== days.length) return finish(refuse('facility-load-failed'));
+            new Set(days.map(day => day.date)).size !== days.length) return finish(refuse('facility-response-invalid'));
         if (!days.some(day => day.date === request.date && day.business_day)) return finish(refuse('facility-date-unavailable'));
         return finish({ ok: true });
       };
@@ -255,7 +259,7 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
         dispatching = true;
         facility.dispatchEvent(new Event('change', { bubbles: true }));
         dispatching = false;
-      } catch { finish(refuse('facility-load-failed')); }
+      } catch { finish(refuse('facility-change-handler-failed')); }
     });
   } else if (request.action === 'date') {
     if (date.disabled) return refuse('control-disabled');
@@ -266,11 +270,12 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
     // business-time list as well as the visible options. setDate alone also
     // does not invoke onSelect. Never write the portal's private cache.
     type Ajax = { status: number; responseJSON?: unknown };
+    type Settings = { url?: string; type?: string; method?: string };
     type JQueryNode = {
       datepicker: (command: string, value: string) => unknown;
       data: (key: string) => unknown;
-      on: (event: string, handler: (event: unknown, xhr: Ajax, settings: { url?: string }) => void) => void;
-      off: (event: string, handler: (event: unknown, xhr: Ajax, settings: { url?: string }) => void) => void;
+      on: (event: string, handler: (event: unknown, xhr: Ajax, settings: Settings) => void) => void;
+      off: (event: string, handler: (event: unknown, xhr: Ajax, settings: Settings) => void) => void;
     };
     const jq = (window as unknown as { jQuery?: (node: Element | Document) => JQueryNode }).jQuery;
     if (typeof jq !== 'function' || !Number.isInteger(request.facilityId)) return refuse('calendar-missing');
@@ -294,30 +299,45 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
     return new Promise<ActResult>(resolve => {
       const events = jq(document);
       let settled = false;
+      let dispatching = false;
+      let ownedRequest: Ajax | null = null;
       const finish = (result: ActResult) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        events.off('ajaxSend.usvisaCalendar', sent);
         events.off('ajaxComplete.usvisaCalendar', completed);
         resolve(result);
       };
-      const completed = (_event: unknown, xhr: Ajax, settings: { url?: string }) => {
+      const matches = (settings: Settings): boolean => {
         let target: URL;
-        try { target = new URL(settings.url ?? '', url); } catch { return; }
-        if (target.origin !== url.origin || target.username || target.password || target.port || target.hash ||
-            target.pathname !== `${base}/appointment/times/${request.facilityId}.json` ||
-            target.searchParams.get('date') !== request.date || target.searchParams.get('appointments[expedite]') !== 'false' ||
-            Array.from(target.searchParams.keys()).sort().join(',') !== 'appointments[expedite],date') return;
-        if (xhr.status !== 200 || !sameContext()) return finish(refuse('calendar-load-failed'));
+        try { target = new URL(settings.url ?? '', url); } catch { return false; }
+        return target.origin === url.origin && !target.username && !target.password && !target.port && !target.hash &&
+          target.pathname === `${base}/appointment/times/${request.facilityId}.json` &&
+          target.searchParams.get('date') === request.date && target.searchParams.get('appointments[expedite]') === 'false' &&
+          Array.from(target.searchParams.keys()).sort().join(',') === 'appointments[expedite],date' &&
+          settings.type?.toUpperCase() === 'GET' && (settings.method === undefined || settings.method.toUpperCase() === 'GET');
+      };
+      const sent = (_event: unknown, xhr: Ajax, settings: Settings) => {
+        if (!dispatching || !matches(settings)) return;
+        if (ownedRequest !== null) return finish(refuse('calendar-load-ambiguous'));
+        ownedRequest = xhr;
+      };
+      const completed = (_event: unknown, xhr: Ajax, settings: Settings) => {
+        if (xhr !== ownedRequest || !matches(settings)) return;
+        if (xhr.status !== 200) return finish(refuse(xhr.status === 401 || xhr.status === 403 ? 'calendar-request-denied' :
+          xhr.status === 0 ? 'calendar-network-failed' : xhr.status >= 500 ? 'calendar-server-error' :
+          xhr.status === 408 || xhr.status === 429 ? 'calendar-request-retryable' : 'calendar-http-error'));
+        if (!sameContext()) return finish(refuse('calendar-context-changed'));
         const body = xhr.responseJSON as { available_times?: unknown; business_times?: unknown } | null;
         const validTimes = (value: unknown): value is string[] => Array.isArray(value) && value.length <= 1440 &&
           value.every(item => typeof item === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item)) && new Set(value).size === value.length;
-        if (!body || !validTimes(body.available_times) || !validTimes(body.business_times)) return finish(refuse('calendar-load-failed'));
+        if (!body || !validTimes(body.available_times) || !validTimes(body.business_times)) return finish(refuse('calendar-response-invalid'));
         const available = body.available_times;
         const options = Array.from(time.options).filter(option => option.value !== '');
         if (options.length !== available.length || new Set(options.map(option => option.value)).size !== options.length ||
             options.some(option => option.disabled || !available.includes(option.value))) {
-          return finish(refuse('calendar-load-failed'));
+          return finish(refuse('calendar-times-mismatch'));
         }
         // DOM evidence is tied to this document and field pair; a reload
         // drops it. Existing equal dates must still pass through onSelect.
@@ -326,11 +346,14 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
       };
       const timer = setTimeout(() => finish(refuse('calendar-load-timeout')), 15_000);
       try {
+        events.on('ajaxSend.usvisaCalendar', sent);
         events.on('ajaxComplete.usvisaCalendar', completed);
         picker.datepicker('setDate', request.date!);
         if (!sameContext()) return finish(refuse('calendar-context-changed'));
+        dispatching = true;
         callback.call(date, request.date, instance);
-      } catch { finish(refuse('calendar-load-failed')); }
+        dispatching = false;
+      } catch { finish(refuse('calendar-callback-failed')); }
     });
   } else if (request.action === 'time') {
     if (time.disabled) return refuse('control-disabled');
@@ -339,7 +362,7 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
         !request.time || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(request.time)) return refuse('bad-slot');
     // Only select an option loaded by the portal. Inserting an option does
     // not populate its private business-time validation state.
-    if (!Array.from(time.options).some(option => option.value === request.time && !option.disabled)) return refuse('bad-slot');
+    if (!Array.from(time.options).some(option => option.value === request.time && !option.disabled)) return refuse('time-option-unavailable');
     time.value = request.time;
     time.dispatchEvent(new Event('change', { bubbles: true }));
   } else return refuse('wrong-action');

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { EngineState } from '../../src/engine/workflow';
 
-for (const { initial, single, bare } of [{ initial: false, single: false, bare: false }, { initial: true, single: true, bare: true }, { initial: false, single: true, bare: true }]) {
-test(initial ? 'paid unscheduled single-applicant Start follows the continue entry into the owned appointment form' : bare ? 'paid scheduled single-applicant Start keeps the warning and polls the bare appointment form' : 'paid Start advances the existing dashboard tab and promptly displays raw availability', async () => {
+for (const { initial, single, bare, lost = false } of [{ initial: false, single: false, bare: false }, { initial: true, single: true, bare: true }, { initial: false, single: true, bare: true }, { initial: false, single: false, bare: false, lost: true }]) {
+test(lost ? 'paid Start rebuilds after a lost dashboard Continue reply and resumes polling in the same tab' : initial ? 'paid unscheduled single-applicant Start follows the continue entry into the owned appointment form' : bare ? 'paid scheduled single-applicant Start keeps the warning and polls the bare appointment form' : 'paid Start advances the existing dashboard tab and promptly displays raw availability', async () => {
   test.setTimeout(60_000);
   const profile = await mkdtemp(path.join(tmpdir(), 'usvisa-gateway-fixture-'));
   const extensionPath = path.resolve('dist-test');
@@ -23,11 +23,26 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
   try {
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
+    if (lost) await worker.evaluate(() => {
+      const execute = chrome.scripting.executeScript.bind(chrome.scripting);
+      let dropped = false;
+      chrome.scripting.executeScript = (async (input: any) => {
+        const request = input.args?.[0];
+        if (!dropped && request && typeof request === 'object' && request.dashboardPath && Array.isArray(request.applicantIds) && !request.action) {
+          dropped = true;
+          try { await execute(input); } finally { throw new Error('Synthetic lost preliminary GET reply'); }
+        }
+        return execute(input);
+      }) as typeof chrome.scripting.executeScript;
+    });
     await context.route('https://ais.usvisa-info.com/**', async route => {
       const request = route.request(); const url = new URL(request.url());
       if (request.method() === 'DELETE') { cancellationRequests++; await route.abort(); return; }
       if (request.method() === 'POST') { bookingPosts++; await route.abort(); return; }
       let body: string;
+      if (url.pathname === '/en-ca/niv/') {
+        await route.fulfill({ contentType: 'text/html', body: `<script>location.replace('${dashboardPath}');</script>` }); return;
+      }
       if (url.pathname === dashboardPath) {
         if (dashboardUnavailable) {
           await route.fulfill({ status: 503, contentType: 'text/html', body: '<p>Synthetic temporary outage</p>' });
@@ -72,6 +87,18 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
     await panel.getByRole('button', { name: 'Booking', exact: true }).click();
     const ownedTabId = await panel.evaluate(async dashboardPath => (await chrome.tabs.query({})).find(tab => tab.url === `https://ais.usvisa-info.com${dashboardPath}`)!.id, dashboardPath);
     await panel.getByRole('button', { name: 'Start', exact: true }).click();
+    if (lost) {
+      await expect.poll(() => panel.evaluate(async () => ((await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState | undefined)?.entryRecoveryFailures)).toBe(1);
+      const recovering = await panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);
+      expect(recovering).toMatchObject({ status: 'running', intent: null, authentication: { dashboardFirst: true, phase: 'retry' }, executor: { actionPending: false } });
+      expect(Date.parse(recovering.nextPollAt!)).toBeGreaterThan(Date.now());
+      expect(bookingPosts).toBe(0); expect(cancellationRequests).toBe(0);
+      await panel.evaluate(async () => {
+        const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;
+        await chrome.storage.local.set({ engineStateV1: { ...state, nextPollAt: new Date().toISOString() } });
+        await chrome.alarms.create('enginePoll', { when: Date.now() });
+      });
+    }
     await expect.poll(async () => {
       const state = await panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);
       return { dayReads, url: dashboard.url(), status: state?.status, stage: state?.stage };
@@ -110,7 +137,7 @@ test(initial ? 'paid unscheduled single-applicant Start follows the continue ent
       expect(bookingPosts).toBe(0);
       dashboardUnavailable = false;
       await pollAgain();
-      await expect.poll(() => dayReads, { timeout: 10_000 }).toBe(2);
+    await expect.poll(() => dayReads, { timeout: 10_000 }).toBe(2);
       await expect.poll(() => panel.evaluate(async () => ((await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState).consecutiveFailures)).toBe(0);
       rosterChanged = true;
       await pollAgain();

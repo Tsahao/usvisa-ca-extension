@@ -27,7 +27,7 @@ function oldStoppedSave(ownedTabId: number): EngineState {
     restartPending: false, restartFailed: false } as unknown as EngineState;
 }
 
-test('packaged Retry recovers a stale redirect into same-tab sign-in then fresh binding with zero POSTs', async () => {
+for (const firstFailure of ['redirect', '503'] as const) test(`packaged Retry recovers a stale ${firstFailure} into same-tab fresh binding with zero POSTs`, async () => {
   test.setTimeout(90_000);
   const profile = await mkdtemp(path.join(tmpdir(), 'usvisa-start-redirect-fixture-'));
   const extensionPath = path.resolve('dist-test');
@@ -58,7 +58,8 @@ test('packaged Retry recovers a stale redirect into same-tab sign-in then fresh 
         if (request.resourceType() === 'fetch') {
           fetchAttempts++;
           if (fetchAttempts === 1) {
-            await route.fulfill({ status: 302, headers: { location: `https://ais.usvisa-info.com${signIn}` }, contentType: 'text/plain', body: '' });
+            if (firstFailure === '503') await route.fulfill({ status: 503, contentType: 'text/plain', body: 'Synthetic temporary outage' });
+            else await route.fulfill({ status: 302, headers: { location: `https://ais.usvisa-info.com${signIn}` }, contentType: 'text/plain', body: '' });
             return;
           }
         }
@@ -99,7 +100,8 @@ test('packaged Retry recovers a stale redirect into same-tab sign-in then fresh 
     await panel.getByRole('button', { name: 'Retry', exact: true }).click();
     const read = () => panel.evaluate(async () => (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState);
     // Same owned tab checkpoints a fixed sign-in GET (no replacement tab).
-    await expect.poll(async () => signInGets, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+    if (firstFailure === 'redirect') await expect.poll(async () => signInGets, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+    else await expect.poll(async () => (await read()).authentication?.phase).toBe('retry');
     expect(fetchAttempts).toBeGreaterThanOrEqual(1);
     // Deterministic auth-only: running, exact start auth on the owned tab,
     // no cached group/stage/executor binding Continue/booking. The held
@@ -115,7 +117,16 @@ test('packaged Retry recovers a stale redirect into same-tab sign-in then fresh 
     expect(context.pages().filter(page => page.url().startsWith('https://ais.usvisa-info.com'))).toEqual([dashboard]);
     // Release the sign-in document, then await fresh binding after the
     // redirect lands on the dashboard.
-    releaseSignIn();
+    if (firstFailure === '503') {
+      expect(signInGets).toBe(0);
+      expect(authOnly.consecutiveFailures).toBe(1);
+      expect(Date.parse(authOnly.nextPollAt!)).toBeGreaterThan(Date.now());
+      await panel.evaluate(async () => {
+        const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;
+        await chrome.storage.local.set({ engineStateV1: { ...state, nextPollAt: new Date().toISOString() } });
+        await chrome.alarms.create('enginePoll', { when: Date.now() });
+      });
+    } else releaseSignIn();
     await expect.poll(async () => {
       const current = await read();
       return { authentication: current.authentication, group: current.group, stage: current.stage };

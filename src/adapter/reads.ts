@@ -207,11 +207,13 @@ export function readSummaryRaw(scheduleId?: string): SummaryRaw {
   const heads = Array.from(document.querySelectorAll('h1, h2, h3, h4, caption'));
   const head = heads.find(element => (element.textContent ?? '').trim() === 'First Available Appointments');
   // A site maintenance page keeps the payment URL but drops the summary. Flag
-  // it only when the heading is absent and the page says so: the flag triggers
-  // one bounded reload, never an alert or a booking action.
+  // it only when the heading is absent and the dedicated outage phrase is
+  // present. The worker independently re-observes it before recovery.
   if (!head) {
     const bodyText = document.body?.innerText ?? document.body?.textContent ?? '';
-    if (/maintenance/i.test(bodyText)) return { headingFound: false, rows: [], maintenance: true };
+    if (!document.querySelector('#sign_in_form, #appointment-form') &&
+        /(?:website is down for planned maintenance|nonimmigrant visa section is currently under maintenance)/i.test(bodyText))
+      return { headingFound: false, rows: [], maintenance: true };
     return { headingFound: false, rows: [] };
   }
   let scope: Element | null = head;
@@ -238,19 +240,22 @@ export function readSummaryRaw(scheduleId?: string): SummaryRaw {
 // Site-wide maintenance signal, usable on any page. Matches the maintenance
 // document structurally (its heading and construction container) with a page
 // phrase fallback for wording variants. Self-contained for page injection.
-// Authentication uses a stricter outage-document check so a maintenance
-// announcement on a normal sign-in form cannot defer credential handling.
+// All stages use the same strict document check; a maintenance announcement
+// on a normal login/booking form cannot defer ordinary guarded handling.
 // The flag never supplies availability or authorizes a booking action.
-export function readSiteMaintenance(authenticationOnly = false): { maintenance: boolean } {
-  if (authenticationOnly && document.querySelector('#sign_in_form')) return { maintenance: false };
+export function readSiteMaintenance(_authenticationOnly = false, expectedUrl?: string): { maintenance: boolean } {
+  // This function is serialized into the page. Repeat origin/document checks
+  // here so a navigation between the tab snapshot and injection is harmless.
+  const url = new URL(location.href);
+  if (url.origin !== 'https://ais.usvisa-info.com' || url.username || url.password || url.port || url.hash ||
+      (expectedUrl !== undefined && url.href !== expectedUrl)) return { maintenance: false };
+  if (document.querySelector('#sign_in_form, #appointment-form')) return { maintenance: false };
   const heading = Array.from(document.querySelectorAll('h1')).some(
     element => (element.textContent ?? '').trim().toLowerCase() === 'doing maintenance',
   );
   if (heading || document.querySelector('.construction-background') !== null) return { maintenance: true };
   const bodyText = document.body?.innerText ?? document.body?.textContent ?? '';
-  return { maintenance: authenticationOnly
-    ? /(?:website is down for planned maintenance|nonimmigrant visa section is currently under maintenance)/i.test(bodyText)
-    : /maintenance/i.test(bodyText) };
+  return { maintenance: /(?:website is down for planned maintenance|nonimmigrant visa section is currently under maintenance)/i.test(bodyText) };
 }
 
 export type AppointmentFormRaw = {
@@ -277,7 +282,8 @@ export function readAppointmentForm(): AppointmentFormRaw {  const path = locati
 // The IVR echo is nullable: a null request (unreadable card) matches by
 // schedule alone and never fabricates an identity.
 export type CurrentAppointmentRaw =
-  | { scheduleId: string; ivr: string | null; kind: 'booked' | 'unbooked'; text: string | null; applicantIds?: string[] }
+  | { scheduleId: string; ivr: string | null; kind: 'booked' | 'unbooked'; text: string | null; applicantIds?: string[];
+      visaClassSnapshot?: { applicantIds: string[]; labels: (string | null)[] } }
   | { scheduleId: string; ivr: string | null; kind: 'read-failure'; text: null; status: number; redirected?: boolean; applicantIds?: never };
 
 export async function readCurrentAppointment(scheduleId: string, ivr: string | null, fresh = false, includeApplicants = false, dashboardPath?: string, reportReadFailure = false): Promise<CurrentAppointmentRaw> {
@@ -376,7 +382,8 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string | n
   if (scopes.size !== 1) throw new Error('Ambiguous appointment group.');
   const scope = [...scopes][0];
   let applicantIds: string[] | undefined;
-  if (includeApplicants) {
+  let visaClassSnapshot: { applicantIds: string[]; labels: (string | null)[] } | undefined;
+  const readRoster = () => {
     const applicantIdentity = (link: Element) => {
       const target = new URL(link.getAttribute('href') ?? '', 'https://ais.usvisa-info.com');
       const matched = target.pathname.match(/^\/en-ca\/niv\/schedule\/([0-9]{1,32})\/applicants\/([0-9]{1,32})$/);
@@ -396,22 +403,50 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string | n
     if (tables.size !== 1) throw new Error('Ambiguous applicant table.');
     const table = [...tables][0];
     const rows = Array.from(table.querySelectorAll('tr')).filter(row => row.closest('table') === table && !row.closest('thead') && Array.from(row.children).some(cell => cell.tagName === 'TD'));
-    applicantIds = rows.map(row => {
+    const ids = rows.map(row => {
       const identifiers = new Set(Array.from(row.querySelectorAll('a[href]')).map(applicantIdentity).filter(value => value !== null));
       if (identifiers.size !== 1) throw new Error('Incomplete applicant roster.');
       return [...identifiers][0]!;
     });
-    if (!applicantIds.length || applicantIds.length > 100 || new Set(applicantIds).size !== applicantIds.length) throw new Error('Invalid applicant roster.');
-    applicantIds.sort();
+    if (!ids.length || ids.length > 100 || new Set(ids).size !== ids.length) throw new Error('Invalid applicant roster.');
+    ids.sort();
+    // Header-based lookup: Petition is absent on some tables, so the Visa
+    // Class column is not at a fixed index. Ambiguous/spanning/nested markup
+    // supplies no metadata and cannot affect the strict roster result.
+    const headerRows = Array.from(table.querySelectorAll('tr')).filter(row => row.closest('table') === table &&
+      Array.from(row.children).some(cell => cell.tagName === 'TH' && (cell.textContent ?? '').trim() === 'Visa Class'));
+    if (headerRows.length === 1) {
+      const headers = Array.from(headerRows[0].children);
+      const columns = headers.map((cell, index) => (cell.textContent ?? '').trim() === 'Visa Class' ? index : -1).filter(index => index >= 0);
+      const simple = (cell: Element) => !cell.querySelector('table') &&
+        (!cell.hasAttribute('colspan') || cell.getAttribute('colspan') === '1') &&
+        (!cell.hasAttribute('rowspan') || cell.getAttribute('rowspan') === '1');
+      if (columns.length === 1 && headers.every(simple)) {
+        const labels = rows.map(row => {
+          const cells = Array.from(row.children);
+          if (cells.length !== headers.length || !cells.every(simple)) return null;
+          const text = (cells[columns[0]].textContent ?? '').trim();
+          return text.length > 0 && text.length <= 160 ? text : null;
+        });
+        visaClassSnapshot = { applicantIds: [...ids], labels };
+      }
+    }
+    return ids;
+  };
+  if (includeApplicants) applicantIds = readRoster();
+  else {
+    // Outcome verification stays roster-relaxed. This optional read never
+    // prevents an independently confirmed target date from resolving.
+    try { readRoster(); } catch { visaClassSnapshot = undefined; }
   }
   const entries = Array.from(scope.querySelectorAll('p.consular-appt'));
   if (entries.length === 1) {
     const text = (entries[0].textContent ?? '').trim();
     if (!text) throw new Error('Missing appointment date.');
-    return { scheduleId, ivr, kind: 'booked', text, ...(applicantIds ? { applicantIds } : {}) };
+    return { scheduleId, ivr, kind: 'booked', text, ...(applicantIds ? { applicantIds } : {}), ...(visaClassSnapshot ? { visaClassSnapshot } : {}) };
   }
   if (entries.length !== 0 || (!scope.matches('.ready_to_schedule') && !scope.querySelector('.ready_to_schedule'))) throw new Error('Unknown appointment state.');
-  return { scheduleId, ivr, kind: 'unbooked', text: null, ...(applicantIds ? { applicantIds } : {}) };
+  return { scheduleId, ivr, kind: 'unbooked', text: null, ...(applicantIds ? { applicantIds } : {}), ...(visaClassSnapshot ? { visaClassSnapshot } : {}) };
 }
 
 // Applicant checkbox states for retain-all enforcement. Raw booleans only;

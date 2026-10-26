@@ -577,9 +577,15 @@ describe('read-only probe boundaries', () => {
       appointment: 'The extension could not refresh the selected group’s appointment and applicant details. Refresh the dashboard; if this repeats, report this message.',
       applicants: 'The extension could not read the complete applicant list for the selected group. If all applicants are visible, report this message.',
     };
-    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith({ ok: false, error: expected[step],
-      failureKind: step === 'selection' ? 'paid-ivr-not-found' : 'generic' }));
-    expect(stored.engineStateV1).toBeUndefined();
+    if (step === 'groups' || step === 'appointment') {
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledWith(expect.objectContaining({ ok: true })));
+      expect(stored.engineStateV1).toMatchObject({ status: 'running', group: null, intent: null, consecutiveFailures: 1,
+        authentication: { purpose: 'start', tabId: 7, phase: 'retry', pending: false } });
+    } else {
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledWith({ ok: false, error: expected[step],
+        failureKind: step === 'selection' ? 'paid-ivr-not-found' : 'generic' }));
+      expect(stored.engineStateV1).toBeUndefined();
+    }
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
     expect(JSON.stringify(respond.mock.calls)).not.toContain('synthetic-private-exception');
   });
@@ -1170,7 +1176,7 @@ describe('read-only probe boundaries', () => {
     );
     expect((stored.engineStateV1 as { consecutiveFailures: number }).consecutiveFailures).toBe(0);
     expect((stored.engineStateV1 as { nextPollAt: string }).nextPollAt).not.toBeNull();
-    expect(chromeMock.scripting.executeScript.mock.calls[1][0].args).toEqual([
+    expect(chromeMock.scripting.executeScript.mock.calls.filter((call: any) => call[0].func.name !== 'readSiteMaintenance')[1][0].args).toEqual([
       '/en-ca/niv/schedule/11111111/appointment',
       95,
     ]);
@@ -1210,14 +1216,14 @@ describe('read-only probe boundaries', () => {
     const status = vi.fn();
     message({ type: 'PROBE_STATUS' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/probe.html' }, status);
     await vi.waitFor(() => expect(status).toHaveBeenCalled());
-    expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(mode === 'booking' ? 2 : 1);
+    expect(chromeMock.scripting.executeScript.mock.calls.filter((call: any) => call[0].func.name !== 'readSiteMaintenance')).toHaveLength(mode === 'booking' ? 2 : 1);
     state.cooldownUntil = new Date(Date.now() - 1000).toISOString();
     alarmed({ name: 'enginePoll' });
     alarmed({ name: 'enginePoll' });
     status.mockClear();
     message({ type: 'PROBE_STATUS' }, { id: 'synthetic-extension', url: 'chrome-extension://synthetic-extension/probe.html' }, status);
     await vi.waitFor(() => expect(status).toHaveBeenCalled());
-    expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(mode === 'booking' ? 4 : 2);
+    expect(chromeMock.scripting.executeScript.mock.calls.filter((call: any) => call[0].func.name !== 'readSiteMaintenance')).toHaveLength(mode === 'booking' ? 4 : 2);
     expect(stored.engineStateV1).toMatchObject({ consecutiveFailures: 1, cooldownUntil: null, nextPollAt: expect.any(String) });
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
@@ -1496,7 +1502,7 @@ describe('read-only probe boundaries', () => {
     await vi.waitFor(() => expect((stored.engineStateV1 as { status: string }).status).toBe('verifying'));
   });
 
-  it('reloads a maintenance payment page and retries on budget instead of freezing', async () => {
+  it('holds maintenance on an unpaid page for paced fixed-GET recovery', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
     stored.engineStateV1 = JSON.parse(
@@ -1518,13 +1524,15 @@ describe('read-only probe boundaries', () => {
     await vi.waitFor(() =>
       expect((stored.engineStateV1 as { consecutiveFailures: number }).consecutiveFailures).toBe(1),
     );
-    expect(chromeMock.tabs.reload).toHaveBeenCalledWith(5, { bypassCache: true });
+    expect(chromeMock.tabs.reload).not.toHaveBeenCalled();
+    expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+    expect(stored.engineStateV1).toMatchObject({ authentication: { tabId: 5, phase: 'retry', maintenanceRecovery: true } });
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
     expect(stored.engineObservationV1).toBeUndefined();
     expect((stored.engineStateV1 as { nextPollAt: string }).nextPollAt).not.toBeNull();
   });
 
-  it('rereads immediately when a maintenance reload finishes loading', async () => {
+  it('does not accelerate maintenance recovery when an unpaid page finishes loading', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
     stored.engineStateV1 = JSON.parse(
@@ -1548,10 +1556,12 @@ describe('read-only probe boundaries', () => {
     );
     expect(Date.parse((stored.engineStateV1 as { nextPollAt: string }).nextPollAt) - Date.now()).toBeGreaterThan(5_000);
     tabsUpdated(5, { status: 'complete' }, { id: 5, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment' });
-    await vi.waitFor(() => expect(Date.parse((stored.engineStateV1 as { nextPollAt: string }).nextPollAt) - Date.now()).toBeLessThan(5_000));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(Date.parse((stored.engineStateV1 as { nextPollAt: string }).nextPollAt) - Date.now()).toBeGreaterThan(5_000);
+    expect(chromeMock.tabs.reload).not.toHaveBeenCalled();
   });
 
-  it('reloads an unreadable paid form on maintenance instead of parking', async () => {
+  it('holds an unreadable paid form on maintenance for paced fixed-GET recovery', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();
     stored.engineStateV1 = JSON.parse(
@@ -1576,7 +1586,8 @@ describe('read-only probe boundaries', () => {
     await vi.waitFor(() =>
       expect((stored.engineStateV1 as { consecutiveFailures: number }).consecutiveFailures).toBe(1),
     );
-    expect(chromeMock.tabs.reload).toHaveBeenCalledWith(9, { bypassCache: true });
+    expect(chromeMock.tabs.reload).not.toHaveBeenCalled();
+    expect(stored.engineStateV1).toMatchObject({ authentication: { tabId: 9, phase: 'retry', maintenanceRecovery: true } });
     expect(stored.engineStateV1).toMatchObject({ status: 'running', nextPollAt: expect.any(String) });
   });
 
@@ -1730,7 +1741,7 @@ describe('read-only probe boundaries', () => {
     // An unexpected page restarts through auth-only fresh validation;
     // a readable form with a changed roster still parks without a GET.
     const reads = chromeMock.scripting.executeScript.mock.calls.map((call: { [index: number]: { func: { name: string } } }) => call[0].func.name as string);
-    expect(reads).toEqual(change === 'warning' ? ['readPaidPage', 'readSiteMaintenance'] : ['readPaidPage']);
+    expect(reads.filter((name: string) => name !== 'readSiteMaintenance')).toEqual(['readPaidPage']);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
@@ -1772,7 +1783,7 @@ describe('read-only probe boundaries', () => {
     expect(stored.engineStateV1).toMatchObject({ lastCandidate: null, stage: null, nextPollAt: expect.any(String), executor: { tabId: 9 } });
     expect((stored as Record<string, unknown>).lastPollV1).toBeUndefined();
     const injected = chromeMock.scripting.executeScript.mock.calls.map((call: { [index: number]: { func: { name: string } } }) => call[0].func.name as string);
-    expect(injected).toEqual(['readCurrentAppointment']);
+    expect(injected.filter((name: string) => name !== 'readSiteMaintenance')).toEqual(['readCurrentAppointment']);
     // The next paced poll revalidates and records the healthy days read.
     (stored.engineStateV1 as { nextPollAt: string }).nextPollAt = new Date(Date.now() - 1000).toISOString();
     alarmed({ name: 'enginePoll' });
@@ -1784,7 +1795,6 @@ describe('read-only probe boundaries', () => {
   });
 
   it.each([
-    ['changed-date', { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'December 15, 2026', applicantIds: ['77777777'] }],
     ['changed-roster', { scheduleId: '11111111', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: ['88888888'] }],
     ['wrong-group', { scheduleId: '33333333', ivr: '22222222', kind: 'unbooked', text: null, applicantIds: ['77777777'] }],
     ['wrong-ivr', { scheduleId: '11111111', ivr: '44444444', kind: 'unbooked', text: null, applicantIds: ['77777777'] }],
@@ -1818,7 +1828,7 @@ describe('read-only probe boundaries', () => {
       ? { status: 'running', consecutiveFailures: 1, nextPollAt: expect.any(String) }
       : { status: 'verifying', consecutiveFailures: 0, nextPollAt: null }));
     const injected = chromeMock.scripting.executeScript.mock.calls.map((call: { [index: number]: { func: { name: string } } }) => call[0].func.name as string);
-    expect(injected).toEqual(['readCurrentAppointment']);
+    expect(injected.filter((name: string) => name !== 'readSiteMaintenance')).toEqual(['readCurrentAppointment']);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
@@ -1839,7 +1849,7 @@ describe('read-only probe boundaries', () => {
     chromeMock.scripting.executeScript.mockResolvedValue([{ result: { scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', status, text: null } }]);
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'running', sessionRenewals: 1, authentication: { purpose: 'renew' } }));
-    expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(1);
+    expect(chromeMock.scripting.executeScript.mock.calls.filter((call: any) => call[0].func.name !== 'readSiteMaintenance')).toHaveLength(1);
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
@@ -2140,7 +2150,7 @@ describe('read-only probe boundaries', () => {
     const calls = chromeMock.alarms.create.mock.calls.length;
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(chromeMock.alarms.create.mock.calls.length).toBeGreaterThan(calls));
-    expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(1);
+    expect(chromeMock.scripting.executeScript.mock.calls.filter((call: any) => call[0].func.name !== 'readSiteMaintenance')).toHaveLength(1);
     expect(stored.engineStateV1).toMatchObject({ status: 'running', consecutiveFailures: 10, cooldownUntil: state.cooldownUntil });
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
@@ -2172,7 +2182,7 @@ describe('read-only probe boundaries', () => {
     alarmed({ name: 'enginePoll' });
     await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'verifying',
       failureContext: { category: 'workflow-blocked', code: 'tab-unavailable', step: 'tab-check' } }));
-    expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(2);
+    expect(chromeMock.scripting.executeScript.mock.calls.filter((call: any) => call[0].func.name !== 'readSiteMaintenance')).toHaveLength(2);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
   });
 });

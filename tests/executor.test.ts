@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { bindGroup, emptyEngineState, reconcileStartup, startRun, validateEngineState, type EngineState } from '../src/engine/workflow';
 import { recordCandidate, setStage, type BookingStage } from '../src/engine/poll';
+import { runAuthentication } from '../src/engine/authentication';
 import { runBookingStage, type ExecDeps } from '../src/engine/executor';
 import type { DiagnosticEvent } from '../src/domain/diagnostics';
 import type { PaidPage } from '../src/adapter/paid';
@@ -58,7 +59,7 @@ describe('paid executor', () => {
     expect(h.mutations).toEqual([]);
     expect(h.checkpoints[0].group!.pendingInspection).toBeUndefined();
     expect(events.map(event => event.code)).toEqual(['payment-inspection-attempted', 'payment-inspection-resolved']);
-    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readPaidPage', 'readCurrentAppointment']);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).toEqual(['readPaidPage', 'readCurrentAppointment']);
   });
   it.each(['wrong-roster', 'wrong-baseline', 'wrong-ivr', 'missing-page', 'actions-only'])(
     'does not resolve inspection or submit with unsupported capability (%s)', async issue => {
@@ -135,7 +136,7 @@ describe('paid executor', () => {
     h.d.inject = vi.fn(async (...args) => args[1].name === 'performDashboardContinue' ? { ok: true } : original(args[0], args[1], args[2]));
     expect(await runBookingStage(h.d, next)).toMatchObject({ status: 'running', stage: 'actions', executor: { tabId: 7, actionPending: false } });
     expect(h.checkpoints).toHaveLength(1); expect(h.checkpoints[0].executor?.actionPending).toBe(true);
-    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
   });
   it('continues a null-IVR dashboard binding with a null request IVR after a readable baseline', async () => {
     const h = harness('actions'); const state = seeded('actions');
@@ -159,7 +160,7 @@ describe('paid executor', () => {
     expect(h.mutations).toEqual([]);
     expect(h.checkpoints).toHaveLength(1);
     expect(h.checkpoints[0].executor!.actionPending).toBe(true);
-    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).toEqual(['readCurrentAppointment', 'performDashboardContinue']);
   });
   it.each([
     { bindingIvr: null, reading: { scheduleId: '11111111', ivr: '99999999' }, outcome: 'retry' },
@@ -177,7 +178,7 @@ describe('paid executor', () => {
     const next = validateEngineState(await runBookingStage(h.d, state));
     if (outcome === 'park') {
       expect(next).toMatchObject({ status: 'verifying', nextPollAt: null, intent: null });
-      expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readCurrentAppointment']);
+      expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).toEqual(['readCurrentAppointment']);
     } else {
       // A null IVR on either side and a readable disagreement against a null
       // binding never fabricate an identity mismatch: the schedule is primary
@@ -187,7 +188,7 @@ describe('paid executor', () => {
     expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
   });
   it.each(['wrong-group', 'wrong-ivr', 'changed-roster', 'changed-baseline', 'cancelled'])(
-    'still parks an unsafe dashboard handoff without clicking Continue (%s)', async issue => {
+    'recovers date-only dashboard changes and parks unsafe handoffs without clicking Continue (%s)', async issue => {
       const h = harness('actions'); const state = seeded('actions');
       state.lastCandidate = null; state.group!.dashboardPath = '/en-ca/niv/groups/55555555'; state.executor!.applicantIds = IDS;
       h.d.getTab = async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555' });
@@ -199,8 +200,12 @@ describe('paid executor', () => {
           text: issue === 'changed-baseline' ? 'December 1, 2026' : 'January 1, 2027', applicantIds: issue === 'changed-roster' ? IDS.slice(0, 1) : IDS };
         return { scheduleId: issue === 'wrong-group' ? '99999999' : '11111111', ivr: issue === 'wrong-ivr' ? '99999999' : '22222222', kind: 'read-failure', status: issue === 'malformed-status' ? '502' : 502 };
       });
-      expect(await runBookingStage(h.d, state)).toMatchObject({ status: 'verifying', nextPollAt: null, intent: null });
-      expect(h.d.inject).toHaveBeenCalledOnce(); expect(h.checkpoints).toEqual([]); expect(h.mutations).toEqual([]);
+      const next = await runBookingStage(h.d, state);
+      expect(next).toMatchObject(issue === 'changed-baseline'
+        ? { status: 'running', group: { currentDate: '2026-12-01' }, lastCandidate: null,
+            authentication: { purpose: 'renew', dashboardFirst: true }, intent: null }
+        : { status: 'verifying', nextPollAt: null, intent: null });
+      expect(vi.mocked(h.d.inject).mock.calls.filter(([, func]) => func.name !== 'readSiteMaintenance')).toHaveLength(issue === 'cancelled' ? 0 : 1); expect(h.checkpoints).toEqual([]); expect(h.mutations).toEqual([]);
     });
   it.each([0, 503, 401, 403])('classifies transient single-applicant re-entry reads without booking (%s)', async status => {
     const h = harness('form');
@@ -226,7 +231,7 @@ describe('paid executor', () => {
     expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
   });
   it.each(['wrong-identity', 'changed-roster', 'changed-baseline'])(
-    'still parks unsafe single-applicant re-entry readings (%s)', async issue => {
+    'recovers date-only re-entry changes and parks unsafe readings (%s)', async issue => {
       const h = harness('form'); const state = seeded('warning');
       state.lastCandidate = null;
       state.group = { ...state.group!, applicantIds: [IDS[0]], dashboardPath: '/en-ca/niv/groups/99999999' };
@@ -237,7 +242,11 @@ describe('paid executor', () => {
         if (issue === 'wrong-identity' || issue === 'malformed-status') return { scheduleId: issue === 'wrong-identity' ? '99999999' : '11111111', ivr: '22222222', kind: 'read-failure', status: issue === 'malformed-status' ? '503' : 503 };
         return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: issue === 'changed-baseline' ? 'December 1, 2026' : 'January 1, 2027', applicantIds: issue === 'changed-roster' ? IDS : [IDS[0]] };
       });
-      expect(await runBookingStage(h.d, state)).toMatchObject({ status: 'verifying', intent: null, nextPollAt: null });
+      const next = await runBookingStage(h.d, state);
+      expect(next).toMatchObject(issue === 'changed-baseline'
+        ? { status: 'running', group: { currentDate: '2026-12-01' }, lastCandidate: null,
+            authentication: { purpose: 'renew', dashboardFirst: true }, intent: null }
+        : { status: 'verifying', intent: null, nextPollAt: null });
       expect(h.mutations).toEqual([]); expect(h.checkpoints).toEqual([]);
     });
   it('binds the sole applicant on the form reached through the acknowledged warning query', async () => {
@@ -257,7 +266,7 @@ describe('paid executor', () => {
     const next = await runBookingStage(h.d, state);
     expect(next).toMatchObject({ status: 'running', stage: 'form', consecutiveFailures: 0, authentication: null });
     expect(next.executor!.applicantIds).toEqual([IDS[0]]);
-    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readPaidPage', 'readCurrentAppointment', 'readPaidPage']);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).toEqual(['readPaidPage', 'readCurrentAppointment', 'readPaidPage']);
     expect(h.mutations).toEqual([]);
   });
   it.each(['?confirmed_limit_message=0&commit=Continue', '?confirmed_limit_message=1&other=1'])('never infers the sole applicant on an appointment URL with any other query (%s)', async query => {
@@ -268,7 +277,7 @@ describe('paid executor', () => {
     h.d.getTab = async () => ({ id: 7, url: `${BASE}/appointment${query}` });
     h.d.inject = vi.fn(async () => null);
     const next = await runBookingStage(h.d, state);
-    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).toEqual(['readPaidPage']);
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).toEqual(['readPaidPage']);
     expect(next.consecutiveFailures).toBe(1);
     expect(h.mutations).toEqual([]);
   });
@@ -283,7 +292,8 @@ describe('paid executor', () => {
   it('refuses readiness and submission when the portal reports a business-day/time warning', async () => {
     const h = harness('form');
     h.page.slotWarning = true;
-    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ status: 'verifying', intent: null });
+    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ status: 'running', intent: null, lastCandidate: null, stage: null,
+      executor: { skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }] } });
     expect(h.mutations).toEqual([]);
   });
   it('parks legacy gateway state without an independently bound dashboard roster', async () => {
@@ -302,13 +312,16 @@ describe('paid executor', () => {
     expect(next.status).toBe('verifying');
     expect(h.mutations).toEqual([]);
   });
-  it.each(['changed-date', 'changed-roster'])('refuses a changed fresh dashboard before dry-run completion (%s)', async issue => {
+  it.each(['changed-date', 'changed-roster'])('revalidates a changed fresh dashboard before submission (%s)', async issue => {
     const h = harness('form');
     const original = h.d.inject;
     h.d.inject = async (...args) => args[1].name === 'readCurrentAppointment'
       ? { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: issue === 'changed-date' ? 'December 1, 2026' : 'January 1, 2027', applicantIds: issue === 'changed-roster' ? IDS.slice(0, 1) : IDS }
       : original(...args);
-    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ status: 'verifying', intent: null });
+    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject(issue === 'changed-date'
+      ? { status: 'running', group: { currentDate: '2026-12-01' }, lastCandidate: null, intent: null,
+          authentication: { purpose: 'renew', dashboardFirst: true } }
+      : { status: 'verifying', intent: null });
     expect(h.mutations).toEqual([]);
   });
   it('honors Stop arriving during the pending checkpoint without injecting a mutation', async () => {
@@ -329,7 +342,7 @@ describe('paid executor', () => {
     const ready = await runBookingStage(form.d, { ...seeded('form'), lastCandidate: null });
     expect(ready).toMatchObject({ stage: null, status: 'running', lastCandidate: null, executor: { applicantIds: IDS, targetTime: null } });
     expect(form.mutations).toEqual([]);
-    expect(form.d.inject).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(form.d.inject).mock.calls.filter(([, func]) => func.name !== 'readSiteMaintenance')).toHaveLength(1);
     expect(ready.nextPollAt).toBe(NOW);
   });
   it('checkpoints Continue in the owned dashboard tab instead of opening a new tab', async () => {
@@ -339,7 +352,7 @@ describe('paid executor', () => {
     state.lastCandidate = null;
     state.group!.dashboardPath = '/en-ca/niv/groups/55555555';
     const original = h.d.inject;
-    h.d.inject = vi.fn(async (...args) => {
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
       if (args[1].name !== 'performDashboardContinue') return original(args[0], args[1], args[2]);
       expect(h.checkpoints.at(-1)?.executor).toMatchObject({ tabId: 7, actionPending: true });
       expect(args[0]).toBe(7);
@@ -367,7 +380,7 @@ describe('paid executor', () => {
     const next = await runBookingStage(h.d, { ...state, lastCandidate: null, executor: { ...state.executor!, applicantIds } });
     expect(next.status).toBe('verifying');
     expect(h.mutations).toEqual([]);
-    expect(vi.mocked(h.d.inject).mock.calls.length).toBeLessThanOrEqual(1);
+    expect(vi.mocked(h.d.inject).mock.calls.filter(([, func]) => func.name !== 'readSiteMaintenance').length).toBeLessThanOrEqual(1);
   });
   it('checkpoints before a gateway action and paces verified arrival', async () => {
     const h = harness('actions');
@@ -462,7 +475,7 @@ describe('paid executor', () => {
       return original(...args);
     };
     const next = await runBookingStage(h.d, seeded('form'));
-    expect(next.status).toBe('verifying');
+    expect(next).toMatchObject({ status: 'running', authentication: { dashboardFirst: true, phase: 'retry' }, lastCandidate: null, formLoadFailures: 1 });
     expect(next.intent).toBeNull();
   });
   it.each([502, 304, 403])('classifies times status %s without filling or inventing availability', async status => {
@@ -507,7 +520,7 @@ describe('paid executor', () => {
     expect(next).toMatchObject({ status: 'verifying', intent: null });
     expect(h.mutations.filter(m => (m.action as string) === 'submit' || (m.action as string) === 'confirm')).toEqual([]);
     expect(h.mutations).toEqual([]);
-    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name)).not.toContain('performAppointmentSubmission');
+    expect(vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance')).not.toContain('performAppointmentSubmission');
     expect(JSON.stringify(events)).not.toMatch(/Toronto|Vancouver|2026-11-19/);
   });
   it('parks an unselected candidate before any field change', async () => {
@@ -521,7 +534,7 @@ describe('paid executor', () => {
     expect(next).toMatchObject({ status: 'verifying', intent: null });
     expect(h.mutations).toEqual([]);
     expect(h.checkpoints).toEqual([]);
-    const names = vi.mocked(h.d.inject).mock.calls.map(call => call[1].name);
+    const names = vi.mocked(h.d.inject).mock.calls.map(call => call[1].name).filter(name => name !== 'readSiteMaintenance');
     expect(names).not.toContain('performPaidAction');
     expect(names).not.toContain('fetchTimesJson');
     expect(names).not.toContain('performAppointmentSubmission');
@@ -564,7 +577,7 @@ describe('paid executor', () => {
     const h = harness('form'); h.page.facilityId = 94;
     const original = h.d.inject;
     h.d.inject = async (...args) => args[1].name === 'performPaidAction'
-      ? { ok: false, reason: 'facility-load-failed' } : original(...args);
+      ? { ok: false, reason: 'facility-response-invalid' } : original(...args);
     const next = await runBookingStage(h.d, seeded('form'));
     expect(next).toMatchObject({ status: 'verifying' });
   });
@@ -610,5 +623,265 @@ describe('workflow-blocked telemetry source', () => {
       code: issue === 'tab' ? 'tab-unavailable' : 'applicant-roster-changed', step: 'booking-form' } });
     expect(next.failureContext).not.toHaveProperty('authPurpose');
     expect(h.mutations).toEqual([]);
+  });
+});
+
+describe('date-only baseline recovery safety', () => {
+  it.each(['cancelled', 'settings-changed'])('does not adopt or submit after %s during the fresh baseline read', async issue => {
+    const h = harness('form'); const initial = seeded('form');
+    let cancelled = false; let changed = false;
+    h.d.isCancelled = () => cancelled;
+    h.d.loadPrefs = async () => ({ ...PREFS, ...(changed ? { latest: '2026-12-01' } : {}) });
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'readCurrentAppointment') {
+        cancelled = issue === 'cancelled'; changed = issue === 'settings-changed';
+        return { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'September 15, 2026', applicantIds: IDS };
+      }
+      return inject(...args);
+    });
+    const next = await runBookingStage(h.d, initial);
+    expect(next).toMatchObject({ status: 'verifying', group: { currentDate: '2027-01-01' }, intent: null });
+    expect(h.mutations).toEqual([]);
+    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+  });
+  it('sends a changed pre-confirmation baseline to verification without adopting or clicking confirmation', async () => {
+    const h = harness('form'); const initial = seeded('confirm');
+    initial.intent = { runId: RUN, mode: 'booking', groupId: '11111111', targetDate: '2026-11-19',
+      consulate: 'Vancouver', testMode: false, phase: 'submitted', createdAt: NOW };
+    initial.executor!.targetTime = '09:15';
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'waitForAppointmentDialog') return { ok: true };
+      if (args[1].name === 'readCurrentAppointment') return { scheduleId: '11111111', ivr: '22222222',
+        kind: 'booked', text: 'September 15, 2026', applicantIds: IDS };
+      return inject(...args);
+    });
+    const next = await runBookingStage(h.d, initial);
+    expect(next).toMatchObject({ status: 'verifying', stage: 'done', group: { currentDate: '2027-01-01' },
+      intent: initial.intent, verification: { nextReadAt: '2026-10-12T00:00:30.000Z' } });
+    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+  });
+});
+
+it('cannot execute a stale candidate stage while baseline recovery authentication is active', async () => {
+  const h = harness('form'); const initial = seeded('form');
+  initial.authentication = { tabId: 7, phase: 'prepare', purpose: 'renew', pending: false, startedAt: NOW, dashboardFirst: true };
+  expect(await runBookingStage(h.d, initial)).toBe(initial);
+  expect(h.d.inject).not.toHaveBeenCalled();
+  expect(h.d.loadPrefs).not.toHaveBeenCalled();
+});
+
+describe('actionable failure attribution', () => {
+  it.each([
+    ['facility', 'facility-response-invalid', 'booking-facility-change'],
+    ['date', 'calendar-response-invalid', 'booking-date-change'],
+    ['time', 'control-disabled', 'booking-time-change'],
+  ] as const)('preserves the adapter cause for a failed %s action', async (action, reason, step) => {
+    const h = harness('form');
+    if (action === 'facility') h.page.facilityId = 94;
+    if (action === 'date') h.page.calendarReady = false;
+    if (action === 'time') h.page.time = '10:30';
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction'
+      ? { ok: false, reason } : inject(...args));
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next).toMatchObject({ status: 'verifying', intent: null,
+      failureContext: { category: 'workflow-blocked', code: reason, step } });
+    expect(h.checkpoints.at(-1)).toMatchObject({ failureContext: { code: 'checkpoint-interrupted', step }, executor: { actionPending: true } });
+  });
+  it.each([
+    [null, 'adapter-reply-missing'],
+    [undefined, 'adapter-reply-missing'],
+    [[], 'adapter-reply-malformed'],
+    [{ ok: 'false' }, 'adapter-reply-malformed'],
+    [{ ok: false, reason: 'private@example.invalid <html>secret</html>' }, 'adapter-reason-unrecognized'],
+  ] as const)('distinguishes unusable action replies without exporting them (%j)', async (reply, code) => {
+    const h = harness('form'); h.page.calendarReady = false;
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction' ? reply : inject(...args));
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next.failureContext).toEqual({ category: 'workflow-blocked', code, step: 'booking-date-change' });
+    expect(JSON.stringify(next.failureContext)).not.toMatch(/private@|html|secret/);
+  });
+  it.each([
+    ['form-facility-invalid', { facilityId: null }],
+    ['page-kind-mismatch', { kind: 'warning' }],
+    ['booking-policy-consulate-mismatch', { facilityId: 94 }],
+  ] as const)('names the precise final form refusal (%s)', async (code, patch) => {
+    const h = harness('form'); const inject = h.d.inject;
+    let reads = 0;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 2
+      ? { ...h.page, ...patch } : inject(...args));
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next).toMatchObject({ status: 'verifying', intent: null, failureContext: { code,
+      step: code.startsWith('booking-policy-') ? 'booking-policy-check' : 'booking-form-read' } });
+    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+  });
+  it('retains the exact interrupted action through worker recovery, without replay', async () => {
+    const h = harness('form'); h.page.calendarReady = false;
+    h.d.saveState = async checkpoint => { h.checkpoints.push(structuredClone(checkpoint)); throw new Error('synthetic save interrupted'); };
+    await expect(runBookingStage(h.d, seeded('form'))).rejects.toThrow('synthetic save interrupted');
+    const restored = reconcileStartup(h.checkpoints.at(-1)!, NOW);
+    expect(restored).toMatchObject({ status: 'verifying', failureContext: {
+      category: 'workflow-blocked', code: 'checkpoint-interrupted', step: 'booking-date-change' } });
+    expect(h.mutations).toEqual([]);
+  });
+});
+
+
+describe('automatic form timeout recovery', () => {
+  function timeoutHarness(action: 'date' | 'facility') {
+    const h = harness('form');
+    if (action === 'date') h.page.calendarReady = false;
+    else h.page.facilityId = 94;
+    const original = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction'
+      ? { ok: false, reason: action === 'date' ? 'calendar-load-timeout' : 'facility-load-timeout' } : original(...args));
+    return h;
+  }
+  it.each(['date', 'facility'] as const)('rebuilds after a returned %s timeout with no stale candidate or terminal failure', async action => {
+    const h = timeoutHarness(action);
+    const next = validateEngineState(await runBookingStage(h.d, seeded('form')));
+    expect(next).toMatchObject({ status: 'running', intent: null, stage: null, lastCandidate: null,
+      formLoadFailures: 1, consecutiveFailures: 1, nextPollAt: '2026-10-12T00:01:00.000Z', failureContext: null,
+      executor: { tabId: 7, actionPending: false, targetTime: null, skippedDates: [] },
+      authentication: { purpose: 'renew', phase: 'retry', dashboardFirst: true, pending: false } });
+    expect(h.d.createTab).not.toHaveBeenCalled();
+    const prefs = { ...PREFS, email: 'fixture@example.invalid', password: 'synthetic-password', interval: 60, paidIvr: '22222222', unpaidIvr: '' };
+    h.d.loadPrefs = async () => prefs;
+    h.d.navigateTab = vi.fn(async () => ({}));
+    // Even direct/early execution cannot shorten the retry deadline.
+    expect(await runAuthentication(h.d, next)).toEqual(next);
+    expect(h.d.navigateTab).not.toHaveBeenCalled();
+    h.d.nowIso = () => '2026-10-12T00:01:00.000Z';
+    const recovering = await runAuthentication(h.d, next);
+    expect(recovering.status).toBe('running');
+    expect(h.d.navigateTab).toHaveBeenCalledExactlyOnceWith(7, 'https://ais.usvisa-info.com/en-ca/niv/');
+    expect(h.checkpoints.at(-1)).toMatchObject({ authentication: { pending: true, checkpoint: 'navigation' } });
+    expect(h.d.inject).not.toHaveBeenCalledWith(7, expect.objectContaining({ name: 'performAppointmentSubmission' }), expect.anything());
+  });
+  it('cools down repeated timeouts even when dashboard authentication and polls succeeded between them', async () => {
+    const h = timeoutHarness('date');
+    let state = seeded('form');
+    for (let count = 1; count <= 10; count++) {
+      const next = validateEngineState(await runBookingStage(h.d, state));
+      expect(next.status).toBe('running');
+      expect(next.formLoadFailures).toBe(count === 10 ? 0 : count);
+      expect(next.cooldownUntil).toBe(count === 10 ? '2026-10-12T00:30:00.000Z' : null);
+      // Successful auth/polls reset their own budgets, but retain the
+      // persisted form timeout count until a date/time action succeeds.
+      state = { ...seeded('form'), formLoadFailures: next.formLoadFailures };
+    }
+  });
+  it.each(['cancelled', 'settings', 'navigation'] as const)('does not rebuild after %s changed during the timeout', async issue => {
+    const h = timeoutHarness('date'); const inject = h.d.inject;
+    let returned = false;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      const reply = await inject(...args);
+      if (args[1].name === 'performPaidAction') returned = true;
+      return reply;
+    });
+    h.d.isCancelled = () => issue === 'cancelled' && returned;
+    h.d.loadPrefs = async () => ({ ...PREFS, onlyEarlier: !(issue === 'settings' && returned) });
+    const getTab = h.d.getTab;
+    h.d.getTab = async id => issue === 'navigation' && returned ? { id, url: 'https://example.invalid/' } : getTab(id);
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next.authentication).toBeNull();
+    expect(next.status).toBe('verifying');
+  });
+  it('retains the separate timeout budget until final form validation succeeds', async () => {
+    const h = harness('form'); h.page.calendarReady = false;
+    const next = await runBookingStage(h.d, { ...seeded('form'), formLoadFailures: 8 });
+    expect(next).toMatchObject({ status: 'running', formLoadFailures: 8, executor: { actionPending: false } });
+  });
+  it('migrates old saves and refuses corrupt recovery budgets', () => {
+    const legacy = seeded('form'); delete legacy.formLoadFailures;
+    expect(validateEngineState(legacy).formLoadFailures).toBe(0);
+    for (const formLoadFailures of [-1, 10, 0.5, '1'])
+      expect(() => validateEngineState({ ...legacy, formLoadFailures })).toThrow('Invalid form recovery budget.');
+  });
+});
+
+describe('safe broader recovery', () => {
+  it.each(['date', 'facility'] as const)('paces transient %s errors and denied responses on the durable form budget', async action => {
+    for (const suffix of ['load-timeout', 'network-failed', 'server-error', 'request-denied', 'request-retryable']) {
+      const h = harness('form'); if (action === 'date') h.page.calendarReady = false; else h.page.facilityId = 94;
+      const inject = h.d.inject;
+      h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction'
+        ? { ok: false, reason: `${action === 'date' ? 'calendar' : 'facility'}-${suffix}` } : inject(...args));
+      const next = validateEngineState(await runBookingStage(h.d, { ...seeded('form'), formLoadFailures: 9 }));
+      expect(next).toMatchObject({ status: 'running', intent: null, lastCandidate: null, formLoadFailures: 0,
+        cooldownUntil: '2026-10-12T00:30:00.000Z', authentication: { dashboardFirst: true, phase: 'retry' }, executor: { actionPending: false } });
+      expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+    }
+  });
+  it('skips only the current consulate/date when a time vanished', async () => {
+    const h = harness('form'); h.page.time = '10:30'; const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction'
+      ? { ok: false, reason: 'time-option-unavailable' } : inject(...args));
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next).toMatchObject({ status: 'running', stage: null, lastCandidate: null, authentication: null,
+      nextPollAt: '2026-10-12T00:01:00.000Z', executor: { actionPending: false, targetTime: null,
+        skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }] } });
+  });
+  it.each(['null', 'not-ready', 'date', 'time'] as const)('rebuilds a final reread %s and retains its budget through successful field selections', async issue => {
+    const h = harness('form'); const inject = h.d.inject; let reads = 0;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 2
+      ? issue === 'null' ? null : { ...h.page, ...(issue === 'not-ready' ? { calendarReady: false } : issue === 'date' ? { date: '2026-11-20' } : { time: '10:30' }) } : inject(...args));
+    const next = await runBookingStage(h.d, { ...seeded('form'), formLoadFailures: 9 });
+    expect(next).toMatchObject({ status: 'running', intent: null, lastCandidate: null, cooldownUntil: '2026-10-12T00:30:00.000Z',
+      formLoadFailures: 0, authentication: { dashboardFirst: true, phase: 'retry' } });
+    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+  });
+  it.each(['group', 'roster'] as const)('does not rebuild or skip a slot when a simultaneous %s mismatch is readable', async issue => {
+    const h = harness('form'); const inject = h.d.inject; let reads = 0;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 2
+      ? { ...h.page, slotWarning: true, calendarReady: false, ...(issue === 'group' ? { scheduleId: '99999999' } : { applicantIds: ['99999999'] }) } : inject(...args));
+    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ status: 'verifying', authentication: null,
+      failureContext: { code: issue === 'group' ? 'group-identity-changed' : 'applicant-roster-changed' } });
+  });
+  it.each(['missing', 'exception', 'wake'] as const)('rebuilds a typed preliminary GET after %s, without replaying its click', async issue => {
+    const h = harness('actions'); const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name !== 'performPaidAction') return inject(...args);
+      if (issue === 'wake') throw new Error('Synthetic interruption');
+      if (issue === 'exception') throw new Error('Synthetic lost navigation reply');
+      return null;
+    });
+    let next: EngineState;
+    if (issue === 'wake') {
+      const checkpoint = { ...seeded('actions'), executor: { ...seeded('actions').executor!, applicantIds: IDS, actionPending: true, entryAction: 'reschedule' as const } };
+      const woke = reconcileStartup(validateEngineState(checkpoint), NOW);
+      expect(woke.status).toBe('running');
+      expect(reconcileStartup(checkpoint, NOW, true).status).toBe('verifying');
+      next = await runBookingStage(h.d, woke);
+      expect(h.d.inject).not.toHaveBeenCalled();
+    } else {
+      const initial = seeded('actions'); initial.executor!.applicantIds = IDS;
+      next = await runBookingStage(h.d, initial);
+      expect(vi.mocked(h.d.inject).mock.calls.filter(call => call[1].name === 'performPaidAction')).toHaveLength(1);
+      expect(h.checkpoints.at(-1)?.executor?.entryAction).toBe('reschedule');
+    }
+    expect(validateEngineState(next)).toMatchObject({ status: 'running', intent: null, lastCandidate: null, entryRecoveryFailures: 1,
+      authentication: { dashboardFirst: true, phase: 'retry' }, executor: { actionPending: false } });
+  });
+  it('keeps explicit unsafe gateway refusals blocked and does not recover a generic pending checkpoint', async () => {
+    const h = harness('actions'); const inject = h.d.inject; const initial = seeded('actions'); initial.executor!.applicantIds = IDS;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction'
+      ? { ok: false, reason: 'wrong-target' } : inject(...args));
+    expect(await runBookingStage(h.d, initial)).toMatchObject({ status: 'verifying', authentication: null, failureContext: { code: 'wrong-target' } });
+    const generic = { ...initial, executor: { ...initial.executor!, actionPending: true } };
+    expect(reconcileStartup(generic, NOW).status).toBe('verifying');
+    expect(await runBookingStage(h.d, generic)).toMatchObject({ status: 'verifying', authentication: null });
+  });
+  it('resets form recovery only after all final safety checks passed, before a new intent', async () => {
+    const h = harness('form');
+    h.d.inject = vi.fn(async (id, func, args) => func.name === 'performAppointmentSubmission' ? { ok: false } :
+      func.name === 'readPaidPage' ? h.page : func.name === 'readCurrentAppointment'
+        ? { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027', applicantIds: IDS }
+        : { status: 200, body: { available_times: ['09:15'] } });
+    const next = await runBookingStage(h.d, { ...seeded('form'), formLoadFailures: 9 });
+    expect(next).toMatchObject({ formLoadFailures: 0, status: 'verifying', stage: 'done', intent: { phase: 'prepared' } });
   });
 });

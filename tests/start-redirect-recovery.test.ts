@@ -190,6 +190,14 @@ describe('stale-dashboard Retry recovery', () => {
     mockDashboardOk();
     mockBaseline(baseline);
     const reply = await sendStart('booking');
+    if (['502', 'plain-zero', 'lost-reply'].includes(_label as string)) {
+      expect(reply.ok).toBe(true);
+      expect(stored.engineStateV1).toMatchObject({ status: 'running', group: null, intent: null, consecutiveFailures: 1,
+        authentication: { purpose: 'start', tabId: 7, phase: 'retry' } });
+      expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+      expect(chromeMock.tabs.create).not.toHaveBeenCalled();
+      return;
+    }
     expect(reply.ok).toBe(false);
     expect(reply.error).toBe('The extension could not refresh the selected group’s appointment and applicant details. Refresh the dashboard; if this repeats, report this message.');
     expect(stored.engineStateV1).toEqual(paused);
@@ -220,7 +228,7 @@ describe('stale-dashboard Retry recovery', () => {
     expect(reply.ok).toBe(false);
     // The paused save keeps its exact recorded freshness; only the fixed
     // identifier-free selection cause is retained for the problem report.
-    expect(stored.engineStateV1).toEqual({ ...oldStoppedSave(), authenticationFailureReason: 'no-dashboard-group', failureContext: null });
+    expect(stored.engineStateV1).toEqual({ ...oldStoppedSave(), formLoadFailures: 0, entryRecoveryFailures: 0, authenticationFailureReason: 'no-dashboard-group', failureContext: null });
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
   });
 
@@ -311,6 +319,12 @@ describe('stale-dashboard Retry recovery', () => {
     mockDashboardOk();
     mockBaseline(baseline);
     const reply = await sendStart('booking');
+    if (['false-flag-with-zero', 'false-flag-with-502'].includes(_label as string)) {
+      expect(reply.ok).toBe(true);
+      expect(stored.engineStateV1).toMatchObject({ status: 'running', group: null, authentication: { purpose: 'start', phase: 'retry', tabId: 7 } });
+      expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+      return;
+    }
     expect(reply.ok).toBe(false);
     expect(stored.engineStateV1).toEqual(paused);
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
@@ -531,7 +545,34 @@ describe('stale-dashboard Retry recovery', () => {
     await vi.waitFor(() => expect((stored.engineStateV1 as EngineState).discovery?.choosing).toBe(true));
     expect(stored.engineStateV1).toMatchObject({ status: 'stopped', group: null, intent: null, nextPollAt: null });
     expect(chromeMock.tabs.update).not.toHaveBeenCalled(); expect(chromeMock.tabs.create).not.toHaveBeenCalled();
-    expect(chromeMock.scripting.executeScript.mock.calls.every(([input]: [any]) => input.func.name === 'readDashboardGroups')).toBe(true);
+    expect(chromeMock.scripting.executeScript.mock.calls.every(([input]: [any]) => ['readSiteMaintenance', 'readDashboardGroups'].includes(input.func.name))).toBe(true);
+  });
+
+  it.each(['stop', 'settings', 'navigation', 'closed'] as const)('cancels transient Start recovery after %s changes', async issue => {
+    stored.engineStateV1 = oldStoppedSave(); mockDashboardOk();
+    chromeMock.scripting.executeScript.mockImplementation(async () => {
+      if (issue === 'stop') message({ type: 'PANEL_STOP' }, sender, vi.fn());
+      if (issue === 'settings') stored.uiPreferencesV1 = { ...prefs, interval: 600 };
+      if (issue === 'navigation') chromeMock.tabs.get.mockResolvedValue({ id: 7, url: 'https://example.invalid/' });
+      if (issue === 'closed') chromeMock.tabs.get.mockRejectedValue(new Error('Synthetic closed tab'));
+      throw new Error('synthetic-private-read-error');
+    });
+    expect((await sendStart()).ok).toBe(false);
+    expect((stored.engineStateV1 as any).authentication).toBeNull();
+    expect(chromeMock.tabs.update).not.toHaveBeenCalled();
+    expect(chromeMock.tabs.create).not.toHaveBeenCalled();
+  });
+  it.each([408, 429, 503])('accepts a paced Start retry for fresh HTTP %s without trusting cached binding', async status => {
+    stored.engineStateV1 = oldStoppedSave(); mockDashboardOk();
+    mockBaseline({ scheduleId: '11111111', ivr: '22222222', kind: 'read-failure', text: null, status });
+    expect((await sendStart()).ok).toBe(true);
+    expect(stored.engineStateV1).toMatchObject({ status: 'running', group: null, intent: null, stage: null, executor: null,
+      consecutiveFailures: 1, authentication: { tabId: 7, phase: 'retry', purpose: 'start', pending: false } });
+    expect(Date.parse((stored.engineStateV1 as EngineState).nextPollAt!)).toBeGreaterThan(Date.now());
+    const saved = structuredClone(stored.engineStateV1);
+    expect((await sendStart()).ok).toBe(true);
+    expect(stored.engineStateV1).toEqual(saved);
+    expect(chromeMock.tabs.update).not.toHaveBeenCalled();
   });
 
 });

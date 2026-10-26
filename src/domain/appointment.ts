@@ -1,6 +1,7 @@
 import { parseLongDateUs } from './dates';
 import { normalizeReadingIvr, sameGroupRef, type GroupRef } from './groups';
 import { sameApplicants, validateApplicantIds } from './applicants';
+import { normalizeVisaClassLabels, type VisaClass } from './visa-classes';
 
 export function appointmentDate(raw: unknown, expected: GroupRef & { applicantIds?: string[] }): string | null {
   if (!raw || typeof raw !== 'object') throw new Error('Missing appointment reading.');
@@ -33,4 +34,17 @@ export function appointmentDateRelaxed(raw: unknown, expected: GroupRef): string
 export function appointmentApplicants(raw: unknown): string[] {
   if (!raw || typeof raw !== 'object') throw new Error('Missing applicant roster.');
   return validateApplicantIds((raw as Record<string, unknown>).applicantIds);
+}
+
+// Optional analytics metadata from the same scoped dashboard table as the
+// complete roster. Any missing/ambiguous evidence degrades to unknown, never a
+// workflow error or a value borrowed from a sibling group/applicant.
+export function appointmentVisaClasses(raw: unknown, expected: GroupRef & { applicantIds?: string[] }): VisaClass[] {
+  try {
+    appointmentDateRelaxed(raw, expected);
+    const snapshot = (raw as { visaClassSnapshot?: { applicantIds?: unknown; labels?: unknown } }).visaClassSnapshot;
+    if (!snapshot || !expected.applicantIds || !sameApplicants(snapshot.applicantIds, expected.applicantIds) ||
+        !Array.isArray(snapshot.labels) || snapshot.labels.length !== expected.applicantIds.length) return ['unknown'];
+    return normalizeVisaClassLabels(snapshot.labels);
+  } catch { return ['unknown']; }
 }

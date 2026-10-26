@@ -1,3 +1,4 @@
+import { isFailureCode, readFailureContext } from './failure-context';
 import { isAuthenticationFailureReason, isExtensionVersion, pruneDiagnostics, validateDiagnostics } from './diagnostics';
 import { isPanelFailureKind } from '../engine/panel-errors';
 import type { EngineState } from '../engine/workflow';
@@ -24,7 +25,7 @@ export function problemContext(state: EngineState | null, diagnostics?: unknown)
     // Stable identifier-free terminal failure code retained on the run (for
     // example an exact dashboard selection refusal). Developer state only:
     // never a UI category, never page content or identifiers.
-    failureCode: state?.authenticationFailureReason ?? startFailure,
+    failureCode: readFailureContext(state?.failureContext)?.code ?? state?.authenticationFailureReason ?? startFailure,
   };
 }
 
@@ -42,7 +43,7 @@ export function buildProblemEmail(args: {
   const failure = isPanelFailureKind(args.failureKind) ? args.failureKind : 'generic';
   // The specific terminal code is validated against the shared allowlist so a
   // tampered context can never smuggle arbitrary text into the draft.
-  const failureCode = isAuthenticationFailureReason(context?.failureCode) ? context.failureCode : 'none';
+  const failureCode = isFailureCode(context?.failureCode) ? context.failureCode : 'none';
   let lines: string[] = [];
   let available = false;
   try {

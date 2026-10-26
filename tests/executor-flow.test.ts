@@ -77,9 +77,9 @@ describe('synthetic paid flow with serialized page adapters', () => {
       },
     };
     let cycles = 0;
-    while (state.status === 'running' && cycles++ < 12) {
+    while (state.status === 'running' && !state.authentication && cycles++ < 12) {
       state = validateEngineState(JSON.parse(JSON.stringify(await runBookingStage(d, state))));
-      if (state.status === 'running' && state.stage === null) {
+      if (state.status === 'running' && !state.authentication && state.stage === null) {
         expect(state.lastCandidate).toBeNull();
         if (!bare) expect(fetch).not.toHaveBeenCalled();
         expect(document.querySelector<HTMLInputElement>('#appointments_consulate_appointment_date')!.value).toBe('');
@@ -88,7 +88,9 @@ describe('synthetic paid flow with serialized page adapters', () => {
       }
     }
     expect(cycles).toBeLessThan(12);
-    expect(state.status).toBe('verifying');
+    expect(state.status).toBe(changedDate ? 'running' : 'verifying');
+    if (changedDate) expect(state).toMatchObject({ group: { currentDate: '2026-12-01' },
+      lastCandidate: null, stage: null, authentication: { purpose: 'renew', dashboardFirst: true } });
     expect(state.executor?.applicantIds).toEqual(roster);
     expect(submit).toHaveBeenCalledTimes(bare && !changedRoster && !changedDate ? 1 : 0);
     expect(applicantChanged).not.toHaveBeenCalled();

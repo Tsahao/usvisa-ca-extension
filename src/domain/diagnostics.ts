@@ -1,3 +1,4 @@
+import { WORKFLOW_DETAIL_CODES } from './failure-codes';
 // Bounded local developer diagnostics for unattended reliability analysis.
 // Event-driven, allowlisted fixed codes only: entries never carry credentials,
 // page contents/HTML, URLs, identifiers, appointment dates, raw exceptions or
@@ -49,6 +50,7 @@ export const AUTHENTICATION_FAILURE_REASONS = [
   'tab-unavailable',
   'untrusted-navigation',
   'context-changed',
+  'auth-login-tabs-ambiguous', 'auth-pending-checkpoint', 'auth-clock-invalid', 'auth-intent-conflict',
   'navigation-failed',
   'storage-unavailable',
   'operation-failed',
@@ -62,7 +64,6 @@ export const AUTHENTICATION_FAILURE_REASONS = [
   // baseline or applicant roster no longer matches the saved binding.
   'group-identity-changed',
   'applicant-roster-changed',
-  'appointment-date-changed',
 ] as const;
 export type AuthenticationFailureReason = (typeof AUTHENTICATION_FAILURE_REASONS)[number];
 export function isAuthenticationFailureReason(value: unknown): value is AuthenticationFailureReason {
@@ -126,6 +127,7 @@ export type DiagnosticCode = (typeof DIAGNOSTIC_CODES)[number];
 // Fixed validation/recovery detail codes: the exact trusted-login form
 // validation branch (or the fixed recovery context) that produced the event.
 export const DIAGNOSTIC_DETAILS = [
+  ...WORKFLOW_DETAIL_CODES,
   // Trusted sign-in form validation branches (adapter/login.ts literals).
   'url-mismatch',
   'form-missing',
@@ -175,7 +177,6 @@ export const DIAGNOSTIC_DETAILS = [
   'credential-rejected',
   'manual-authentication',
   'group-changed',
-  'baseline-changed',
   'roster-changed',
   'roster-missing',
   'stage-guard',

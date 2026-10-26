@@ -38,7 +38,7 @@ function validRunId(value: unknown): value is string {
 // event together; only a validated allowlist is ever serialized for delivery.
 export function validateAnalyticsRecord(value: unknown): AnalyticsRecord {
   if (!value || typeof value !== 'object') throw new Error('Invalid analytics save.');
-  const record = value as AnalyticsRecord;
+  const record = { ...value } as AnalyticsRecord;
   if (record.version !== 1 || !isUuid(record.distinctId)) throw new Error('Invalid analytics save.');
   if (record.session !== null) {
     const session = record.session;
@@ -48,11 +48,18 @@ export function validateAnalyticsRecord(value: unknown): AnalyticsRecord {
       throw new Error('Invalid analytics session.');
     if (session.bookingSucceeded !== undefined && typeof session.bookingSucceeded !== 'boolean')
       throw new Error('Invalid analytics session.');
+    // Discard the local ledger for the removed, never-required recovery event.
+    record.session = { ...session };
+    delete (record.session as AnalyticsSession & { baselineRevision?: unknown }).baselineRevision;
   }
   if (record.queued !== null && (!record.queued || !validRunId(record.queued.runId) ||
       !['booking', 'alerts'].includes(record.queued.mode) || typeof record.queued.testMode !== 'boolean'))
     throw new Error('Invalid analytics queue.');
   if (!Array.isArray(record.outbox) || record.outbox.length > OUTBOX_MAX) throw new Error('Invalid analytics outbox.');
+  // A development build may have queued this retired event. Drop it before
+  // normal validation/delivery so it is never sent and cannot block the five
+  // supported milestones. Preserve the identity and all other queued events.
+  record.outbox = record.outbox.filter(event => (event as { event?: unknown } | null)?.event !== 'appointment_baseline_updated');
   for (const event of record.outbox) {
     validateQueuedEvent(event);
     if (event.distinct_id !== record.distinctId || event.attempts > MAX_ATTEMPTS) throw new Error('Invalid analytics outbox.');

@@ -37,6 +37,11 @@ test(dashboardMaintenance ? 'packaged login retries two dashboard 503s through b
         await route.fulfill({ contentType: 'application/json', body: '{"accepted":true}' });
       } else if (url.pathname === '/en-ca/niv/users/sign_in') {
         loginReads++;
+        // A fresh sign-in GET reuses the fixture's already accepted cookie.
+        if (dashboardMaintenance && loginSubmits > 0) {
+          await route.fulfill({ contentType: 'text/html', body: '<script>location.replace("/en-ca/niv/groups")</script>' });
+          return;
+        }
         if (maintenance && loginReads === 1) {
           await route.fulfill({ status: 503, contentType: 'text/html', body: '<title>Under construction (503)</title><div class="construction-background"><h1>Doing Maintenance</h1><h2>No need to worry.</h2><p>Our website is down for planned maintenance. We should be back up momentarily. Check back soon.</p></div>' });
           return;

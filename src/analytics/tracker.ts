@@ -6,6 +6,8 @@ import { ANALYTICS_KEY, MAX_ATTEMPTS, appendEvent, validateAnalyticsRecord,
   type AnalyticsRecord, type StorageArea } from './store';
 import { sendOneEvent, type FetchFn } from './transport';
 import type { EngineState } from '../engine/workflow';
+import { isIsoDate } from '../domain/dates';
+import { safeVisaClasses } from '../domain/visa-classes';
 
 export const ANALYTICS_ALARM = 'analyticsFlush';
 export type TrackerDeps = {
@@ -132,8 +134,8 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
         startIn(record, deps.uuid(), state.mode, testMode, state.runId);
       });
     },
-    startFailed(id: string | null): void {
-      if (id) void change(record => { if (record.session?.id === id && record.session.runId === null) failIn(record, 'start-failed'); });
+    startFailed(id: string | null, context?: FailureContext): void {
+      if (id) void change(record => { if (record.session?.id === id && record.session.runId === null) failIn(record, 'start-failed', context); });
     },
     queueRestart(state: EngineState, mode: AnalyticsMode, testMode: boolean): void {
       if (state.runId) void change(record => { record.queued = { runId: state.runId!, mode, testMode }; });
@@ -177,14 +179,21 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
     },
     booked(state: EngineState): void {
       // Called only after read-only verification confirms the submitted target.
-      // Keep the intent for qualification; no appointment details enter the event.
+      // Keep the original intent for qualification and its verified date. Copy
+      // only the explicitly authorized metadata before the async write queue.
       if (state.owner !== 'product-panel-owner' || state.mode !== 'booking' || !state.runId ||
-          !state.intent || state.intent.mode !== 'booking' || state.intent.testMode) return;
+          !state.intent || state.intent.mode !== 'booking' || state.intent.testMode ||
+          state.intent.runId !== state.runId || state.group?.kind !== 'paid' ||
+          state.intent.groupId !== state.group.scheduleId || !isIsoDate(state.intent.targetDate)) return;
+      const runId = state.runId;
+      const appointmentDate = state.intent.targetDate;
+      const visaClasses = safeVisaClasses(state.group.visaClasses);
       void change(record => {
         const session = record.session;
-        if (!session || session.runId !== state.runId || session.mode !== 'booking' || session.testMode || session.bookingSucceeded) return;
+        if (!session || session.runId !== runId || session.mode !== 'booking' || session.testMode || session.bookingSucceeded) return;
         session.bookingSucceeded = true;
-        appendEvent(record, buildAppointmentBooked({ ...base(), distinctId: record.distinctId, analyticsSessionId: session.id }));
+        appendEvent(record, buildAppointmentBooked({ ...base(), distinctId: record.distinctId, analyticsSessionId: session.id,
+          appointmentDate, visaClasses }));
       });
     },
     end(): void {

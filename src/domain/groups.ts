@@ -1,5 +1,6 @@
 import { isIsoDate } from './dates';
 import { validateApplicantIds } from './applicants';
+import { safeVisaClasses, type VisaClass } from './visa-classes';
 import type { SelectionFailureCode } from './diagnostics';
 
 export type GroupKind = 'paid' | 'unpaid';
@@ -30,6 +31,9 @@ export type GroupBinding = GroupRef & {
   kind: GroupKind;
   currentDate: string | null;
   applicantIds?: string[];
+  // Optional, normalized dashboard metadata for verified-booking analytics.
+  // Scoped to this complete roster; never confers booking authority.
+  visaClasses?: VisaClass[];
   dashboardPath?: string;
   // The binding was chosen while its payment classification was unknown:
   // downstream work proceeds on validated workflow capability (legitimate
@@ -161,6 +165,7 @@ export function validateGroupBinding(value: unknown): GroupBinding {
   return { ...ref, kind: binding.kind as GroupKind, currentDate,
     ...(pendingInspection ? { pendingInspection: true } : {}),
     ...(binding.dashboardPath === undefined ? {} : { dashboardPath: binding.dashboardPath }),
+    ...(binding.visaClasses === undefined ? {} : { visaClasses: safeVisaClasses(binding.visaClasses) }),
     ...(binding.applicantIds === undefined ? {} : { applicantIds: validateApplicantIds(binding.applicantIds) }) };
 }
 

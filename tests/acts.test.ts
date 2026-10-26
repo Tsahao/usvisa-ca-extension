@@ -97,10 +97,10 @@ describe('serialized paid adapters', () => {
     { label: 'empty', days: [], reason: 'facility-date-unavailable' },
     { label: 'missing candidate', days: [{ date: '2026-11-20', business_day: true }], reason: 'facility-date-unavailable' },
     { label: 'non-business day', days: [{ date: request.date, business_day: false }], reason: 'facility-date-unavailable' },
-    { label: 'missing business marker', days: [{ date: request.date }], reason: 'facility-load-failed' },
-    { label: 'malformed', days: { error: 'synthetic' }, reason: 'facility-load-failed' },
-    { label: 'invalid day', days: [{ date: '2026-02-30', business_day: true }], reason: 'facility-load-failed' },
-    { label: 'duplicates', days: [{ date: request.date, business_day: true }, { date: request.date, business_day: true }], reason: 'facility-load-failed' },
+    { label: 'missing business marker', days: [{ date: request.date }], reason: 'facility-response-invalid' },
+    { label: 'malformed', days: { error: 'synthetic' }, reason: 'facility-response-invalid' },
+    { label: 'invalid day', days: [{ date: '2026-02-30', business_day: true }], reason: 'facility-response-invalid' },
+    { label: 'duplicates', days: [{ date: request.date, business_day: true }, { date: request.date, business_day: true }], reason: 'facility-response-invalid' },
   ])('refuses unsafe facility days (%s)', async ({ days, reason }) => {
     vi.useFakeTimers(); form();
     const calendar = installPortalCalendar({ facilityDays: days });
@@ -185,7 +185,7 @@ describe('serialized paid adapters', () => {
     const calendar = installPortalCalendar({ delay: 20_000 });
     if (issue === 'missing-picker') delete (window as unknown as { jQuery?: unknown }).jQuery;
     const pending = act({ ...request, action: 'date' });
-    if (issue === 'malformed') calendar.complete({ status: 200, responseJSON: { available_times: ['09:15'] } },
+    if (issue === 'malformed') calendar.complete(Object.assign(calendar.calendarRequest!, { status: 200, responseJSON: { available_times: ['09:15'] } }),
       `${base}/appointment/times/95.json?date=${request.date}&appointments[expedite]=false`);
     if (issue === 'context-change') document.querySelector<HTMLInputElement>('#appointments_consulate_appointment_date')!.value = '2026-11-20';
     await vi.advanceTimersByTimeAsync(issue === 'context-change' ? 20_000 : 15_000);
@@ -489,5 +489,77 @@ describe('serialized paid adapters', () => {
     expect((await act({ ...request, time: '25:90', action: 'time' })).ok).toBe(false);
     vi.stubGlobal('location', { href: `https://example.invalid/appointment${formQuery}` });
     expect(read('11111111')).toBeNull();
+  });
+});
+
+describe('serialized calendar HTTP failure attribution', () => {
+  it.each([
+    [0, 'network-failed'], [401, 'request-denied'], [403, 'request-denied'], [503, 'server-error'], [408, 'request-retryable'], [429, 'request-retryable'], [404, 'http-error'],
+  ] as const)('separates status %s for facility and date requests', async (status, suffix) => {
+    vi.useFakeTimers(); form();
+    const calendar = installPortalCalendar({ facilityDelay: 1000, delay: 1000 });
+    const facility = act({ ...request, action: 'facility' });
+    const xhr = calendar.facilityRequest!; xhr.status = status;
+    calendar.complete(xhr, `${base}/appointment/days/95.json?appointments[expedite]=false`);
+    expect(await facility).toEqual({ ok: false, reason: `facility-${suffix}` });
+    const selectingDate = act({ ...request, action: 'date' });
+    const dateXhr = calendar.calendarRequest!; dateXhr.status = status;
+    calendar.complete(dateXhr, `${base}/appointment/times/95.json?date=${request.date}&appointments[expedite]=false`);
+    expect(await selectingDate).toEqual({ ok: false, reason: `calendar-${suffix}` });
+    expect(calendar.listenerCount).toBe(0);
+  });
+});
+
+describe('calendar request ownership', () => {
+  const endpoint = `${base}/appointment/times/95.json?date=${request.date}&appointments[expedite]=false`;
+  it('ignores an old same-date completion and wrong-method completions until its exact GET finishes', async () => {
+    vi.useFakeTimers(); form();
+    document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_facility_id')!.value = '95';
+    const calendar = installPortalCalendar({ delay: 500 });
+    let done = false;
+    const pending = act({ ...request, action: 'date' }).then(reply => { done = true; return reply; });
+    calendar.complete({ status: 200, responseJSON: { available_times: ['09:15'], business_times: ['09:15'] } }, endpoint);
+    calendar.complete(calendar.calendarRequest!, endpoint, 'POST');
+    await vi.advanceTimersByTimeAsync(499);
+    expect(done).toBe(false);
+    expect(read(request.scheduleId)?.calendarReady).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toEqual({ ok: true });
+    expect(read(request.scheduleId)?.calendarReady).toBe(true);
+    expect(calendar.listenerCount).toBe(0);
+  });
+  it('rejects overlapping matching GETs initiated by one date callback', async () => {
+    vi.useFakeTimers(); form();
+    document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_facility_id')!.value = '95';
+    const calendar = installPortalCalendar({ delay: 500 });
+    const jq = (window as any).jQuery;
+    (window as any).jQuery = (node: Element | Document) => {
+      const value = jq(node);
+      if (node !== document.getElementById('appointments_consulate_appointment_date')) return value;
+      return { ...value, datepicker: (command: string, key: string) => command === 'option' ? function () {
+        const callback = value.datepicker(command, key); callback();
+        calendar.send({ status: 0 }, endpoint);
+      } : value.datepicker(command, key) };
+    };
+    expect(await act({ ...request, action: 'date' })).toEqual({ ok: false, reason: 'calendar-load-ambiguous' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(read(request.scheduleId)?.calendarReady).toBe(false);
+    expect(calendar.listenerCount).toBe(0);
+  });
+  it('does not accept a late completion after timeout, including during a new same-date attempt', async () => {
+    vi.useFakeTimers(); form();
+    document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_facility_id')!.value = '95';
+    const calendar = installPortalCalendar({ delay: 20_000 });
+    const first = act({ ...request, action: 'date' }); const old = calendar.calendarRequest!;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await first).toEqual({ ok: false, reason: 'calendar-load-timeout' });
+    const second = act({ ...request, action: 'date' });
+    expect(calendar.calendarRequest).not.toBe(old);
+    await vi.advanceTimersByTimeAsync(5_000); // old XHR's real same-date completion
+    expect(read(request.scheduleId)?.calendarReady).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await second).toEqual({ ok: false, reason: 'calendar-load-timeout' });
+    expect(calendar.listenerCount).toBe(0);
+    expect(read(request.scheduleId)?.calendarReady).toBe(false);
   });
 });
