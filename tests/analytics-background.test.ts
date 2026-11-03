@@ -198,7 +198,7 @@ describe('product worker telemetry integration (mocked network only)', () => {
     expect(chromeMock.tabs.update).not.toHaveBeenCalled();
   });
 
-  it.each(['matching', 'missing', 'changed-class', 'changed-roster'])('reports only verified target date and scoped class metadata (%s)', async issue => {
+  it.each(['matching', 'missing', 'changed-class', 'changed-roster'])('reports verified target date, scoped class metadata and booked city (%s)', async issue => {
     stored.uiPreferencesV1 = { ...preferences, testMode: false };
     const ids = ['77777777', '88888888'];
     let raw: Record<string, any> = { scheduleId: '11111111', ivr: '22222222', kind: 'booked', text: 'January 1, 2027',
@@ -231,10 +231,10 @@ describe('product worker telemetry integration (mocked network only)', () => {
     await vi.waitFor(() => expect(record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(1));
     await send({ type: 'PANEL_STATE' }); await flush();
     const success = events().find(event => event.event === 'appointment_booked');
-    expect(success.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: issue === 'matching' ? ['L1', 'L2'] : ['unknown'] });
-    expect(JSON.stringify(events())).not.toMatch(/fixture@example|private-synthetic|11111111|22222222|77777777|88888888|Vancouver|2027-01-01|09:15|Intra-company|Spouse|schedule\//);
+    expect(success.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: issue === 'matching' ? ['L1', 'L2'] : ['unknown'], consulate_city: 'Vancouver' });
+    expect(JSON.stringify(events())).not.toMatch(/fixture@example|private-synthetic|11111111|22222222|77777777|88888888|2027-01-01|09:15|Intra-company|Spouse|schedule\//);
     for (const event of events().filter(event => event.event !== 'appointment_booked')) {
-      expect(event.properties).not.toHaveProperty('appointment_date'); expect(event.properties).not.toHaveProperty('visa_classes');
+      expect(event.properties).not.toHaveProperty('appointment_date'); expect(event.properties).not.toHaveProperty('visa_classes'); expect(event.properties).not.toHaveProperty('consulate_city');
     }
   });
 });

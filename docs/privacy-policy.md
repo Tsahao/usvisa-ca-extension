@@ -1,6 +1,6 @@
 # Privacy Policy — US Visa Scheduler for Canada
 
-Effective date: October 25, 2026.
+Effective date: November 3, 2026.
 
 Publisher: loose ends studio.
 
@@ -59,7 +59,7 @@ and storage failures or a full recording queue can result in missing events.
 your device or Chrome profile may be able to read it. Protect your device and
 browser profile accordingly.
 
-Apart from the verified booking date and normalized visa-class categories
+Apart from the verified booking date, booked consulate city and normalized visa-class categories
 described below, portal information is not sent to the publisher or analytics
 provider. Credentials are never sent to the publisher or analytics provider;
 they are sent over HTTPS to the official scheduling provider
@@ -76,7 +76,7 @@ understand adoption, workflow reliability and booking outcomes:
 - `workflow_started`: when a new Book or Alerts workflow is accepted.
 - `workflow_failed`: when a tracked workflow ends with a terminal failure requiring user action.
 - `alerts_monitoring_established`: after a selected unpaid group and its first complete availability summary have been validated.
-- `appointment_booked`: after a real booking is verified as successful, once per tracked booking workflow; excludes Test Mode. Includes the exact booked calendar date and normalized visa-class categories, as described below.
+- `appointment_booked`: after a real booking is verified as successful, once per tracked booking workflow; excludes Test Mode. Includes the exact booked calendar date, booked consulate city and normalized visa-class categories, as described below.
 
 Events contain random installation and event identifiers, a timestamp,
 extension version and production-environment label. Workflow events also
@@ -90,10 +90,12 @@ your email, visa account or hardware. The installation identifier and a bounded
 queue of unsent events are stored locally.
 
 Verified booking events additionally contain `appointment_date`, the exact
-booked calendar date in YYYY-MM-DD format, and `visa_classes`, a distinct list
+booked calendar date in YYYY-MM-DD format, `consulate_city`, the city from the
+submitted booking attempt (one of the seven supported Canadian consulates),
+and `visa_classes`, a distinct list
 of predefined visa-class codes such as B1/B2, H1B, L1 or L2. These fields help
 the publisher measure how soon appointments are booked and compare outcomes
-by visa class. Classes are read from the selected group's dashboard applicant
+by consulate city and visa class. Classes are read from the selected group's dashboard applicant
 table and cross-checked during successful verification. A group may contain
 multiple classes; missing, unsupported or conflicting information is marked
 `unknown`. The event contains no per-applicant class mapping or applicant
@@ -104,7 +106,7 @@ events may lack the new fields; other usage events do not include them.
 **Analytics excludes passwords, email addresses, visa/group/applicant
 identifiers, applicant names, portal URLs, consulate and date preferences,
 availability details and appointment times. Apart from the exact verified
-booking date and normalized visa-class codes above, portal content is not
+booking date, booked consulate city and normalized visa-class codes above, portal content is not
 included.** The extension does not use
 session replay, heatmaps, autocapture, general browsing surveillance or
 automatic exception reporting. Ordinary polling, retries and periods with no

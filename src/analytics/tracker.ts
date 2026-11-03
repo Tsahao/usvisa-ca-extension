@@ -6,7 +6,7 @@ import { ANALYTICS_KEY, MAX_ATTEMPTS, appendEvent, validateAnalyticsRecord,
   type AnalyticsRecord, type StorageArea } from './store';
 import { sendOneEvent, type FetchFn } from './transport';
 import type { EngineState } from '../engine/workflow';
-import { isIsoDate } from '../domain/dates';
+import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
 import { safeVisaClasses } from '../domain/visa-classes';
 
 export const ANALYTICS_ALARM = 'analyticsFlush';
@@ -188,12 +188,14 @@ export function createAnalyticsTracker(deps: TrackerDeps) {
       const runId = state.runId;
       const appointmentDate = state.intent.targetDate;
       const visaClasses = safeVisaClasses(state.group.visaClasses);
+      const consulateCity = state.intent.consulate;
+      if (typeof consulateCity !== 'string' || !Object.hasOwn(CONSULATES, consulateCity)) return;
       void change(record => {
         const session = record.session;
         if (!session || session.runId !== runId || session.mode !== 'booking' || session.testMode || session.bookingSucceeded) return;
         session.bookingSucceeded = true;
         appendEvent(record, buildAppointmentBooked({ ...base(), distinctId: record.distinctId, analyticsSessionId: session.id,
-          appointmentDate, visaClasses }));
+          appointmentDate, visaClasses, consulateCity: consulateCity as Consulate }));
       });
     },
     end(): void {

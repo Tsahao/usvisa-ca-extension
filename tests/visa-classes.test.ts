@@ -83,6 +83,24 @@ describe('dashboard Visa Class column reader', () => {
     expect(appointmentVisaClasses(reading, { ...identity, applicantIds })).toEqual(['L1', 'L2']);
     expect(JSON.stringify(reading)).not.toMatch(/Synthetic private|petition|Details/);
   });
+  it.each([false, true])('reads the portal table with six headings and seven cells, including unheaded actions (strict roster: %s)', async includeApplicants => {
+    dashboard();
+    document.querySelector('table')!.innerHTML = `<thead><tr>
+      <th>Applicant Name</th><th>Passport</th><th>Petition</th><th>DS-160</th><th>Visa Class</th><th>Status</th>
+      </tr></thead><tbody>${applicantIds.map((id, index) => `<tr>
+      <td>Synthetic private name</td><td>Synthetic private passport</td><td>Synthetic private petition</td><td>Synthetic private DS-160</td>
+      <td>${index ? 'L2 Spouse or Child of an L1 ' : 'L1 Intra-company Transferee'}</td>
+      <td><a href="https://ceac.state.gov/CEACStatTracker/Status.aspx">Check DS-160 Status</a></td>
+      <td><ul><li><a>Applicant Actions</a><ul>
+      <li><a href="${base}/applicants/${id}">Details</a></li>
+      <li><a href="${base}/applicants/${id}/edit">Edit</a></li>
+      <li><a data-method="delete" href="${base}/applicants/${id}">Remove</a></li>
+      </ul></li></ul></td></tr>`).join('')}</tbody>`;
+    const reading = await serialized(identity.scheduleId, identity.ivr, false, includeApplicants);
+    expect(appointmentVisaClasses(reading, { ...identity, applicantIds })).toEqual(['L1', 'L2']);
+    expect(reading.applicantIds).toEqual(includeApplicants ? applicantIds : undefined);
+    expect(JSON.stringify(reading)).not.toMatch(/Synthetic private|DS-160|ceac|Applicant Actions/);
+  });
   it('uses fresh dashboard HTML rather than stale form content and does not require classes on the booking form', async () => {
     dashboard();
     const html = document.body.innerHTML;
@@ -92,7 +110,7 @@ describe('dashboard Visa Class column reader', () => {
     const reading = await serialized(identity.scheduleId, identity.ivr, true, true, '/en-ca/niv/groups/55555555');
     expect(appointmentVisaClasses(reading, { ...identity, applicantIds })).toEqual(['L1', 'L2']);
   });
-  it.each(['missing-header', 'duplicate-header', 'colspan', 'rowspan', 'nested-table', 'incomplete-cell', 'oversized-cell'])('never gates a valid roster on optional class markup (%s)', async issue => {
+  it.each(['missing-header', 'duplicate-header', 'colspan', 'rowspan', 'nested-table', 'incomplete-cell', 'oversized-cell', 'extra-data-cell', 'extra-action-cell'])('never gates a valid roster on optional class markup (%s)', async issue => {
     dashboard();
     const header = document.querySelectorAll('th')[1];
     const cell = document.querySelectorAll('tbody tr')[1].children[1];
@@ -103,6 +121,8 @@ describe('dashboard Visa Class column reader', () => {
     if (issue === 'nested-table') cell.innerHTML = '<table><tr><td>L2</td></tr></table>';
     if (issue === 'incomplete-cell') cell.remove();
     if (issue === 'oversized-cell') cell.textContent = 'L2 '.repeat(100);
+    if (issue === 'extra-data-cell') cell.parentElement!.insertAdjacentHTML('beforeend', '<td>Unexpected data</td>');
+    if (issue === 'extra-action-cell') cell.parentElement!.insertAdjacentHTML('beforeend', `<td><a href="${base}/applicants/${applicantIds[1]}">Details</a></td><td></td>`);
     const reading = await serialized(identity.scheduleId, identity.ivr, false, true);
     expect(reading.applicantIds).toEqual(applicantIds);
     const classes = appointmentVisaClasses(reading, { ...identity, applicantIds });
