@@ -6,7 +6,8 @@ import { bindGroup, emptyEngineState, startRun, type EngineState } from '../../s
 import { policyKey } from '../../src/engine/lifecycle';
 import { installPortalCalendar } from '../fixtures/portal-calendar';
 
-test('packaged worker refreshes stale calendar state in MAIN before choosing a time', async () => {
+for (const extraFreshTime of [false, true]) {
+test(`packaged worker chooses a native-loaded time with ${extraFreshTime ? 'different' : 'matching'} fresh availability`, async () => {
   test.setTimeout(40_000);
   const profile = await mkdtemp(path.join(tmpdir(), 'usvisa-calendar-fixture-'));
   const extensionPath = path.resolve('dist-test');
@@ -26,7 +27,7 @@ test('packaged worker refreshes stale calendar state in MAIN before choosing a t
         await route.fulfill({ contentType: 'text/html', body: `<section><strong>22222222</strong><p class="consular-appt">January 1, 2027<a href="${base}/appointment">Appointment</a></p><table><tbody>${['77777777', '88888888'].map(id => `<tr><td><a href="${base}/applicants/${id}">Details</a></td></tr>`).join('')}</tbody></table></section>` });
       } else if (url.pathname === '/en-ca/niv/schedule/11111111/appointment/times/95.json') {
         timesReads++;
-        await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ available_times: ['10:45'], business_times: ['10:45'] }) });
+        await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ available_times: extraFreshTime ? ['08:45', '10:45'] : ['10:45'], business_times: ['08:45', '10:45'] }) });
       } else if (url.pathname === '/en-ca/niv/schedule/11111111/appointment') {
         await route.fulfill({ contentType: 'text/html', body: `<form id="appointment-form" method="post" action="${base}/appointment">
           <select id="appointments_consulate_appointment_facility_id"><option value="95">Vancouver</option></select>
@@ -80,3 +81,4 @@ test('packaged worker refreshes stale calendar state in MAIN before choosing a t
     await expect(host.locator('.reveal-overlay')).toHaveCount(0);
   } finally { await context.close(); await rm(profile, { recursive: true, force: true }); }
 });
+}

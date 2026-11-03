@@ -24,6 +24,27 @@ const form = () => {
 afterEach(() => { vi.unstubAllGlobals(); delete (window as unknown as { jQuery?: unknown }).jQuery; vi.useRealTimers(); });
 
 describe('serialized paid adapters', () => {
+  it('reads only enabled native options and refuses disabled optgroups without a change event', async () => {
+    form();
+    const facility = document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_facility_id')!;
+    const date = document.querySelector<HTMLInputElement>('#appointments_consulate_appointment_date')!;
+    const time = document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_time')!;
+    facility.value = '95'; date.value = request.date;
+    date.setAttribute('data-usvisa-calendar-slot', `95|${request.date}`);
+    time.innerHTML = '<option value=""></option><optgroup disabled><option value="08:45">08:45</option></optgroup><option value="09:15">09:15</option><option disabled value="10:30">10:30</option>';
+    const change = vi.fn(); time.addEventListener('change', change);
+    expect(read(request.scheduleId)?.nativeTimes).toEqual(['09:15']);
+    expect(await act({ ...request, action: 'time', time: '08:45' })).toEqual({ ok: false, reason: 'time-option-unavailable' });
+    expect(time.value).toBe(''); expect(change).not.toHaveBeenCalled();
+    time.disabled = true;
+    expect(read(request.scheduleId)?.nativeTimes).toBeUndefined();
+  });
+  it.each(['duplicate', 'malformed'])('does not expose a %s native option set', issue => {
+    form();
+    const time = document.querySelector<HTMLSelectElement>('#appointments_consulate_appointment_time')!;
+    time.insertAdjacentHTML('beforeend', `<option value="${issue === 'duplicate' ? '09:15' : 'bad'}">extra</option>`);
+    expect(read(request.scheduleId)?.nativeTimes).toBeUndefined();
+  });
   it.each(['plain', 'applicant-query', 'disabled-until-date'])(
     'recognizes real booking capability when payment markup is unknown (%s)', variant => {
       form();
@@ -161,6 +182,10 @@ describe('serialized paid adapters', () => {
     expect(await act({ ...request, action: 'time' })).toEqual({ ok: true });
     expect(warning.hidden).toBe(true);
     expect(read(request.scheduleId)?.slotWarning).toBe(false);
+    // Recovery must explicitly refresh even an equal, already-ready date.
+    expect(await act({ ...request, action: 'date' })).toEqual({ ok: true });
+    expect(calendar.calls).toBe(2);
+    expect(read(request.scheduleId)).toMatchObject({ calendarReady: true, nativeTimes: ['09:15', '10:30'], time: '' });
   });
   it('awaits the matching portal response instead of proceeding after the date value changes', async () => {
     vi.useFakeTimers(); form();

@@ -362,7 +362,8 @@ export async function performPaidAction(request: PaidAction): Promise<ActResult>
         !request.time || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(request.time)) return refuse('bad-slot');
     // Only select an option loaded by the portal. Inserting an option does
     // not populate its private business-time validation state.
-    if (!Array.from(time.options).some(option => option.value === request.time && !option.disabled)) return refuse('time-option-unavailable');
+    if (!Array.from(time.options).some(option => option.value === request.time && !option.disabled &&
+        !(option.parentElement?.tagName === 'OPTGROUP' && (option.parentElement as HTMLOptGroupElement).disabled))) return refuse('time-option-unavailable');
     time.value = request.time;
     time.dispatchEvent(new Event('change', { bubbles: true }));
   } else return refuse('wrong-action');

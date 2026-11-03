@@ -304,7 +304,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     const { consulate, date } = state.lastCandidate;
     return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
       stage: null, lastCandidate: null, failureContext: null,
-      executor: { ...state.executor!, entryAction: undefined, actionPending: false, targetTime: null,
+      executor: { ...state.executor!, entryAction: undefined, actionPending: false, targetTime: null, timeSelection: undefined,
         skippedDates: [...state.executor!.skippedDates.filter(entry => !(entry.consulate === consulate && entry.date === date)), { consulate, date }] } };
   };
   if (isEntryCheckpoint(state)) return rebuild('checkpoint-interrupted', true);
@@ -400,9 +400,19 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       return park(executionFailureCode(error), actionStep);
     }
     if (entryAction && result == null) return rebuild('adapter-reply-missing', true);
+    if (request.action === 'time' && result?.ok === false && result.reason === 'time-option-unavailable' && !state.intent) {
+      const selection = state.executor!.timeSelection;
+      // This explicit refusal occurs before any value change/event. Clear its
+      // checkpoint durably before another read; uncertain replies never retry.
+      state = { ...state, failureContext: null, executor: { ...state.executor!, actionPending: false, targetTime: null,
+        timeSelection: selection ? { ...selection, reselected: true,
+          refused: [...new Set([...selection.refused, request.time!])] } : undefined } };
+      await deps.saveState(state);
+      if (!selection || selection.reselected || selection.requests >= 3 || selection.attempts >= 3) return skipCandidate();
+      return pace('form');
+    }
     if (result?.ok === false && !state.intent &&
-        ((request.action === 'facility' && result.reason === 'facility-date-unavailable') ||
-         (request.action === 'time' && result.reason === 'time-option-unavailable'))) return skipCandidate();
+        request.action === 'facility' && result.reason === 'facility-date-unavailable') return skipCandidate();
     const transient = request.action === 'date' ? ['calendar-load-timeout', 'calendar-network-failed', 'calendar-server-error', 'calendar-request-denied', 'calendar-request-retryable'] :
       request.action === 'facility' ? ['facility-load-timeout', 'facility-network-failed', 'facility-server-error', 'facility-request-denied', 'facility-request-retryable'] : [];
     if (result?.ok === false && transient.includes(result.reason)) return rebuild(adapterFailureCode(result));
@@ -510,38 +520,81 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       if (!prefs.consulates.includes(consulate)) return park('config-changed');
       const facilityId = CONSULATES[consulate];
       const date = state.lastCandidate!.date;
+      const previous = state.executor!.timeSelection;
+      if (!previous || previous.consulate !== consulate || previous.date !== date) {
+        state = { ...state, executor: { ...state.executor!, timeSelection: {
+          consulate, date, requests: 0, attempts: 0, reselected: false, refreshed: false, refreshNeeded: false, refused: [],
+        } } };
+      }
       const fields = { ...request, applicantIds: ids, facilityId, date };
       if (page.facilityId !== facilityId) {
         state = { ...state, executor: { ...state.executor!, targetTime: null } };
         return act({ ...fields, action: 'facility' }, 'form');
       }
-      if (page.date !== date || page.calendarReady !== true) {
-        state = { ...state, executor: { ...state.executor!, targetTime: null } };
+      if (page.date !== date || page.calendarReady !== true || state.executor!.timeSelection!.refreshNeeded) {
+        state = { ...state, executor: { ...state.executor!, targetTime: null,
+          timeSelection: { ...state.executor!.timeSelection!, refreshNeeded: false } } };
         return act({ ...fields, action: 'date' }, 'form');
       }
       let time = state.executor!.targetTime;
       if (time === null || page.time !== time) {
+        const selection = state.executor!.timeSelection!;
+        if (selection.requests >= 3 || selection.attempts >= 3) return skipCandidate();
+        if (deps.isCancelled?.() || !await prefsUnchanged()) return park(deps.isCancelled?.() ? 'cancelled' : 'config-changed');
+        state = { ...state, executor: { ...state.executor!, timeSelection: { ...selection, requests: selection.requests + 1 } } };
+        await deps.saveState(state);
+        // These caps bound immediate availability recovery, not paced
+        // transport retries. A known failed read keeps the existing failure
+        // budget/deadline and does not consume an availability comparison.
+        const failedRead = (detail: DiagnosticDetail = 'transport') => {
+          state = { ...state, executor: { ...state.executor!, timeSelection: selection } };
+          return retry(detail);
+        };
         let response: PollResponse;
         try { response = await inject(fetchTimesJson, [`/en-ca/niv/schedule/${scheduleId}/appointment`, facilityId, date, ids, implicitApplicantId]) as PollResponse; }
-        catch { return retry('script-interrupted'); }
+        catch { return failedRead('script-interrupted'); }
         if (!response || mapHttpStatus(response.status) !== 'ok') {
           return response && mapHttpStatus(response.status) === 'denied'
-            ? applyPollResult(state, { outcome: 'denied', now: deps.nowIso(), random: deps.random }) : retry();
+            ? applyPollResult(state, { outcome: 'denied', now: deps.nowIso(), random: deps.random }) : failedRead();
         }
         let times: string[];
-        try { times = parseTimesPayload(response.body); } catch { return retry('reply-malformed'); }
-        if (!times.length) {
-          // Candidate disappeared; discard it and return to days polling.
-          return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }),
-            stage: null, lastCandidate: null,
-            executor: { ...state.executor!, targetTime: null,
-            skippedDates: [...state.executor!.skippedDates.filter(entry => !(entry.consulate === consulate && entry.date === date)),
-              { consulate, date }] } };
+        try { times = parseTimesPayload(response.body); } catch { return failedRead('reply-malformed'); }
+        // The independent response must never authorize a time absent from
+        // the live native-loaded dropdown. Recheck context after the GET.
+        let current: PaidPage | null;
+        try { current = await inject(readPaidPage, [scheduleId, implicitApplicantId]) as PaidPage | null; }
+        catch { return failedRead('script-interrupted'); }
+        if (!current) return rebuild('form-read-missing');
+        if (current.scheduleId !== scheduleId) return park('group-changed');
+        if (!sameApplicants(current.applicantIds, ids)) return park('roster-changed');
+        if (current.kind !== 'form') return park('page-kind-mismatch', 'booking-form-read');
+        if (current.facilityId !== facilityId) return rebuild('form-facility-invalid');
+        if (current.date !== date) return rebuild('form-date-mismatch');
+        if (current.calendarReady !== true) return rebuild('calendar-not-ready');
+        // A stale time warning may clear only on the new time's change
+        // event. Preserve the final post-selection warning guard below.
+        const native = current.nativeTimes;
+        if (!Array.isArray(native) || native.length > 1440 || new Set(native).size !== native.length ||
+            native.some(value => typeof value !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))) return rebuild('calendar-not-ready');
+        const progress = state.executor!.timeSelection!;
+        const shared = times.filter(value => native.includes(value) && !progress.refused.includes(value)).sort();
+        if (!shared.length) {
+          if (progress.refreshed || progress.requests >= 3) return skipCandidate();
+          state = { ...state, executor: { ...state.executor!, targetTime: null,
+            timeSelection: { ...progress, refreshed: true, refreshNeeded: true } } };
+          await deps.saveState(state);
+          return pace('form');
         }
-        time = [...times].sort()[0];
+        time = shared[0];
+        page = current;
         state = { ...state, executor: { ...state.executor!, targetTime: time } };
       }
-      if (page.time !== time) return act({ ...fields, action: 'time', time }, 'form');
+      if (page.time !== time) {
+        const progress = state.executor!.timeSelection!;
+        if (progress.attempts >= 3) return skipCandidate();
+        state = { ...state, executor: { ...state.executor!, timeSelection: { ...progress, attempts: progress.attempts + 1 } } };
+        return act({ ...fields, action: 'time', time }, 'form');
+      }
       // This read comes after any field changes in a prior alarm. The IDs
       // expected here were bound from the dashboard before gateway entry,
       // never copied from this form's query.

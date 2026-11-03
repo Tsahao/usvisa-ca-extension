@@ -2156,6 +2156,36 @@ describe('read-only probe boundaries', () => {
     expect(chromeMock.notifications.create).not.toHaveBeenCalled();
   });
 
+  it('ends an exhausted sweep without ending the session and permits that date on the following paced poll', async () => {
+    const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
+    const now = new Date().toISOString();
+    stored.engineStateV1 = {
+      ...bindGroup(startRun(emptyEngineState(now), { mode: 'booking', owner: 'owner-token-01', runId: 'run-id-0001', now }), {
+        owner: 'owner-token-01', runId: 'run-id-0001', now,
+        binding: { scheduleId: '11111111', ivr: '22222222', kind: 'paid', currentDate: null, applicantIds: ['77777777'] },
+      }),
+      executor: { tabId: 9, applicantIds: ['77777777'], targetTime: null,
+        skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }], actionPending: false,
+        timeSelection: { consulate: 'Vancouver', date: '2026-11-19', requests: 3, attempts: 2,
+          refreshed: true, refreshNeeded: false, reselected: true, refused: ['09:15'] } },
+    };
+    stored.uiPreferencesV1 = { consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: false, autoMode: true };
+    const url = 'https://ais.usvisa-info.com/en-ca/niv/schedule/11111111/appointment?applicants[]=77777777';
+    chromeMock.tabs.query.mockResolvedValue([{ id: 9, url }]);
+    mockPaidPoll({ status: 200, body: [{ date: '2026-11-19' }] });
+    alarmed({ name: 'enginePoll' });
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'running', lastCandidate: null, stage: null,
+      executor: { skippedDates: [] } }));
+    const state = stored.engineStateV1 as import('../src/engine/workflow').EngineState;
+    expect(state.executor?.timeSelection).toBeUndefined();
+    expect(Date.parse(state.nextPollAt!)).toBeGreaterThan(Date.parse(now));
+    // Simulate expiry of the configured interval, not an immediate retry loop.
+    state.nextPollAt = now;
+    alarmed({ name: 'enginePoll' });
+    await vi.waitFor(() => expect(stored.engineStateV1).toMatchObject({ status: 'running', stage: 'form',
+      lastCandidate: { consulate: 'Vancouver', date: '2026-11-19' } }));
+  });
+
   it('skips dates whose times were empty while keeping custody of the executor tab', async () => {
     const { bindGroup, emptyEngineState, startRun } = await import('../src/engine/workflow');
     const now = new Date().toISOString();

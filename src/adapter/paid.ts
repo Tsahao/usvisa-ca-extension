@@ -9,6 +9,7 @@ export type PaidPage = {
   warningAcknowledged?: boolean;
   calendarReady?: boolean;
   slotWarning?: boolean;
+  nativeTimes?: string[];
 };
 
 // Serialized by Chrome: every runtime dependency must be inside this function.
@@ -75,6 +76,15 @@ export function readPaidPage(scheduleId: string, implicitApplicantId: string | n
     }
     return true;
   };
+  const nativeOptions = time?.tagName === 'SELECT' ? Array.from(time.options).filter(option => option.value !== '') : [];
+  const nativeTimes = time?.tagName === 'SELECT' && facility?.tagName === 'SELECT' && date?.tagName === 'INPUT' &&
+    !time.disabled && !facility.disabled && !date.disabled &&
+    [facility, date, time].every(field => field.form === time.form && document.querySelectorAll(`[id="${field.id}"]`).length === 1) &&
+    nativeOptions.length <= 1440 &&
+    nativeOptions.every(option => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(option.value)) &&
+    new Set(nativeOptions.map(option => option.value)).size === nativeOptions.length
+    ? nativeOptions.filter(option => !option.disabled && !(option.parentElement?.tagName === 'OPTGROUP' &&
+      (option.parentElement as HTMLOptGroupElement).disabled)).map(option => option.value) : undefined;
   return {
     scheduleId, kind,
     applicants: applicants.map(input => ({ id: input.value, checked: input.checked, disabled: input.disabled })),
@@ -82,6 +92,7 @@ export function readPaidPage(scheduleId: string, implicitApplicantId: string | n
     date: date?.value ?? '', time: time?.value ?? '',
     ...(kind === 'form' ? {
       calendarReady: !!date?.value && date.getAttribute('data-usvisa-calendar-slot') === `${facility!.value}|${date.value}`,
+      nativeTimes,
       slotWarning: Array.from(document.querySelectorAll<HTMLElement>('#non-consulate-business-day-message, #non-consulate-business-time-message')).some(visible),
     } : {}),
     ...(warnings.length ? { warningAcknowledged: warnings.length === 1 && !warnings[0].disabled &&

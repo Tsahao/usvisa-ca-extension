@@ -67,6 +67,12 @@ export type ExecutorState = {
   targetTime: string | null;
   skippedDates: { consulate: Consulate; date: string }[];
   actionPending: boolean;
+  // Candidate-local immediate availability recovery, independent of paced
+  // transport failure/cooldown budgets. Legacy runs start without this state.
+  timeSelection?: {
+    consulate: Consulate; date: string; requests: number; attempts: number;
+    reselected: boolean; refreshed: boolean; refreshNeeded: boolean; refused: string[];
+  };
   loadingSince?: string;
   // Only these audited preliminary actions cannot submit a booking.
   entryAction?: 'dashboard-continue' | 'schedule' | 'reschedule' | 'warning' | 'applicants';
@@ -326,7 +332,18 @@ export function validateEngineState(value: unknown): EngineState {
     if (!skippedDates.every(entry => entry !== null && typeof entry === 'object' && typeof entry.date === 'string' && isIsoDate(entry.date) &&
           typeof entry.consulate === 'string' && Object.hasOwn(CONSULATES, entry.consulate)) ||
         new Set(skippedDates.map(entry => `${entry.consulate}|${entry.date}`)).size !== skippedDates.length) throw new Error('Invalid executor state.');
-    executor = { ...(value.entryAction === undefined ? {} : { entryAction: value.entryAction }), skippedDates: skippedDates.map(({ consulate, date }) => ({ consulate, date })), tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,
+    const selection = value.timeSelection;
+    if (selection !== undefined && (!selection || typeof selection !== 'object' ||
+        !Object.hasOwn(CONSULATES, selection.consulate) || !isIsoDate(selection.date) ||
+        ![selection.requests, selection.attempts].every(count => Number.isInteger(count) && count >= 0 && count <= 3) ||
+        ![selection.reselected, selection.refreshed, selection.refreshNeeded].every(flag => typeof flag === 'boolean') ||
+        !Array.isArray(selection.refused) || selection.refused.length > 3 ||
+        selection.refused.some(time => typeof time !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) ||
+        new Set(selection.refused).size !== selection.refused.length)) throw new Error('Invalid time selection state.');
+    executor = { ...(selection === undefined ? {} : { timeSelection: {
+      consulate: selection.consulate, date: selection.date, requests: selection.requests, attempts: selection.attempts,
+      reselected: selection.reselected, refreshed: selection.refreshed, refreshNeeded: selection.refreshNeeded, refused: [...selection.refused],
+    } }), ...(value.entryAction === undefined ? {} : { entryAction: value.entryAction }), skippedDates: skippedDates.map(({ consulate, date }) => ({ consulate, date })), tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,
       ...(value.loadingSince === undefined ? {} : { loadingSince: value.loadingSince }),
       applicantIds: value.applicantIds === null ? null : validateApplicantIds(value.applicantIds) };
   }

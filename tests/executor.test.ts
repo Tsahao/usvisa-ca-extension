@@ -21,7 +21,7 @@ function seeded(stage: BookingStage): EngineState {
     executor: { tabId: 7, applicantIds: stage === 'form' ? IDS : null, targetTime: null, skippedDates: [], actionPending: false } };
 }
 function harness(kind: PaidPage['kind']) {
-  const page: PaidPage = { kind, scheduleId: '11111111', applicantIds: IDS, facilityId: 95, date: '2026-11-19', time: '09:15', calendarReady: true,
+  const page: PaidPage = { kind, scheduleId: '11111111', applicantIds: IDS, facilityId: 95, date: '2026-11-19', time: '09:15', calendarReady: true, nativeTimes: ['09:15', '10:30'],
     applicants: IDS.map(id => ({ id, checked: true, disabled: false })) };
   const url = `${BASE}/${kind === 'actions' ? 'continue_actions' : 'appointment?applicants[]=77777777&applicants[]=88888888'}`;
   const mutations: PaidAction[] = [];
@@ -45,6 +45,167 @@ function harness(kind: PaidPage['kind']) {
   };
   return { d, page, mutations, checkpoints };
 }
+
+describe('bounded native/fresh time selection', () => {
+  it.each([
+    [['08:45', '09:15', '10:30'], '09:15'],
+    [['10:30'], '10:30'],
+  ] as const)('selects the earliest shared option from %j without skipping the date', async (times, expected) => {
+    const h = harness('form'); h.page.time = '';
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'fetchTimesJson'
+      ? { status: 200, body: { available_times: [...times] } } : inject(...args));
+    const next = validateEngineState(await runBookingStage(h.d, seeded('form')));
+    expect(h.mutations).toEqual([expect.objectContaining({ action: 'time', time: expected })]);
+    expect(next).toMatchObject({ status: 'running', stage: 'form', nextPollAt: NOW, consecutiveFailures: 0,
+      executor: { skippedDates: [], timeSelection: { requests: 1, attempts: 1 } } });
+  });
+  it('tries another shared time immediately after an explicit zero-mutation refusal, across durable rereads', async () => {
+    const h = harness('form'); h.page.time = '';
+    const inject = h.d.inject;
+    let attempts = 0;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'performPaidAction' && (args[2]![0] as PaidAction).action === 'time' && attempts++ === 0) {
+        h.page.nativeTimes = ['10:30'];
+        return { ok: false, reason: 'time-option-unavailable' };
+      }
+      return inject(...args);
+    });
+    const first = validateEngineState(await runBookingStage(h.d, seeded('form')));
+    expect(first).toMatchObject({ nextPollAt: NOW, executor: { actionPending: false, timeSelection: { reselected: true, refused: ['09:15'] } } });
+    expect(h.checkpoints.at(-1)?.executor?.actionPending).toBe(false);
+    const second = validateEngineState(await runBookingStage(h.d, first));
+    expect(second).toMatchObject({ nextPollAt: NOW, executor: { skippedDates: [], targetTime: '10:30', timeSelection: { requests: 2, attempts: 2 } } });
+    expect(h.mutations).toEqual([expect.objectContaining({ action: 'time', time: '10:30' })]);
+  });
+  it('refreshes an unchanged ready date once for disjoint snapshots, then skips with normal pacing', async () => {
+    const h = harness('form'); h.page.time = ''; h.page.nativeTimes = ['10:30'];
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'fetchTimesJson'
+      ? { status: 200, body: { available_times: ['09:15'] } } : inject(...args));
+    let state = validateEngineState(await runBookingStage(h.d, seeded('form')));
+    expect(state.executor?.timeSelection).toMatchObject({ refreshed: true, refreshNeeded: true, requests: 1 });
+    state = validateEngineState(await runBookingStage(h.d, state));
+    expect(h.mutations).toEqual([expect.objectContaining({ action: 'date', date: h.page.date })]);
+    state = validateEngineState(await runBookingStage(h.d, state));
+    expect(state).toMatchObject({ status: 'running', intent: null, authentication: null, consecutiveFailures: 0,
+      stage: null, lastCandidate: null, nextPollAt: '2026-10-12T00:01:00.000Z',
+      executor: { skippedDates: [{ consulate: 'Vancouver', date: h.page.date }] } });
+    expect(state.executor?.timeSelection).toBeUndefined();
+    expect(vi.mocked(h.d.inject).mock.calls.filter(call => call[1].name === 'fetchTimesJson')).toHaveLength(2);
+  });
+  it('selects a newly shared time after native refresh without waiting an interval', async () => {
+    const h = harness('form'); h.page.time = ''; h.page.nativeTimes = [];
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'performPaidAction' && (args[2]![0] as PaidAction).action === 'date') h.page.nativeTimes = ['09:15'];
+      return inject(...args);
+    });
+    let state = await runBookingStage(h.d, seeded('form'));
+    state = await runBookingStage(h.d, validateEngineState(state));
+    state = await runBookingStage(h.d, validateEngineState(state));
+    expect(h.mutations.map(action => action.action)).toEqual(['date', 'time']);
+    expect(state).toMatchObject({ nextPollAt: NOW, executor: { skippedDates: [], targetTime: '09:15' } });
+  });
+  it.each([502, 403, 429, 304])('never treats HTTP %s as a reason for immediate native refresh', async status => {
+    const h = harness('form'); const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'fetchTimesJson'
+      ? { status, body: null } : inject(...args));
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(h.mutations).toEqual([]);
+    expect(next.executor?.timeSelection).toMatchObject({ requests: status === 403 ? 1 : 0, refreshed: false, refreshNeeded: false });
+    expect(next.nextPollAt).not.toBe(NOW);
+  });
+  it.each(['group', 'roster', 'date', 'facility', 'readiness', 'options'])('does not select after post-GET %s evidence changes', async issue => {
+    const h = harness('form'); h.page.time = ''; const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'fetchTimesJson') {
+        if (issue === 'group') h.page.scheduleId = '99999999';
+        if (issue === 'roster') h.page.applicantIds = ['99999999'];
+        if (issue === 'date') h.page.date = '2026-11-20';
+        if (issue === 'facility') h.page.facilityId = 94;
+        if (issue === 'readiness') h.page.calendarReady = false;
+        if (issue === 'options') h.page.nativeTimes = undefined;
+      }
+      return inject(...args);
+    });
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(h.mutations).toEqual([]);
+    expect(next.intent).toBeNull();
+  });
+  it('checks any remaining business-slot warning after selecting a shared time, before submission', async () => {
+    const h = harness('form'); h.page.time = ''; h.page.slotWarning = true;
+    const first = await runBookingStage(h.d, seeded('form'));
+    expect(h.mutations).toEqual([expect.objectContaining({ action: 'time', time: '09:15' })]);
+    h.page.time = '09:15';
+    const next = await runBookingStage(h.d, validateEngineState(first));
+    expect(next).toMatchObject({ stage: null, intent: null, executor: { skippedDates: [{ consulate: 'Vancouver', date: h.page.date }] } });
+    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
+  });
+  it.each(['requests', 'attempts'] as const)('enforces the durable %s cap before further requests/actions', async cap => {
+    const h = harness('form'); h.page.time = '';
+    const initial = seeded('form');
+    initial.executor!.timeSelection = { consulate: 'Vancouver', date: h.page.date, requests: 0, attempts: 0,
+      reselected: false, refreshed: false, refreshNeeded: false, refused: [], [cap]: 3 };
+    const next = await runBookingStage(h.d, validateEngineState(initial));
+    expect(next.stage).toBeNull();
+    expect(h.mutations).toEqual([]);
+    expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'fetchTimesJson')).toBe(false);
+  });
+  it('parks an interrupted time action instead of replaying the immediate fallback', async () => {
+    const h = harness('form'); h.page.time = '';
+    const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'performPaidAction') throw new Error('synthetic interrupted reply');
+      return inject(...args);
+    });
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(next.status).toBe('verifying');
+    const checkpoint = validateEngineState(h.checkpoints.at(-1));
+    expect(checkpoint.executor?.actionPending).toBe(true);
+    expect((await runBookingStage(h.d, checkpoint)).status).toBe('verifying');
+    expect(vi.mocked(h.d.inject).mock.calls.filter(call => call[1].name === 'performPaidAction')).toHaveLength(1);
+  });
+  it.each(['cancelled', 'settings'] as const)('does not select a shared time after %s during the fresh GET', async issue => {
+    const h = harness('form'); h.page.time = ''; const inject = h.d.inject;
+    let changed = false;
+    h.d.isCancelled = () => issue === 'cancelled' && changed;
+    h.d.loadPrefs = async () => ({ ...PREFS, ...(issue === 'settings' && changed ? { latest: '2026-12-01' } : {}) });
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      const result = await inject(...args);
+      if (args[1].name === 'fetchTimesJson') changed = true;
+      return result;
+    });
+    const next = await runBookingStage(h.d, seeded('form'));
+    expect(h.mutations).toEqual([]); expect(next.intent).toBeNull();
+  });
+  it('persists the reservation before transport but keeps paced transport retries on their own failure budget', async () => {
+    const h = harness('form'); const inject = h.d.inject;
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => {
+      if (args[1].name === 'fetchTimesJson') throw new Error('synthetic lost response');
+      return inject(...args);
+    });
+    let state = seeded('form');
+    for (let count = 1; count <= 3; count++) {
+      state = validateEngineState(await runBookingStage(h.d, state));
+      expect(state.executor?.timeSelection?.requests).toBe(0);
+      expect(state.consecutiveFailures).toBe(count);
+      expect(h.checkpoints.at(-1)?.executor?.timeSelection?.requests).toBe(1);
+      expect(state.nextPollAt).toBe('2026-10-12T00:01:00.000Z');
+    }
+    expect(state.executor?.skippedDates).toEqual([]);
+    expect(vi.mocked(h.d.inject).mock.calls.filter(call => call[1].name === 'fetchTimesJson')).toHaveLength(3);
+  });
+  it.each([
+    { requests: 4 }, { attempts: -1 }, { requests: 1.5 }, { refreshed: 'yes' }, { refreshNeeded: null },
+    { consulate: 'unknown' }, { date: '2026-02-30' }, { refused: ['bad'] }, { refused: ['09:15', '09:15'] },
+  ])('refuses corrupt durable selection state %j', patch => {
+    const state = seeded('form');
+    state.executor!.timeSelection = { consulate: 'Vancouver', date: '2026-11-19', requests: 1, attempts: 0,
+      reselected: false, refreshed: false, refreshNeeded: false, refused: [], ...patch } as NonNullable<NonNullable<EngineState['executor']>['timeSelection']>;
+    expect(() => validateEngineState(state)).toThrow('Invalid time selection state.');
+  });
+});
 
 describe('paid executor', () => {
   it('resolves provisional payment evidence only on a form with independently revalidated roster and baseline', async () => {
@@ -487,11 +648,11 @@ describe('paid executor', () => {
     expect(next.consecutiveFailures).toBe(status === 403 ? 0 : 1);
     expect(h.mutations).toEqual([]);
   });
-  it('returns to days polling when a candidate has no times', async () => {
+  it('requests one immediate native refresh when a candidate has no times', async () => {
     const h = harness('form');
     const original = h.d.inject;
     h.d.inject = async (...args) => args[1].name === 'fetchTimesJson' ? { status: 200, body: { available_times: [] } } : original(...args);
-    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ stage: null, lastCandidate: null, status: 'running', executor: { skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }] } });
+    expect(await runBookingStage(h.d, seeded('form'))).toMatchObject({ stage: 'form', nextPollAt: NOW, status: 'running', executor: { skippedDates: [], timeSelection: { requests: 1, refreshed: true, refreshNeeded: true } } });
     expect(h.mutations).toEqual([]);
   });
   it('books the candidate consulate, not the first selected one', async () => {
@@ -506,9 +667,11 @@ describe('paid executor', () => {
     h.d.inject = async (...args) => args[1].name === 'fetchTimesJson' ? { status: 200, body: { available_times: [] } } : original(...args);
     const state = seeded('form');
     state.executor!.skippedDates = [{ consulate: 'Toronto', date: '2026-11-19' }];
-    const next = await runBookingStage(h.d, state);
+    const refreshed = await runBookingStage(h.d, state);
+    const loaded = await runBookingStage(h.d, validateEngineState(refreshed));
+    const next = await runBookingStage(h.d, validateEngineState(loaded));
     expect(next.executor!.skippedDates).toEqual([{ consulate: 'Toronto', date: '2026-11-19' }, { consulate: 'Vancouver', date: '2026-11-19' }]);
-    const fresh = await runBookingStage(h.d, seeded('form'));
+    const fresh = await runBookingStage(h.d, await runBookingStage(h.d, await runBookingStage(h.d, seeded('form'))));
     expect(fresh.executor!.skippedDates).toEqual([{ consulate: 'Vancouver', date: '2026-11-19' }]);
   });
   it('parks instead of booking a candidate whose consulate is unselected', async () => {
@@ -711,7 +874,7 @@ describe('actionable failure attribution', () => {
   ] as const)('names the precise final form refusal (%s)', async (code, patch) => {
     const h = harness('form'); const inject = h.d.inject;
     let reads = 0;
-    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 2
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 3
       ? { ...h.page, ...patch } : inject(...args));
     const next = await runBookingStage(h.d, seeded('form'));
     expect(next).toMatchObject({ status: 'verifying', intent: null, failureContext: { code,
@@ -816,18 +979,19 @@ describe('safe broader recovery', () => {
       expect(vi.mocked(h.d.inject).mock.calls.some(call => call[1].name === 'performAppointmentSubmission')).toBe(false);
     }
   });
-  it('skips only the current consulate/date when a time vanished', async () => {
+  it('clears a positively refused time checkpoint and immediately retries the candidate', async () => {
     const h = harness('form'); h.page.time = '10:30'; const inject = h.d.inject;
     h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'performPaidAction'
       ? { ok: false, reason: 'time-option-unavailable' } : inject(...args));
     const next = await runBookingStage(h.d, seeded('form'));
-    expect(next).toMatchObject({ status: 'running', stage: null, lastCandidate: null, authentication: null,
-      nextPollAt: '2026-10-12T00:01:00.000Z', executor: { actionPending: false, targetTime: null,
-        skippedDates: [{ consulate: 'Vancouver', date: '2026-11-19' }] } });
+    expect(next).toMatchObject({ status: 'running', stage: 'form', authentication: null,
+      nextPollAt: NOW, executor: { actionPending: false, targetTime: null,
+        skippedDates: [], timeSelection: { requests: 1, attempts: 1, reselected: true, refused: ['09:15'] } } });
+    expect(h.checkpoints.at(-1)?.executor?.actionPending).toBe(false);
   });
   it.each(['null', 'not-ready', 'date', 'time'] as const)('rebuilds a final reread %s and retains its budget through successful field selections', async issue => {
     const h = harness('form'); const inject = h.d.inject; let reads = 0;
-    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 2
+    h.d.inject = vi.fn(async (...args: Parameters<ExecDeps['inject']>) => args[1].name === 'readPaidPage' && ++reads === 3
       ? issue === 'null' ? null : { ...h.page, ...(issue === 'not-ready' ? { calendarReady: false } : issue === 'date' ? { date: '2026-11-20' } : { time: '10:30' }) } : inject(...args));
     const next = await runBookingStage(h.d, { ...seeded('form'), formLoadFailures: 9 });
     expect(next).toMatchObject({ status: 'running', intent: null, lastCandidate: null, cooldownUntil: '2026-10-12T00:30:00.000Z',

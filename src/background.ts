@@ -2175,7 +2175,7 @@ function queueEnginePoll(): void {
           })), state.group.currentDate, windowPrefs);
         // Empty times exclude that date for this sweep; once every eligible
         // date is exhausted, the next paced poll starts a fresh sweep.
-        if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [] };
+        if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [], timeSelection: undefined };
         const recorded = recordCandidate(applied, candidate, stamped);
         if (readAutoMode(prefs) === false) {
           // Auto Book OFF is a monitor, not a dry run: no candidate field
