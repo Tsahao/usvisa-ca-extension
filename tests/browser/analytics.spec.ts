@@ -234,8 +234,8 @@ for (const classesAvailable of [true, false]) {
         const body = `<section class="application card attend_appointment"><strong>22222222</strong>
           <h4 class="status">Attend Appointment</h4><p class="consular-appt">${verifying ? 'November 19, 2026 at 09:15' : 'January 1, 2027'} <a href="${base}/appointment">Appointment</a></p>
           <ul class="actions"><li><a href="${base}/continue_actions">Continue</a></li></ul>
-          <table><thead><tr><th>Applicant Name</th>${!verifying ? '<th>Petition</th>' : ''}<th>${showClass ? 'Visa Class' : 'Unavailable'}</th><th></th></tr></thead>
-          <tbody>${['77777777', '88888888'].map((id, i) => `<tr><td>Private synthetic name</td>${!verifying ? '<td>Private synthetic petition</td>' : ''}<td>${i ? 'L2 Spouse or Child of an L1' : 'L1 Intra-company Transferee'}</td><td><a href="${base}/applicants/${id}">Details</a></td></tr>`).join('')}</tbody></table></section>
+          <table><thead><tr><th>Applicant Name</th><th>Passport</th>${!verifying ? '<th>Petition</th>' : ''}<th>DS-160</th><th>${showClass ? 'Visa Class' : 'Unavailable'}</th><th>Status</th></tr></thead>
+          <tbody>${['77777777', '88888888'].map((id, i) => `<tr><td>Private synthetic name</td><td>Private synthetic passport</td>${!verifying ? '<td>Private synthetic petition</td>' : ''}<td>Private synthetic DS-160</td><td>${i ? 'L2 Spouse or Child of an L1' : 'L1 Intra-company Transferee'}</td><td>Check DS-160 Status</td><td><a href="${base}/applicants/${id}">Details</a></td></tr>`).join('')}</tbody></table></section>
           <section class="application card ready_to_schedule"><strong>44444444</strong><ul class="actions"><li><a href="/en-ca/niv/schedule/33333333/continue_actions">Continue</a></li></ul>
           <table><tr><th>Visa Class</th><th></th></tr><tr><td>B1/B2 Business &amp; Tourism</td><td><a href="/en-ca/niv/schedule/33333333/applicants/99999999">Details</a></td></tr></table></section>`;
         await route.fulfill({ contentType: 'text/html', body });
@@ -285,11 +285,11 @@ for (const classesAvailable of [true, false]) {
       const events: any[] = await worker.evaluate(() => (globalThis as any).__bookings);
       const bookings = events.filter(event => event.event === 'appointment_booked');
       expect(bookings).toHaveLength(1);
-      expect(bookings[0].properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: classesAvailable ? ['L1', 'L2'] : ['unknown'] });
+      expect(bookings[0].properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: classesAvailable ? ['L1', 'L2'] : ['unknown'], consulate_city: 'Vancouver' });
       for (const event of events.filter(event => event.event !== 'appointment_booked')) {
-        expect(event.properties).not.toHaveProperty('appointment_date'); expect(event.properties).not.toHaveProperty('visa_classes');
+        expect(event.properties).not.toHaveProperty('appointment_date'); expect(event.properties).not.toHaveProperty('visa_classes'); expect(event.properties).not.toHaveProperty('consulate_city');
       }
-      expect(JSON.stringify(events)).not.toMatch(/fixture@example|private-synthetic|Private synthetic|11111111|22222222|77777777|88888888|99999999|Vancouver|2027-01-01|09:15|Intra-company|Spouse|B1\/B2|schedule\//);
+      expect(JSON.stringify(events)).not.toMatch(/fixture@example|private-synthetic|Private synthetic|11111111|22222222|77777777|88888888|99999999|2027-01-01|09:15|Intra-company|Spouse|B1\/B2|schedule\//);
       expect(verificationReads).toBe(3); expect(posts).toBe(0);
     } finally { await context.close(); await rm(profile, { recursive: true, force: true }); }
   });

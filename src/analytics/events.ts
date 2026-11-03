@@ -1,13 +1,13 @@
 import { FAILURE_REASONS, isAuthPurpose, isFailureCode, isFailureStep, readFailureContext,
   type AuthPurpose, type FailureCode, type FailureContext, type FailureReason, type FailureStep } from '../domain/failure-context';
 export { FAILURE_REASONS, type FailureReason } from '../domain/failure-context';
-import { isIsoDate } from '../domain/dates';
+import { CONSULATES, isIsoDate, type Consulate } from '../domain/dates';
 import { isVisaClasses, type VisaClass } from '../domain/visa-classes';
 
 // Fixed allowlist analytics event builders. No credentials, IVR, group,
 // applicant, tab, URL, preference, or raw error/DOM/network text ever enters
 // telemetry. Only appointment_booked may include its verified calendar date
-// and normalized visa classes, explicitly authorized October 25, 2026.
+// and normalized visa classes, plus its consulate city.
 
 export const ANALYTICS_EVENTS = [
   'installation_seen',
@@ -48,6 +48,7 @@ export type AnalyticsProperties = {
   auth_purpose?: AuthPurpose;
   appointment_date?: string;
   visa_classes?: VisaClass[];
+  consulate_city?: Consulate;
   $process_person_profile: false;
   $geoip_disable: true;
 };
@@ -78,7 +79,7 @@ export function validateQueuedEvent(value: unknown): QueuedAnalyticsEvent {
   if (props.$process_person_profile !== false || props.$geoip_disable !== true)
     throw new Error('Invalid analytics event.');
   // Reject any non-allowlisted property (prevents identifier leaks).
-  const allowed = new Set(['analytics_session_id', 'mode', 'extension_version', 'environment', 'test_mode', 'failure_reason', 'failure_code', 'failure_step', 'auth_purpose', 'appointment_date', 'visa_classes', '$process_person_profile', '$geoip_disable']);
+  const allowed = new Set(['analytics_session_id', 'mode', 'extension_version', 'environment', 'test_mode', 'failure_reason', 'failure_code', 'failure_step', 'auth_purpose', 'appointment_date', 'visa_classes', 'consulate_city', '$process_person_profile', '$geoip_disable']);
   for (const key of Object.keys(props)) {
     if (!allowed.has(key)) throw new Error('Invalid analytics event.');
   }
@@ -100,6 +101,9 @@ export function validateQueuedEvent(value: unknown): QueuedAnalyticsEvent {
   const hasBookingDetails = props.appointment_date !== undefined || props.visa_classes !== undefined;
   if (hasBookingDetails && (entry.event !== 'appointment_booked' || typeof props.appointment_date !== 'string' ||
       !isIsoDate(props.appointment_date) || !isVisaClasses(props.visa_classes))) throw new Error('Invalid analytics event.');
+  // City is optional for queued events from releases predating its collection.
+  if (props.consulate_city !== undefined && (entry.event !== 'appointment_booked' || !hasBookingDetails ||
+      typeof props.consulate_city !== 'string' || !Object.hasOwn(CONSULATES, props.consulate_city))) throw new Error('Invalid analytics event.');
   // Per-event required fields.
   if (entry.event === 'installation_seen') {
     if (props.analytics_session_id !== undefined || props.mode !== undefined || props.test_mode !== undefined || props.failure_reason !== undefined)
@@ -164,11 +168,11 @@ export function buildAlertsEstablished(args: {
 
 export function buildAppointmentBooked(args: {
   eventUuid: string; distinctId: string; timestamp: string; extensionVersion: string;
-  analyticsSessionId: string; appointmentDate: string; visaClasses: VisaClass[];
+  analyticsSessionId: string; appointmentDate: string; visaClasses: VisaClass[]; consulateCity: Consulate;
 }): QueuedAnalyticsEvent {
   const event = buildWorkflowStarted({ ...args, mode: 'booking', testMode: false });
   return validateQueuedEvent({ ...event, event: 'appointment_booked', properties: { ...event.properties,
-    appointment_date: args.appointmentDate, visa_classes: [...args.visaClasses] } });
+    appointment_date: args.appointmentDate, visa_classes: [...args.visaClasses], consulate_city: args.consulateCity } });
 }
 
 export function buildWorkflowFailed(args: {

@@ -109,7 +109,8 @@ events: installation, accepted workflow Start, terminal workflow failure,
 validated unpaid-alert activation, and verified successful booking (Auto Book ON only). Count
 `appointment_booked` events in PostHog to measure bookings made by the extension.
 New verified-booking events include `appointment_date` (exact booked calendar
-date, `YYYY-MM-DD`) and `visa_classes` (sorted distinct allowlisted codes, e.g.
+date, `YYYY-MM-DD`), `consulate_city` (the booked city from the submitted
+attempt, e.g. `Calgary`) and `visa_classes` (sorted distinct allowlisted codes, e.g.
 `["L1", "L2"]`). Visa classes come from the selected group's complete dashboard
 applicant table, persist locally with that workflow and are cross-checked on
 the success dashboard; missing, unsupported or conflicting data is `unknown`.
@@ -125,9 +126,9 @@ exceptions or the local diagnostics log. Missing details use `unknown`; older
 queued events remain deliverable without new fields. Retries, manual sign-in
 and unresolved booking verification still do not count as terminal failures.
 Payloads exclude credentials, visa/group/applicant identifiers, applicant names,
-URLs, consulates, appointment times, previous appointment dates, preferences
-and raw portal content. Only the verified booked date and normalized visa-class
-codes are included as booking details.
+URLs, appointment times, previous appointment dates, preferences
+and raw portal content. Only the verified booked date, booked consulate city
+and normalized visa-class codes are included as booking details.
 No autocapture, heatmaps or session replay is used. The first release has no
 analytics opt-out switch in its panel. Analytics uses ordinary cross-origin
 requests (CORS), without requesting host access to PostHog. Delivery remains

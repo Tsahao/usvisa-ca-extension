@@ -6,6 +6,7 @@ import { ANALYTICS_KEY, OUTBOX_MAX, validateAnalyticsRecord, type AnalyticsRecor
 import { createAnalyticsTracker, isProductPanelSender } from '../src/analytics/tracker';
 import { sendOneEvent } from '../src/analytics/transport';
 import { emptyEngineState, type EngineState } from '../src/engine/workflow';
+import { CONSULATES, type Consulate } from '../src/domain/dates';
 
 const token = 'phc_synthetic000000000000000000';
 const config = resolveAnalyticsConfig({ token, host: 'https://us.i.posthog.com' });
@@ -118,7 +119,7 @@ describe('durable milestones and sessions', () => {
     f.tracker.link(id, state); await f.tracker.settled();
     return { ...f, state };
   }
-  it('queues the verified date/classes once across worker wakes without other appointment details', async () => {
+  it('queues the verified date/classes/city once across worker wakes', async () => {
     const f = await bookingFixture();
     f.tracker.booked(f.state); f.tracker.booked(f.state); await f.tracker.settled();
     const worker = createAnalyticsTracker(f.deps);
@@ -127,9 +128,19 @@ describe('durable milestones and sessions', () => {
     await worker.flush();
     const event = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(event => event.event === 'appointment_booked');
     expect(event.properties).toEqual({ analytics_session_id: f.record().session!.id, mode: 'booking', test_mode: false,
-      appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'],
+      appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'], consulate_city: 'Vancouver',
       extension_version: '0.1.0', environment: 'production', $process_person_profile: false, $geoip_disable: true, $ip: null });
-    expect(JSON.stringify(event)).not.toMatch(/11111111|22222222|run-id|Vancouver|09:15|applicant|targetDate/);
+    expect(JSON.stringify(event)).not.toMatch(/11111111|22222222|run-id|09:15|applicant|targetDate/);
+  });
+  it.each(Object.keys(CONSULATES) as Consulate[])('takes the booked city from the submitted intent (%s)', async city => {
+    const f = await bookingFixture(); f.state.intent!.consulate = city;
+    f.tracker.booked(f.state); await f.tracker.settled();
+    expect(f.record().outbox.at(-1)!.properties.consulate_city).toBe(city);
+  });
+  it.each([undefined, null, 'London', 'toString', 'private@example.invalid'])('does not emit an invalid city from corrupt local state (%j)', async city => {
+    const f = await bookingFixture(); f.state.intent!.consulate = city as any;
+    f.tracker.booked(f.state); await f.tracker.settled();
+    expect(f.record().outbox.filter(event => event.event === 'appointment_booked')).toHaveLength(0);
   });
   it.each(['test-mode', 'foreign', 'wrong-run', 'wrong-intent-run', 'wrong-group', 'unpaid', 'invalid-date', 'no-intent', 'alerts', 'untracked'])('does not count an unqualified booking (%s)', async issue => {
     const f = await bookingFixture(issue === 'test-mode');
@@ -166,6 +177,7 @@ describe('durable milestones and sessions', () => {
       { appointment_date: '2026-02-30' }, { appointment_date: '2026-11-19T09:15:00Z' }, { appointment_date: null },
       { visa_classes: ['L1 Intra-company Transferee'] }, { visa_classes: ['private@example.invalid'] },
       { visa_classes: ['L2', 'L1'] }, { visa_classes: ['L1', 'L1'] }, { visa_classes: [] },
+      { consulate_city: 'private@example.invalid' }, { consulate_city: 'toString' }, { consulate_city: 'London' }, { consulate_city: null },
       { visa_classes: null }, { visa_classes: undefined }, { appointment_date: undefined }]) {
       expect(() => validateQueuedEvent({ ...event, properties: { ...event.properties, ...properties } })).toThrow();
     }
@@ -174,11 +186,23 @@ describe('durable milestones and sessions', () => {
     const f = await bookingFixture(); f.tracker.booked(f.state); await f.tracker.settled();
     const event = f.record().outbox.find(event => event.event === 'appointment_booked')!;
     delete event.properties.appointment_date; delete event.properties.visa_classes;
+    delete event.properties.consulate_city;
     expect(validateAnalyticsRecord(f.record()).outbox.at(-1)).toEqual(event);
     await f.tracker.flush();
     const body = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(event => event.event === 'appointment_booked');
     expect(body.properties).not.toHaveProperty('appointment_date');
     expect(body.properties).not.toHaveProperty('visa_classes');
+    expect(body.properties).not.toHaveProperty('consulate_city');
+  });
+  it('delivers older date/class bookings without a city and does not infer one from current settings', async () => {
+    const f = await bookingFixture(); f.tracker.booked(f.state); await f.tracker.settled();
+    const event = f.record().outbox.find(event => event.event === 'appointment_booked')!;
+    delete event.properties.consulate_city;
+    expect(validateQueuedEvent(event)).toEqual(event);
+    await f.tracker.flush();
+    const body = f.fetchFn.mock.calls.map(call => JSON.parse(call[1].body as string)).find(event => event.event === 'appointment_booked');
+    expect(body.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'] });
+    expect(body.properties).not.toHaveProperty('consulate_city');
   });
   it.each(['installation_seen', 'workflow_started', 'alerts_monitoring_established', 'workflow_failed'])('never allows booking details on %s', async name => {
     const f = fixture(); await f.start();
@@ -186,7 +210,7 @@ describe('durable milestones and sessions', () => {
     f.tracker.observe({ ...f.state, status: 'stopped', loginFailed: true }); await f.tracker.settled();
     const event = f.record().outbox.find(event => event.event === name)!;
     expect(event).toBeDefined();
-    for (const details of [{ appointment_date: '2026-11-19' }, { visa_classes: ['B1/B2'] },
+    for (const details of [{ appointment_date: '2026-11-19' }, { visa_classes: ['B1/B2'] }, { consulate_city: 'Vancouver' },
       { appointment_date: '2026-11-19', visa_classes: ['B1/B2'] }]) {
       expect(() => validateQueuedEvent({ ...event, properties: { ...event.properties, ...details } })).toThrow();
     }
@@ -195,9 +219,10 @@ describe('durable milestones and sessions', () => {
     const f = await bookingFixture();
     f.tracker.booked(f.state);
     f.state.group!.visaClasses!.push('unknown'); f.state.intent!.targetDate = '2026-12-01';
+    f.state.intent!.consulate = 'Toronto';
     await f.tracker.settled();
     const event = structuredClone(f.record().outbox.find(event => event.event === 'appointment_booked')!);
-    expect(event.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'] });
+    expect(event.properties).toMatchObject({ appointment_date: '2026-11-19', visa_classes: ['L1', 'L2'], consulate_city: 'Vancouver' });
     f.fetchFn.mockImplementation(async (_url, init) => {
       if (JSON.parse(init.body as string).event === 'appointment_booked') throw new Error('Synthetic offline');
       return new Response('{}', { status: 200 });

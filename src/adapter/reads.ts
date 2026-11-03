@@ -424,7 +424,12 @@ export async function readCurrentAppointment(scheduleId: string, ivr: string | n
       if (columns.length === 1 && headers.every(simple)) {
         const labels = rows.map(row => {
           const cells = Array.from(row.children);
-          if (cells.length !== headers.length || !cells.every(simple)) return null;
+          // The portal omits the heading for its trailing applicant-actions
+          // cell. Accept that one extra cell only when it holds a Details
+          // link for this schedule; other column mismatches stay unknown.
+          const trailingActions = cells.length === headers.length + 1 &&
+            Array.from(cells.at(-1)!.querySelectorAll('a[href]')).some(link => applicantIdentity(link) !== null);
+          if ((cells.length !== headers.length && !trailingActions) || !cells.every(simple)) return null;
           const text = (cells[columns[0]].textContent ?? '').trim();
           return text.length > 0 && text.length <= 160 ? text : null;
         });
