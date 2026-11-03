@@ -42,7 +42,7 @@ export function HomeScreen({ preferences, signIn, openTerms, active = false }: {
       <p className={styles.subtitle}>for consulates in Canada</p>
     </header>
     <fieldset disabled={saving || active} className={`${panel.group} ${styles.fields}`}>
-      <PreferenceFields draft={draft} update={update} validationEvents={validationEvents} autoLabel="Auto Book" />
+      <PreferenceFields draft={draft} update={update} validationEvents={validationEvents} />
     </fieldset>
     {(error || visibleIssue) && <p className={`${panel.validation} ${styles.validation}`} role="alert">{error || visibleIssue?.message}</p>}
     <div className={styles.footer}>

@@ -191,9 +191,9 @@ export function performAppointmentSubmission(request: SubmissionRequest): { ok: 
     return { ok: warnings[0].checked };
   }
   if (request.action === 'submit') {
-    // Auto Mode OFF never clicks the final Schedule/Reschedule submit or
+    // Auto Book OFF never clicks the final Schedule/Reschedule submit or
     // opens the portal confirmation dialog, with or without a gate. Live
-    // submission (Auto Mode explicitly ON, legacy testMode=false) clicks only
+    // submission (Auto Book explicitly ON, legacy testMode=false) clicks only
     // with a valid gate (recognized two-step dialog flow, native POST
     // blocked) or with a fully absent gate (direct submission, native POST
     // allowed; user authorization October 15, 2026 for the no-gate case

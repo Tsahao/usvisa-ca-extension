@@ -144,7 +144,7 @@ describe('complete synthetic submission, confirmation and recovery', () => {
     expect(state).toMatchObject({ status: 'stopped', intent: null, executor: null });
     expect(h.submit).toHaveBeenCalledOnce(); expect(h.confirm).toHaveBeenCalledOnce();
   });
-  it('never clicks submit or opens a dialog with Auto Mode OFF; monitoring continues', async () => {
+  it('never clicks submit or opens a dialog with Auto Book OFF; monitoring continues', async () => {
     const h = harness(true); let state = await runBookingStage(h.deps, h.state); h.tick();
     expect(state).toMatchObject({ status: 'running', stage: null, intent: null });
     expect(h.submit).not.toHaveBeenCalled(); expect(h.confirm).not.toHaveBeenCalled();
@@ -153,7 +153,7 @@ describe('complete synthetic submission, confirmation and recovery', () => {
     // No verification reads are scheduled for a click that never occurred.
     expect(state.verification).toBeNull();
   });
-  it('never clicks a gateless direct submit with Auto Mode OFF either', async () => {
+  it('never clicks a gateless direct submit with Auto Book OFF either', async () => {
     const h = harness(true, false, false); let state = await runBookingStage(h.deps, h.state); h.tick();
     expect(state).toMatchObject({ status: 'running', stage: null, intent: null, verification: null });
     expect(h.submit).not.toHaveBeenCalled(); expect(h.confirm).not.toHaveBeenCalled();

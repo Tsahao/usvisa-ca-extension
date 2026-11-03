@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readAutoMode } from '../src/domain/auto-mode';
 import { policyKey } from '../src/engine/lifecycle';
 
-describe('Auto Mode compatibility and authorization', () => {
+describe('Auto Book compatibility and authorization', () => {
   it.each([true, false])('inverts legacy Test Mode %s without changing an in-flight policy', testMode => {
     const legacy = { consulate: 'Vancouver', testMode, interval: 60 };
     const current = { consulate: 'Vancouver', autoMode: !testMode, interval: 60 };

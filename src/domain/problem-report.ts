@@ -57,7 +57,7 @@ export function buildProblemEmail(args: {
     'Optionally, you can add anything you think is helpful to pinpoint the issue.', '', '',
     '--- Technical details ---', `Report generated: ${args.now}`, `Extension version: ${version}`,
     `Browser version: ${browser}`, `Workflow mode: ${args.mode === 'booking' ? 'Book' : 'Alerts'}`,
-    `Auto Mode: ${args.autoMode ? 'On' : 'Off'}`, `Workflow status: ${status}`,
+    `Auto Book: ${args.autoMode ? 'On' : 'Off'}`, `Workflow status: ${status}`,
     `Workflow stage: ${stage}`, `Failure reason: ${failure}`, `Failure code: ${failureCode}`, '', '--- Recent diagnostics ---',
   ].join('\n') + '\n';
   const prefix = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(`[Visa Extension] Problem report — v${version}`)}&body=`;

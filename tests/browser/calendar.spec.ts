@@ -44,7 +44,7 @@ test('packaged worker refreshes stale calendar state in MAIN before choosing a t
     await host.selectOption('#appointments_consulate_appointment_time', '10:45');
     await expect(host.locator('#non-consulate-business-time-message')).toBeVisible();
     const tabId = await panel.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)!.id!, host.url());
-    // Candidate preparation belongs to Auto Mode ON. The intentionally
+    // Candidate preparation belongs to Auto Book ON. The intentionally
     // malformed final gate keeps this calendar-only fixture from submitting.
     const prefs = { email: 'fixture@example.invalid', password: 'synthetic-password', consulate: 'Vancouver', earliest: '2026-11-01', latest: '2026-12-31', onlyEarlier: true, autoMode: true, interval: 60, paidIvr: '22222222', unpaidIvr: '' };
     // Let the configuration-change handler finish before installing a run;

@@ -97,7 +97,7 @@ for (const testMode of [true, false]) {
         }).toBe(true);
       };
       if (testMode) {
-        // Legacy Test Mode ON is Auto Mode OFF: no direct submit, dialog,
+        // Legacy Test Mode ON is Auto Book OFF: no direct submit, dialog,
         // booking intent or verification, and monitoring continues.
         await panel.evaluate(async () => {
           const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;

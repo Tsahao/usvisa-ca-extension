@@ -387,7 +387,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
 
   const act = async (request: PaidAction, nextStage: BookingStage): Promise<EngineState> => {
     const actionStep = paidActionStep(request.action);
-    // Reread durable Auto Mode and policy immediately before the mutation.
+    // Reread durable Auto Book and policy immediately before the mutation.
     if (deps.isCancelled?.() || !await prefsUnchanged()) return park(deps.isCancelled?.() ? 'cancelled' : 'config-changed');
     const entryAction = ['schedule', 'reschedule', 'warning', 'applicants'].includes(request.action) ? request.action as NonNullable<EngineState['executor']>['entryAction'] : undefined;
     state = { ...state, failureContext: blockedFailureContext('checkpoint-interrupted', actionStep), executor: { ...state.executor!, entryAction, actionPending: true }, updatedAt: deps.nowIso() };
@@ -582,11 +582,11 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
         return pace('form');
       }
       if (!prefs.autoMode) {
-        // Defense in depth: only explicit Auto Mode ON may submit.
+        // Defense in depth: only explicit Auto Book ON may submit.
         if (!await prefsUnchanged() || deps.isCancelled?.()) return park(deps.isCancelled?.() ? 'cancelled' : 'config-changed');
         return { ...applyPollResult(state, { outcome: 'healthy', now: deps.nowIso(), random: deps.random }), stage: null };
       }
-      // Live submission (Auto Mode explicitly ON, user authorization October
+      // Live submission (Auto Book explicitly ON, user authorization October
       // 15, 2026 for the no-gate case only): click the validated
       // Schedule/Reschedule submit with a valid gate or with a fully absent
       // gate. A valid gate opens the recognized confirmation dialog for

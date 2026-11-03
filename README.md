@@ -27,7 +27,7 @@ or the official scheduling provider.
   minimum still applies.
   This memory survives saving and reopening Settings. Existing single-consulate
   settings migrate automatically.
-- **Auto Mode:** a visible **Login and preferences** setting, defaulting **ON**.
+- **Auto Book:** a visible **Login and preferences** setting, defaulting **ON**.
   In Book, ON automatically books a matching slot; OFF keeps refreshing
   availability and updating the panel, and sends a desktop notification for a
   matching date without filling or submitting it. It has no effect on Alerts.
@@ -106,7 +106,7 @@ available after a successful retry, so a run need not stall to be investigated.
 
 Configured production builds send five limited, pseudonymous PostHog usage
 events: installation, accepted workflow Start, terminal workflow failure,
-validated unpaid-alert activation, and verified successful booking (Auto Mode ON only). Count
+validated unpaid-alert activation, and verified successful booking (Auto Book ON only). Count
 `appointment_booked` events in PostHog to measure bookings made by the extension.
 New verified-booking events include `appointment_date` (exact booked calendar
 date, `YYYY-MM-DD`) and `visa_classes` (sorted distinct allowlisted codes, e.g.
@@ -163,7 +163,7 @@ The development preview and probe are test tools; the production build omits
 the probe. Automated verification is synthetic. The owner also reports
 successful live initial-booking and rescheduling checks in prior releases with
 Test Mode ON and OFF; this is user-reported evidence, not an independent live
-retest of Auto Mode. Recovery,
+retest of Auto Book. Recovery,
 cooldown/resume and diagnostics behavior are covered by synthetic tests only;
 this document makes no live-verification claim for them. In the development
 probe, **Read/export developer diagnostics** shows the bounded local log

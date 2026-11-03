@@ -73,7 +73,7 @@ describe('cross-component review regressions', () => {
     return available;
   }
 
-  it('keeps refreshing paid dates and notifying on changes with Auto Mode OFF, including across worker wakes', async () => {
+  it('keeps refreshing paid dates and notifying on changes with Auto Book OFF, including across worker wakes', async () => {
     const available = paidMonitoring(false);
     await fire();
     expect(state()).toMatchObject({ status: 'running', stage: null, lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' }, intent: null, verification: null });
@@ -119,14 +119,14 @@ describe('cross-component review regressions', () => {
     expect(stored.paidMonitorV1.monitor.alert.pending).toBe(false);
   });
 
-  it('advances a paid candidate to booking only with Auto Mode ON', async () => {
+  it('advances a paid candidate to booking only with Auto Book ON', async () => {
     paidMonitoring(true);
     await fire();
     expect(state()).toMatchObject({ status: 'running', stage: 'form', lastCandidate: { date: '2026-11-19', consulate: 'Vancouver' } });
     expect(mock.notifications.create).not.toHaveBeenCalled();
   });
 
-  it.each([true, false])('leaves Date Alerts behavior unchanged with Auto Mode %s', async autoMode => {
+  it.each([true, false])('leaves Date Alerts behavior unchanged with Auto Book %s', async autoMode => {
     stored.uiPreferencesV1 = { ...prefs, autoMode };
     stored.engineStateV1 = { ...seed('alerts'), policyKey: policyKey(stored.uiPreferencesV1), monitorTabId: 7 };
     tabs = [{ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/33333333/payment' }];

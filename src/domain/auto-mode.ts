@@ -1,4 +1,4 @@
-// New preferences use the positive Auto Mode flag. Keep reading the inverse
+// New preferences use the positive Auto Book flag. Keep reading the inverse
 // legacy bit so an upgrade never silently changes booking authorization.
 // An explicit but malformed new flag must not fall back to a legacy live bit.
 export function readAutoMode(preferences: unknown): boolean | null {

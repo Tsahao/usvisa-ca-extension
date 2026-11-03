@@ -94,7 +94,7 @@ describe('synthetic paid flow with serialized page adapters', () => {
     expect(state.executor?.applicantIds).toEqual(roster);
     expect(submit).toHaveBeenCalledTimes(bare && !changedRoster && !changedDate ? 1 : 0);
     expect(applicantChanged).not.toHaveBeenCalled();
-    // Only the bare fixture has a validated final portal form. Auto Mode
+    // Only the bare fixture has a validated final portal form. Auto Book
     // submits it once; missing final form metadata still refuses the click.
     expect(document.querySelectorAll('.reveal-overlay [data-reveal]')).toHaveLength(0);
     if (drop || changedRoster || changedDate) {

@@ -149,7 +149,7 @@ const analytics = analyticsConfig ? createAnalyticsTracker(analyticsConfig) : nu
 
 // Automatic discovery has no workflow mode until the dashboard is known.
 // Emit the existing Start milestone only for the resolved workflow. Its
-// non-secret policy already retains the inverse Auto Mode bit; no credential
+// non-secret policy already retains the inverse Auto Book bit; no credential
 // read, new event type, or analytics-dependent workflow checkpoint is needed.
 function trackDiscoveredStart(state: import('./engine/workflow').EngineState): void {
   if (!analytics || state.status !== 'running' || !state.group || state.intent) return;
@@ -1915,7 +1915,7 @@ function queueEnginePoll(): void {
           return;
         }
         // Booking stages prepare the owned form before polling, then fill a
-        // candidate: one verified stage per alarm, with final Auto Mode guards.
+        // candidate: one verified stage per alarm, with final Auto Book guards.
         // Submission/confirmation checkpoint exceptions route into automatic
         // verification (never a replay) when a durable intent exists; other
         // exceptions preserve the run for retry.
@@ -2178,7 +2178,7 @@ function queueEnginePoll(): void {
         if (candidate === null && applied.executor) applied.executor = { ...applied.executor, skippedDates: [] };
         const recorded = recordCandidate(applied, candidate, stamped);
         if (readAutoMode(prefs) === false) {
-          // Auto Mode OFF is a monitor, not a dry run: no candidate field
+          // Auto Book OFF is a monitor, not a dry run: no candidate field
           // changes, time requests, submit, confirmation, or booking intent.
           // The lifecycle already validated this group's current policy. A
           // different policy starts a fresh local notification scope.

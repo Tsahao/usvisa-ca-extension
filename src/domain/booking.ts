@@ -18,7 +18,7 @@ export type BookingExpectation = {
   selected: Consulate[];
   currentDate: string | null;
   prefs: DatePreferences;
-  testMode: boolean; // Legacy inverse bit: true means Auto Mode OFF.
+  testMode: boolean; // Legacy inverse bit: true means Auto Book OFF.
 };
 
 export type GuardDenial =
@@ -36,7 +36,7 @@ function isDigitId(value: unknown): value is string {
 
 // Pre-submit guard. Denials use fixed tokens so group identifiers, applicant
 // lists, and dates never leak into diagnostics. The legacy inverse mode bit
-// denies even a fully eligible form when Auto Mode is OFF.
+// denies even a fully eligible form when Auto Book is OFF.
 export function guardBooking(
   form: BookingForm,
   expected: BookingExpectation,

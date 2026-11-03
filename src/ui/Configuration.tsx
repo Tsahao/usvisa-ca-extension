@@ -24,7 +24,7 @@ export function Configuration({ preferences, active, save, cancel, trackScroll, 
   const [focused, setFocused] = useState<keyof Preferences | null>(null);
   // Preferences arrive asynchronously; without this, a config screen opened
   // before loading finishes would display (and could save) stale values —
-  // including a stale Auto Mode position.
+  // including a stale Auto Book position.
   useEffect(() => {
     setDraft(withMinimumInterval(structuredClone(preferences)));
     setCompleted({});

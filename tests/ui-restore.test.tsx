@@ -87,7 +87,7 @@ describe('paid/unpaid workflow retention', () => {
     expect(screen.queryByRole('list')).toBeNull();
   });
 
-  it.each([true, false])('migrates saved Test Mode %s to inverse Auto Mode and saves only the new preference', async testMode => {
+  it.each([true, false])('migrates saved Test Mode %s to inverse Auto Book and saves only the new preference', async testMode => {
     const { autoMode: _autoMode, ...legacy } = DEMO_PREFERENCES;
     const { localState } = stubExtension({ preferences: { ...legacy, testMode }, snapshot: idleSnapshot('booking') });
     const { App } = await import('../src/ui/App');
@@ -96,7 +96,7 @@ describe('paid/unpaid workflow retention', () => {
     await screen.findByRole('button', { name: 'Start' });
     expect(screen.queryByText(/Test Mode/)).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    expect((screen.getByRole('switch', { name: 'Auto Mode' }) as HTMLInputElement).checked).toBe(!testMode);
+    expect((screen.getByRole('switch', { name: 'Auto Book' }) as HTMLInputElement).checked).toBe(!testMode);
     expect(screen.getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded')).toBe('false');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(localState.uiPreferencesV1).toMatchObject({ autoMode: !testMode });

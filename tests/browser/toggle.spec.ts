@@ -20,7 +20,7 @@ test('all setup and Settings switches share the Figma capsule geometry in both s
   await page.getByRole('button', { name: 'Fill synthetic preferences' }).click();
   await page.getByRole('button', { name: 'Open configuration' }).click();
   await page.getByRole('button', { name: 'Advanced', exact: true }).click();
-  for (const label of ['Auto Mode', 'Earlier appointments only']) {
+  for (const label of ['Auto Book', 'Earlier appointments only']) {
     const control = page.getByRole('switch', { name: label, exact: true });
     await expectFigmaToggle(control, true);
     await control.uncheck();
@@ -33,7 +33,7 @@ test('all setup and Settings switches share the Figma capsule geometry in both s
   await page.getByRole('button', { name: 'Start preview' }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Advanced', exact: true }).click();
-  for (const label of ['Auto Mode', 'Earlier appointments only']) {
+  for (const label of ['Auto Book', 'Earlier appointments only']) {
     const control = page.getByRole('switch', { name: label, exact: true });
     await expect(control).toBeDisabled();
     await expectFigmaToggle(control, true);

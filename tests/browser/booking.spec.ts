@@ -87,7 +87,7 @@ for (const testMode of [true, false]) {
         }).toBe(true);
       };
       if (testMode) {
-        // Legacy Test Mode ON is Auto Mode OFF: it never submits a candidate
+        // Legacy Test Mode ON is Auto Book OFF: it never submits a candidate
         // and continues monitoring without intent or verification reads.
         await panel.evaluate(async () => {
           const state = (await chrome.storage.local.get('engineStateV1')).engineStateV1 as EngineState;

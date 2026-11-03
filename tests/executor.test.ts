@@ -399,7 +399,7 @@ describe('paid executor', () => {
     expect((await runBookingStage(h.d, next)).status).toBe('verifying');
     expect(h.d.createTab).toHaveBeenCalledTimes(1);
   });
-  it.each([false, true])('prepares the monitoring gateway with Auto Mode %s', async autoMode => {
+  it.each([false, true])('prepares the monitoring gateway with Auto Book %s', async autoMode => {
     const h = harness('actions');
     h.d.loadPrefs = async () => ({ ...PREFS, autoMode });
     expect((await runBookingStage(h.d, { ...seeded('actions'), lastCandidate: null })).status).toBe('running');
@@ -456,7 +456,7 @@ describe('paid executor', () => {
     expect(h.mutations[0].action).toBe(action);
     if (action === 'time') expect(next.executor?.targetTime).toBe('09:15');
   });
-  it('keeps monitoring with Auto Mode OFF without reading or filling a matched form', async () => {
+  it('keeps monitoring with Auto Book OFF without reading or filling a matched form', async () => {
     const h = harness('form');
     h.d.loadPrefs = async () => ({ ...PREFS, autoMode: false });
     const next = await runBookingStage(h.d, seeded('form'));
