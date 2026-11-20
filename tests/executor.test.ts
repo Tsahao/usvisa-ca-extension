@@ -4,6 +4,7 @@ import { recordCandidate, setStage, type BookingStage } from '../src/engine/poll
 import { runAuthentication } from '../src/engine/authentication';
 import { runBookingStage, type ExecDeps } from '../src/engine/executor';
 import type { DiagnosticEvent } from '../src/domain/diagnostics';
+import { needsNavigationRecovery } from '../src/engine/navigation-recovery';
 import type { PaidPage } from '../src/adapter/paid';
 import type { PaidAction } from '../src/adapter/acts';
 
@@ -1048,4 +1049,67 @@ describe('safe broader recovery', () => {
     const next = await runBookingStage(h.d, { ...seeded('form'), formLoadFailures: 9 });
     expect(next).toMatchObject({ formLoadFailures: 0, status: 'verifying', stage: 'done', intent: { phase: 'prepared' } });
   });
+});
+
+
+describe('acknowledged preliminary navigation handoff', () => {
+  it('waits without repeating an acknowledged Schedule GET while the old document remains visible', async () => {
+    const h = harness('actions'); const initial = { ...seeded('actions'), lastCandidate: null };
+    let s = validateEngineState(await runBookingStage(h.d, initial));
+    expect(s).toMatchObject({ stage: 'warning', executor: { actionPending: false, handoff: { source: `${BASE}/continue_actions`, stage: 'warning' } } });
+    const injected = vi.mocked(h.d.inject).mock.calls.length;
+    s = validateEngineState(await runBookingStage(h.d, s));
+    expect(s.authentication).toBeNull(); expect(s.stage).toBe('warning');
+    expect(h.mutations).toHaveLength(1); expect(vi.mocked(h.d.inject).mock.calls).toHaveLength(injected);
+    h.d.getTab = vi.fn(async () => ({ id: 7, url: `${BASE}/appointment`, status: 'complete' }));
+    h.page.kind = 'warning';
+    s = validateEngineState(await runBookingStage(h.d, s));
+    expect(s.executor?.handoff).toBeUndefined(); expect(s.stage).toBe('applicants');
+    expect(h.mutations.map(m => m.action)).toEqual(['reschedule', 'warning']);
+  });
+
+  for (const status of ['loading', 'complete'] as const) {
+    it(`does not trigger renewal or inject into a lingering dashboard (${status}) at warning`, async () => {
+      const h = harness('warning'); let s = seeded('warning');
+      const source = 'https://ais.usvisa-info.com/en-ca/niv/groups/55555555';
+      s = { ...s, lastCandidate: null, group: { ...s.group!, dashboardPath: '/en-ca/niv/groups/55555555' }, executor: { ...s.executor!,
+        handoff: { source, stage: 'warning', runId: RUN, policyKey: s.policyKey, deadline: '2026-10-12T00:00:15.000Z' } } };
+      const tab = { id: 7, url: source, pendingUrl: `${BASE}/appointment`, status };
+      expect(needsNavigationRecovery(s, tab)).toBe(false);
+      h.d.getTab = vi.fn(async () => tab);
+      s = validateEngineState(await runBookingStage(h.d, s));
+      expect(s.authentication).toBeNull(); expect(h.d.inject).not.toHaveBeenCalled();
+      expect(reconcileStartup(s, NOW).executor?.handoff).toBeDefined();
+      expect(reconcileStartup(s, NOW, true).status).toBe('verifying');
+      h.d.nowIso = () => '2026-10-12T00:00:15.000Z';
+      s = validateEngineState(await runBookingStage(h.d, s));
+      expect(s).toMatchObject({ status: 'running', consecutiveFailures: 1, authentication: { purpose: 'renew', dashboardFirst: true, phase: 'retry' } });
+      expect(s.executor?.handoff).toBeUndefined();
+      expect(h.d.inject).not.toHaveBeenCalled();
+      expect(Date.parse(s.nextPollAt!)).toBeGreaterThan(Date.parse(h.d.nowIso()));
+    });
+  }
+
+  it.each(['tab', 'group', 'policy', 'run', 'query', 'Stop'])('refuses changed %s during handoff without injections', async change => {
+    const h = harness('actions'); let s = validateEngineState(await runBookingStage(h.d, { ...seeded('actions'), lastCandidate: null }));
+    vi.mocked(h.d.inject).mockClear();
+    if (change === 'tab') h.d.getTab = vi.fn(async () => ({ id: 8, url: `${BASE}/continue_actions` }));
+    if (change === 'group') h.d.getTab = vi.fn(async () => ({ id: 7, url: 'https://ais.usvisa-info.com/en-ca/niv/schedule/99999999/appointment' }));
+    if (change === 'query') h.d.getTab = vi.fn(async () => ({ id: 7, url: `${BASE}/appointment?applicants[]=99999999` }));
+    if (change === 'policy') s = { ...s, executor: { ...s.executor!, handoff: { ...s.executor!.handoff!, policyKey: 'changed' } } };
+    if (change === 'run') s = { ...s, executor: { ...s.executor!, handoff: { ...s.executor!.handoff!, runId: 'other-run-id' } } };
+    if (change === 'Stop') h.d.isCancelled = () => true;
+    s = await runBookingStage(h.d, s);
+    expect(s.status).toBe('verifying'); expect(h.d.inject).not.toHaveBeenCalled(); expect(s.authentication).toBeNull();
+  });
+});
+
+it('keeps repeated preliminary handoff stalls on the durable entry recovery budget', async () => {
+  const h = harness('actions'); let s = await runBookingStage(h.d, { ...seeded('actions'), lastCandidate: null });
+  s = { ...s, entryRecoveryFailures: 9 };
+  h.d.nowIso = () => '2026-10-12T00:00:15.000Z';
+  s = validateEngineState(await runBookingStage(h.d, s));
+  expect(s).toMatchObject({ consecutiveFailures: 10, entryRecoveryFailures: 0,
+    cooldownUntil: '2026-10-12T00:30:15.000Z', nextPollAt: null, authentication: { phase: 'retry' } });
+  expect(h.mutations).toHaveLength(1);
 });

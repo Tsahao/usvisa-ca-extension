@@ -199,3 +199,15 @@ describe('independent local diagnostics recording', () => {
     expect(h.schedule).toHaveBeenLastCalledWith(null);
   });
 });
+
+it('keeps navigation/renewal attribution local and sanitizes unknown properties', () => {
+  const at = { guard: 'transition', live: 'account', pending: 'index', transition: 'login-submit', url: 'https://example.invalid/private' };
+  const log = validateDiagnostics({ version: 1, entries: [{ at: NOW, code: 'auth-terminal', navigation: at, renewalTrigger: 'age-budget' }] });
+  expect(log.entries[0].navigation).toEqual({ guard: 'transition', live: 'account', pending: 'index', transition: 'login-submit' });
+  expect(JSON.stringify(log)).not.toContain('example.invalid');
+  const snapshot = diagnosticsSnapshot(log, NOW);
+  expect(snapshot.entries[0].navigation).toBeUndefined(); expect(snapshot.entries[0].renewalTrigger).toBeUndefined();
+  expect(() => validateDiagnostics({ version: 1, entries: [{ at: NOW, code: 'auth-terminal', navigation: { ...at, pending: 'private-url' } }] })).toThrow();
+  const again = appendDiagnostic(log, { code: 'auth-terminal', navigation: { guard: 'pending', live: 'account', pending: 'none', transition: 'login-submit' }, renewalTrigger: 'navigation-recovery' }, stamp(1));
+  expect(again.entries).toHaveLength(2);
+});

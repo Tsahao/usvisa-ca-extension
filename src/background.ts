@@ -112,9 +112,9 @@ function noteExceptionRecovery(state: import('./engine/workflow').EngineState): 
 // Tracked begin: records the fixed auth-started transition with the run
 // purpose/mode only. A refused begin (context/status guard) changes nothing
 // and records nothing.
-function beginTrackedAuthentication(state: import('./engine/workflow').EngineState, purpose: 'start' | 'renew' | 'verify', now: string, random: () => number, dashboardFirst = false): import('./engine/workflow').EngineState {
-  const next = beginAuthentication(state, purpose, now, random, dashboardFirst);
-  if (next !== state && next.authentication) noteDiagnostic('auth-started', { purpose, mode: next.mode });
+function beginTrackedAuthentication(state: import('./engine/workflow').EngineState, purpose: 'start' | 'renew' | 'verify', now: string, random: () => number, dashboardFirst = false, trigger: import('./engine/workflow').AuthenticationState['renewalTrigger'] = dashboardFirst ? 'navigation-recovery' : 'unknown'): import('./engine/workflow').EngineState {
+  const next = beginAuthentication(state, purpose, now, random, dashboardFirst, trigger);
+  if (next !== state && next.authentication) noteDiagnostic('auth-started', { purpose, mode: next.mode, ...(purpose === 'renew' ? { renewalTrigger: trigger } : {}) });
   return next;
 }
 
@@ -1749,7 +1749,8 @@ function queueEnginePoll(): void {
           }
         }
         if ((sessionExpired || navigationRecovery) && !state.intent && state.policyKey === policyKey(durablePrefs)) {
-          const next = beginTrackedAuthentication(state, 'renew', now, Math.random, navigationRecovery);
+          const next = beginTrackedAuthentication(state, 'renew', now, Math.random, navigationRecovery, navigationRecovery ? 'navigation-recovery' :
+            state.startedAt !== null && Date.parse(now) - Date.parse(state.startedAt) >= SESSION_AGE_MINUTES * 60_000 ? 'age-budget' : 'login-observed');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;
@@ -1805,7 +1806,7 @@ function queueEnginePoll(): void {
             : matchingPayments.find(tab => tab.id === state.monitorTabId);
           if (payment?.id === undefined) {
             if (paymentTabs.some(tab => classifyRoute(tab.url ?? '') === 'login')) {
-              const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
+              const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random, false, 'login-observed');
               await saveEngineState(area, next);
               await syncEngineAlarm(engineAlarmAt(next));
               return;
@@ -1931,7 +1932,7 @@ function queueEnginePoll(): void {
                 verification: { reads: [], nextReadAt: new Date(Date.parse(at) + 30_000).toISOString() } };
             } else throw new Error('Engine poll alarm failed.');
           }
-          if (next!.status === 'stopped' && !next!.intent) next = beginTrackedAuthentication(prepared, 'renew', new Date().toISOString(), Math.random);
+          if (next!.status === 'stopped' && !next!.intent) next = beginTrackedAuthentication(prepared, 'renew', new Date().toISOString(), Math.random, false, 'handoff-recovery');
           if (next !== state) await saveEngineState(area, next!);
           await syncEngineAlarm(engineAlarmAt(next!));
           return;
@@ -2016,7 +2017,7 @@ function queueEnginePoll(): void {
               typeof reading.status === 'number' && Number.isInteger(reading.status) && reading.status >= 0 && reading.status <= 599) {
             if (mapHttpStatus(reading.status) === 'denied') {
               noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
-              const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
+              const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random, false, 'denied-read');
               await saveEngineState(area, next);
               await syncEngineAlarm(engineAlarmAt(next));
             } else await retryRead('transport');
@@ -2068,7 +2069,7 @@ function queueEnginePoll(): void {
           // revalidates live custody, group, baseline and roster before any
           // booking action, and preserves the paced failure/cooldown deadline.
           const failed = pollRetry(state, page ? 'reply-malformed' : 'reply-missing');
-          const auth = beginTrackedAuthentication(failed, 'renew', new Date().toISOString(), Math.random);
+          const auth = beginTrackedAuthentication(failed, 'renew', new Date().toISOString(), Math.random, false, 'handoff-recovery');
           const next = auth.authentication ? { ...auth, nextPollAt: failed.nextPollAt, cooldownUntil: failed.cooldownUntil } : auth;
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
@@ -2110,7 +2111,7 @@ function queueEnginePoll(): void {
         if (cancelledRuns.has(`${state.owner}:${state.runId}`)) { await park('cancelled'); return; }
         if (denied) {
           noteDiagnostic('poll-denied', { mode: state.mode, outcome: 'denied' });
-          const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random);
+          const next = beginTrackedAuthentication(state, 'renew', new Date().toISOString(), Math.random, false, 'denied-read');
           await saveEngineState(area, next);
           await syncEngineAlarm(engineAlarmAt(next));
           return;

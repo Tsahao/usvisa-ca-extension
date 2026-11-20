@@ -18,7 +18,7 @@ import { fetchTimesJson, type PollResponse } from '../adapter/poll';
 import { applyPollResult, setStage, type BookingStage } from './poll';
 import { isEntryCheckpoint, parkForReview, recordIntent, type EngineState } from './workflow';
 import { policyKey } from './lifecycle';
-import { trustedRenewalUrl } from './navigation-recovery';
+import { entryHandoff, trustedRenewalUrl } from './navigation-recovery';
 import { beginAuthentication, recoverMaintenance } from './authentication';
 import { observeMaintenance } from './maintenance';
 import { performAppointmentSubmission, waitForAppointmentDialog, type SubmissionRequest } from '../adapter/confirmation';
@@ -97,6 +97,12 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     try { deps.recordDiagnostic?.({ code, ...(detail === undefined ? {} : { detail }), mode: 'booking', ...(isDiagnosticPhase(stage) ? { phase: stage } : {}),
       ...(failures === undefined ? {} : { failures }) }); } catch { /* Diagnostics never gate booking. */ }
   };
+  const trackedRenew: typeof beginAuthentication = (...args) => {
+    const next = beginAuthentication(...args);
+    try { if (next !== args[0] && next.authentication) deps.recordDiagnostic?.({ code: 'auth-started', purpose: 'renew', mode: next.mode,
+      renewalTrigger: next.authentication.renewalTrigger }); } catch { /* Local attribution cannot gate work. */ }
+    return next;
+  };
   const verify = (): EngineState => {
     note('executor-verification', 'action-unconfirmed');
     return { ...parkForReview(state, deps.nowIso()), stage: 'done',
@@ -152,7 +158,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   const recoverEntry = (): EngineState => {
     const failed = retry('reply-missing');
     if (failed.status !== 'running' || failed.intent) return failed;
-    const renewed = beginAuthentication(failed, 'renew', deps.nowIso(), deps.random);
+    const renewed = trackedRenew(failed, 'renew', deps.nowIso(), deps.random, false, 'handoff-recovery');
     return renewed.authentication ? { ...renewed, nextPollAt: failed.nextPollAt, cooldownUntil: failed.cooldownUntil } : renewed;
   };
   // Both dashboard handoff and sole-applicant re-entry use fresh baseline
@@ -200,7 +206,7 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     // Re-enter on the owned tab with the new baseline and no stale candidate.
     // This also selects the correct initial/reschedule gateway after a
     // booked/unbooked transition. No click is authorized by this read alone.
-    return beginAuthentication(state, 'renew', deps.nowIso(), deps.random, true);
+    return trackedRenew(state, 'renew', deps.nowIso(), deps.random, true, 'navigation-recovery');
   };
   const baselineInvalid = (error: unknown): EngineState => {
     const message = error instanceof Error ? error.message : '';
@@ -230,6 +236,25 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
   const tabId = state.executor!.tabId;
   let owned: ExecTab;
   try { owned = await deps.getTab(tabId); } catch { return park('tab-lost'); }
+  const handoff = entryHandoff(state, owned);
+  if (handoff === 'refuse') return park('untrusted-url');
+  if (handoff === 'wait') {
+    if (deps.isCancelled?.() || !await prefsUnchanged()) return park(deps.isCancelled?.() ? 'cancelled' : 'config-changed');
+    const deadline = Date.parse(state.executor!.handoff!.deadline);
+    if (Date.parse(deps.nowIso()) < deadline) return pace(state.stage as BookingStage);
+    // Acknowledged preliminary GET did not settle. Count a paced rebuild,
+    // never repeat the click or reload a potentially submitted document.
+    const live = await deps.getTab(tabId);
+    if (entryHandoff(state, live) === 'refuse') return park('untrusted-url');
+    if (entryHandoff(state, live) === 'none') return pace(state.stage as BookingStage);
+    if (deps.isCancelled?.() || !await prefsUnchanged()) return park(deps.isCancelled?.() ? 'cancelled' : 'config-changed');
+    const failed = applyPollResult({ ...state, consecutiveFailures: state.entryRecoveryFailures ?? 0, lastCandidate: null, stage: null,
+      executor: { ...state.executor!, handoff: undefined } }, { outcome: 'retryable', now: deps.nowIso(), random: deps.random });
+    const renewed = trackedRenew({ ...failed, entryRecoveryFailures: failed.cooldownUntil ? 0 : failed.consecutiveFailures }, 'renew', deps.nowIso(), deps.random, true, 'handoff-recovery');
+    return renewed.authentication ? { ...renewed, nextPollAt: failed.nextPollAt, cooldownUntil: failed.cooldownUntil,
+      authentication: { ...renewed.authentication, phase: 'retry' } } : renewed;
+  }
+  if (state.executor!.handoff) state = { ...state, executor: { ...state.executor!, handoff: undefined } };
   if (!trusted(owned) || (owned.pendingUrl && owned.pendingUrl !== 'about:blank' && !trusted({ url: owned.pendingUrl }))) return park('untrusted-url');
   try {
     if (!state.executor!.actionPending && await observeMaintenance(deps, state, tabId)) {
@@ -291,9 +316,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       executor: { ...state.executor!, entryAction: undefined, actionPending: false, targetTime: null, skippedDates: [] } },
       { outcome: 'retryable', now: deps.nowIso(), random: deps.random });
     note('executor-retry', isDiagnosticDetail(detail) ? detail : undefined, failed.consecutiveFailures);
-    const renewed = beginAuthentication({ ...failed,
+    const renewed = trackedRenew({ ...failed,
       ...(entry ? { entryRecoveryFailures: failed.cooldownUntil ? 0 : failed.consecutiveFailures }
-        : { formLoadFailures: failed.cooldownUntil ? 0 : failed.consecutiveFailures }) }, 'renew', deps.nowIso(), deps.random, true);
+        : { formLoadFailures: failed.cooldownUntil ? 0 : failed.consecutiveFailures }) }, 'renew', deps.nowIso(), deps.random, true, 'handoff-recovery');
     return renewed.authentication ? { ...renewed, nextPollAt: failed.nextPollAt, cooldownUntil: failed.cooldownUntil,
       authentication: { ...renewed.authentication, phase: 'retry' } } : renewed;
   };
@@ -344,7 +369,8 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
       if (error instanceof ExecutorContextError) return park(error.code);
       return rebuild('navigation-unconfirmed', true);
     }
-    state = { ...state, executor: { ...state.executor!, entryAction: undefined, actionPending: false } };
+    state = { ...state, executor: { ...state.executor!, entryAction: undefined, actionPending: false, handoff: {
+      source: owned.url!, deadline: new Date(Date.parse(deps.nowIso()) + 15_000).toISOString(), runId: state.runId!, policyKey: state.policyKey, stage: 'actions' } } };
     return pace('actions');
   }
   let implicitApplicantId: string | null = null;
@@ -418,7 +444,9 @@ export async function runBookingStage(deps: ExecDeps, initial: EngineState): Pro
     if (result?.ok === false && transient.includes(result.reason)) return rebuild(adapterFailureCode(result));
     if (!result || result.ok !== true) return park(adapterFailureCode(result), actionStep);
     state = { ...state, failureContext: null,
-      executor: { ...state.executor!, entryAction: undefined, actionPending: false } };
+      executor: { ...state.executor!, entryAction: undefined, actionPending: false,
+        ...(['schedule', 'reschedule'].includes(request.action) && result.advanced !== false ? { handoff: {
+          source: owned.url!, deadline: new Date(Date.parse(deps.nowIso()) + 15_000).toISOString(), runId: state.runId!, policyKey: state.policyKey, stage: nextStage } } : {}) } };
     return pace(result.advanced === false ? state.stage as BookingStage : nextStage);
   };
   const request = { scheduleId };

@@ -166,6 +166,10 @@ export const DIAGNOSTIC_DETAILS = [
   'script-interrupted',
   'navigation-failed',
   'stalled-load',
+  // Local navigation guard attribution, never URLs or analytics properties.
+  'navigation-source-rejected',
+  'navigation-pending-rejected',
+  'navigation-custody-rejected',
   'trusted-progress',
   'transport',
   'maintenance',
@@ -230,7 +234,23 @@ export function isExtensionVersion(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 32 && /^[0-9]{1,8}(\.[0-9]{1,8}){0,3}$/.test(value);
 }
 
+// Fixed local attribution only. Snapshots/problem reports strip these fields;
+// analytics never receives them or any underlying URL.
+export const NAVIGATION_ROUTE_CLASSES = ['none', 'blank', 'dirty', 'foreign', 'unknown', 'root', 'login', 'account', 'index', 'saved-dashboard', 'foreign-dashboard', 'workflow'] as const;
+export const NAVIGATION_GUARDS = ['entry-dispatch', 'entry-recheck', 'transition', 'stalled-check', 'stalled-recheck', 'pending', 'dashboard', 'login-race', 'get-failure', 'fresh-get'] as const;
+export const TRANSITION_STATES = ['none', 'get-prepared', 'get-acknowledged', 'login-prepare', 'login-submit'] as const;
+export const RENEWAL_TRIGGERS = ['age-budget', 'navigation-recovery', 'denied-read', 'handoff-recovery', 'login-observed', 'maintenance', 'unknown'] as const;
+export type LocalNavigation = { guard: (typeof NAVIGATION_GUARDS)[number]; live: (typeof NAVIGATION_ROUTE_CLASSES)[number]; pending: (typeof NAVIGATION_ROUTE_CLASSES)[number]; transition: (typeof TRANSITION_STATES)[number] };
+function localNavigation(raw: unknown): LocalNavigation {
+  const v = raw as LocalNavigation;
+  if (!v || typeof v !== 'object' || !NAVIGATION_GUARDS.includes(v.guard) || !NAVIGATION_ROUTE_CLASSES.includes(v.live) ||
+      !NAVIGATION_ROUTE_CLASSES.includes(v.pending) || !TRANSITION_STATES.includes(v.transition)) throw new Error('Invalid local navigation attribution.');
+  return { guard: v.guard, live: v.live, pending: v.pending, transition: v.transition };
+}
+
 export type DiagnosticEntry = {
+  navigation?: LocalNavigation;
+  renewalTrigger?: (typeof RENEWAL_TRIGGERS)[number];
   at: string;
   code: DiagnosticCode;
   detail?: DiagnosticDetail;
@@ -287,7 +307,10 @@ export function validateDiagnostics(raw: unknown): DiagnosticsLog {
       throw new Error('Invalid diagnostics entry.');
     if (!(entry.count === undefined || (Number.isInteger(entry.count) && (entry.count as number) >= 1 && (entry.count as number) <= DIAGNOSTICS_REPEAT_LIMIT)))
       throw new Error('Invalid diagnostics entry.');
+    if (entry.renewalTrigger !== undefined && !RENEWAL_TRIGGERS.includes(entry.renewalTrigger as never)) throw new Error('Invalid renewal trigger.');
     return {
+      ...(entry.navigation === undefined ? {} : { navigation: localNavigation(entry.navigation) }),
+      ...(entry.renewalTrigger === undefined ? {} : { renewalTrigger: entry.renewalTrigger as (typeof RENEWAL_TRIGGERS)[number] }),
       at: entry.at as string,
       code: entry.code as DiagnosticCode,
       ...(entry.detail === undefined ? {} : { detail: entry.detail as DiagnosticDetail }),
@@ -322,7 +345,7 @@ export function pruneDiagnostics(log: DiagnosticsLog, now: string): DiagnosticsL
 // counters or build changed inside the coalescing window keeps a distinct
 // entry instead of silently rewriting history.
 function sameSignal(a: DiagnosticEntry, b: DiagnosticEvent): boolean {
-  return a.code === b.code && a.detail === b.detail && a.phase === b.phase && a.reason === b.reason &&
+  return JSON.stringify(a.navigation) === JSON.stringify(b.navigation) && a.renewalTrigger === b.renewalTrigger && a.code === b.code && a.detail === b.detail && a.phase === b.phase && a.reason === b.reason &&
     a.outcome === b.outcome && a.purpose === b.purpose && a.mode === b.mode &&
     a.failures === b.failures && a.extensionVersion === b.extensionVersion;
 }
@@ -364,6 +387,6 @@ export type DiagnosticsSnapshot = {
 export function diagnosticsSnapshot(log: DiagnosticsLog, now: string, extensionVersion: string | null = null): DiagnosticsSnapshot {
   const clean = pruneDiagnostics(log, now);
   if (extensionVersion !== null && !isExtensionVersion(extensionVersion)) throw new Error('Invalid extension version.');
-  return { version: DIAGNOSTICS_VERSION, extensionVersion, entries: clean.entries,
+  return { version: DIAGNOSTICS_VERSION, extensionVersion, entries: clean.entries.map(({ navigation: _local, renewalTrigger: _trigger, ...entry }) => entry),
     retention: { ttlMs: DIAGNOSTICS_TTL_MS, limit: DIAGNOSTICS_LIMIT } };
 }

@@ -59,6 +59,7 @@ export function needsNavigationRecovery(state: EngineState, tab: ExecTab): boole
       state.executor?.actionPending || ownedId == null || tab.id !== ownedId ||
       !isNavigationRecoveryUrl(state, tab.url) ||
       (tab.pendingUrl && !isNavigationRecoveryUrl(state, tab.pendingUrl))) return false;
+  if (entryHandoff(state, tab) === 'wait') return false;
   const expected = (url: string): boolean => {
     if (!trustedRenewalUrl(state, url)) return false;
     const route = classifyRoute(url);
@@ -68,4 +69,19 @@ export function needsNavigationRecovery(state: EngineState, tab: ExecTab): boole
     return route === 'appointment' || (state.stage !== null && route === 'actions');
   };
   return !expected(tab.url!) || (!!tab.pendingUrl && !expected(tab.pendingUrl));
+}
+
+// Only acknowledged preliminary GETs receive this short handoff permission.
+// It is not a general dashboard grace period and never authorizes a click.
+export function entryHandoff(state: EngineState, tab: ExecTab): 'none' | 'wait' | 'refuse' {
+  const h = state.executor?.handoff;
+  if (!h) return 'none';
+  if (state.intent || state.executor?.actionPending || state.mode !== 'booking' || state.authentication ||
+      tab.id !== state.executor?.tabId || h.runId !== state.runId || h.policyKey !== state.policyKey || h.stage !== state.stage ||
+      !trustedRenewalUrl(state, h.source)) return 'refuse';
+  const allowed = (url: string | undefined) => trustedRenewalUrl(state, url) || (() => {
+    try { return url === `${SITE_ORIGIN}/en-ca/niv/schedule/${state.group!.scheduleId}/continue`; } catch { return false; }
+  })();
+  if (!allowed(tab.url) || (tab.pendingUrl && !allowed(tab.pendingUrl))) return 'refuse';
+  return tab.url === h.source || tab.status === 'loading' || !!tab.pendingUrl ? 'wait' : 'none';
 }

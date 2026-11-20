@@ -74,9 +74,24 @@ export type ExecutorState = {
     reselected: boolean; refreshed: boolean; refreshNeeded: boolean; refused: string[];
   };
   loadingSince?: string;
+  handoff?: { source: string; deadline: string; runId: string; policyKey: string | null; stage: string };
   // Only these audited preliminary actions cannot submit a booking.
   entryAction?: 'dashboard-continue' | 'schedule' | 'reschedule' | 'warning' | 'applicants';
 };
+
+// Local custody evidence; acknowledgement is not document commitment.
+type TransitionBinding = {
+  source: string; tabId: number;
+  owner: string; runId: string; policyKey: string | null; scheduleId: string | null;
+  deadline: string; dispatched: boolean;
+  // Optional only for November 15 GET saves; new records capture all fields.
+  purpose?: 'start' | 'renew' | 'verify'; dashboardPath?: string | null;
+  cycleStartedAt?: string; originSource?: string;
+};
+
+export type OwnedGet = TransitionBinding & { kind?: 'get'; target: 'root' | 'sign-in'; action?: never };
+export type LoginActionTransition = TransitionBinding & { kind: 'login-action'; action: 'prepare' | 'submit'; target: 'sign-in' };
+export type AuthenticationTransition = OwnedGet | LoginActionTransition;
 
 export type AuthenticationState = {
   tabId: number | null; phase: 'prepare' | 'submit' | 'wait' | 'retry' | 'cycle-wait'; pending: boolean;
@@ -99,6 +114,8 @@ export type AuthenticationState = {
   // submitted a POST (never replayed; resumes read-only on worker wake).
   // Optional: unknown/legacy checkpoints still park for explicit review.
   checkpoint?: 'navigation' | 'action';
+  navigation?: AuthenticationTransition;
+  renewalTrigger?: 'age-budget' | 'navigation-recovery' | 'denied-read' | 'handoff-recovery' | 'login-observed' | 'maintenance' | 'unknown';
 };
 
 export type EngineState = {
@@ -285,8 +302,32 @@ export function validateEngineState(value: unknown): EngineState {
       throw new Error('Invalid authentication state.');
     if (auth.maintenanceRecovery !== undefined && auth.maintenanceRecovery !== true)
       throw new Error('Invalid authentication state.');
+    const navigation = auth.navigation;
+    if (navigation !== undefined && (!navigation || typeof navigation !== 'object' ||
+        typeof navigation.dispatched !== 'boolean' || !['root', 'sign-in'].includes(navigation.target) || typeof navigation.source !== 'string' || navigation.source.length > 4096 ||
+        !Number.isSafeInteger(navigation.tabId) || navigation.tabId < 0 || !isOpaqueId(navigation.owner) || !isOpaqueId(navigation.runId) ||
+        !(navigation.policyKey === null || (typeof navigation.policyKey === 'string' && navigation.policyKey.length <= 1024)) ||
+        !(navigation.scheduleId === null || (typeof navigation.scheduleId === 'string' && /^[0-9]{1,32}$/.test(navigation.scheduleId))) || !isIsoDateTime(navigation.deadline)))
+      throw new Error('Invalid owned navigation.');
+    if (navigation && (!(navigation.kind === undefined || ['get', 'login-action'].includes(navigation.kind)) ||
+        (navigation.kind === 'login-action' && (navigation.target !== 'sign-in' || !['prepare', 'submit'].includes(navigation.action ?? ''))) ||
+        (navigation.kind !== 'login-action' && navigation.action !== undefined) ||
+        (navigation.purpose !== undefined && !['start', 'renew', 'verify'].includes(navigation.purpose)) ||
+        !(navigation.dashboardPath === undefined || navigation.dashboardPath === null ||
+          /^\/en-ca\/niv\/groups(?:\/[0-9]+)?$/.test(navigation.dashboardPath)) ||
+        (navigation.cycleStartedAt !== undefined && !isIsoDateTime(navigation.cycleStartedAt)) ||
+        (navigation.originSource !== undefined && (typeof navigation.originSource !== 'string' || navigation.originSource.length > 4096))))
+      throw new Error('Invalid owned transition.');
+    if (auth.renewalTrigger !== undefined && !['age-budget', 'navigation-recovery', 'denied-read', 'handoff-recovery', 'login-observed', 'maintenance', 'unknown'].includes(auth.renewalTrigger))
+      throw new Error('Invalid renewal trigger.');
     authentication = { tabId: auth.tabId, phase: auth.phase, pending: auth.pending, startedAt: auth.startedAt, purpose: auth.purpose,
       cycleStartedAt, cycleDeadline, submittedInCycle,
+      ...(auth.renewalTrigger === undefined ? {} : { renewalTrigger: auth.renewalTrigger }),
+      ...(navigation === undefined ? {} : { navigation: { target: navigation.target, source: navigation.source, tabId: navigation.tabId,
+        owner: navigation.owner, runId: navigation.runId, policyKey: navigation.policyKey, scheduleId: navigation.scheduleId, deadline: navigation.deadline, dispatched: navigation.dispatched,
+        ...(navigation.kind === undefined ? {} : { kind: navigation.kind }), ...(navigation.action === undefined ? {} : { action: navigation.action }),
+        ...(navigation.purpose === undefined ? {} : { purpose: navigation.purpose }), ...(navigation.dashboardPath === undefined ? {} : { dashboardPath: navigation.dashboardPath }),
+        ...(navigation.cycleStartedAt === undefined ? {} : { cycleStartedAt: navigation.cycleStartedAt }), ...(navigation.originSource === undefined ? {} : { originSource: navigation.originSource }) } as AuthenticationTransition }),
       ...(auth.dashboardFirst === undefined ? {} : { dashboardFirst: auth.dashboardFirst }),
       ...(auth.maintenanceRecovery === undefined ? {} : { maintenanceRecovery: true as const }),
       ...(auth.checkpoint === undefined ? {} : { checkpoint: auth.checkpoint }) };
@@ -324,6 +365,11 @@ export function validateEngineState(value: unknown): EngineState {
       throw new Error('Invalid executor state.');
     if (value.entryAction !== undefined && !['dashboard-continue', 'schedule', 'reschedule', 'warning', 'applicants'].includes(value.entryAction))
       throw new Error('Invalid executor checkpoint.');
+    const handoff = value.handoff;
+    if (handoff !== undefined && (!handoff || typeof handoff !== 'object' || typeof handoff.source !== 'string' || handoff.source.length > 4096 ||
+        !isIsoDateTime(handoff.deadline) || !isOpaqueId(handoff.runId) ||
+        !(handoff.policyKey === null || (typeof handoff.policyKey === 'string' && handoff.policyKey.length <= 1024)) ||
+        !['actions', 'warning', 'applicants'].includes(handoff.stage))) throw new Error('Invalid entry handoff.');
     const rawSkipped: unknown = value.skippedDates ?? [];
     if (value.loadingSince !== undefined && !isIsoDateTime(value.loadingSince)) throw new Error('Invalid executor loading state.');
     if (!Array.isArray(rawSkipped) || rawSkipped.length > 3660) throw new Error('Invalid executor state.');
@@ -340,7 +386,8 @@ export function validateEngineState(value: unknown): EngineState {
         !Array.isArray(selection.refused) || selection.refused.length > 3 ||
         selection.refused.some(time => typeof time !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) ||
         new Set(selection.refused).size !== selection.refused.length)) throw new Error('Invalid time selection state.');
-    executor = { ...(selection === undefined ? {} : { timeSelection: {
+    executor = { ...(handoff === undefined ? {} : { handoff: { source: handoff.source, deadline: handoff.deadline,
+      runId: handoff.runId, policyKey: handoff.policyKey, stage: handoff.stage } }), ...(selection === undefined ? {} : { timeSelection: {
       consulate: selection.consulate, date: selection.date, requests: selection.requests, attempts: selection.attempts,
       reselected: selection.reselected, refreshed: selection.refreshed, refreshNeeded: selection.refreshNeeded, refused: [...selection.refused],
     } }), ...(value.entryAction === undefined ? {} : { entryAction: value.entryAction }), skippedDates: skippedDates.map(({ consulate, date }) => ({ consulate, date })), tabId: value.tabId, actionPending: value.actionPending, targetTime: value.targetTime,

@@ -1883,7 +1883,7 @@ describe('durable automatic authentication', () => {
       authentication: { tabId: 7, phase: 'prepare', pending: false, submittedInCycle: false } });
     expect(Date.parse(state.authentication!.cycleDeadline!) > Date.parse(deadlineBefore)).toBe(true);
     expect(Date.parse(state.authentication!.cycleDeadline!) > Date.parse(h.deps.nowIso())).toBe(true);
-    expect(navigateTab).toHaveBeenCalledExactlyOnceWith(7, root);
+    expect(navigateTab).toHaveBeenCalledExactlyOnceWith(7, 'https://ais.usvisa-info.com/en-ca/niv/users/sign_in');
     expect(vi.mocked(h.deps.inject).mock.calls.length).toBe(0);
     expect(h.actions).toEqual([]);
     // A second immediate pass with the same stuck pending does not recount:
